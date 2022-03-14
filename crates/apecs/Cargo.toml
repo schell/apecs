@@ -8,6 +8,7 @@ readme = "../../README.md"
 documentation = "https://docs.rs/apecs/"
 repository = "https://github.com/schell/apecs"
 categories = ["concurrency", "game-engines"]
+description = "An asyncronous and parallel entity-component system inspired by specs"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
