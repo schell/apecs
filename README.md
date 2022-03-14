@@ -14,7 +14,8 @@ short-lived systems.
 [x] fetch resources from the world asyncronously
 [x] variable systems, ie systems that exit early and change over time
 [x] support for general futures
-[#] system data derive macros
+[x] system data derive macros
 [ ] efficient component storages
 [ ] joins
 [ ] parallel system scheduling
+[ ] plugins/bundles

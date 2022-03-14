@@ -7,7 +7,7 @@ keywords = ["gamedev", "ecs", "async"]
 readme = "../../README.md"
 documentation = "https://docs.rs/apecs/"
 repository = "https://github.com/schell/apecs"
-categories = ["concurrency", "game engines"]
+categories = ["concurrency", "game-engines"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
