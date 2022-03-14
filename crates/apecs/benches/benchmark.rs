@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
 use apecs::{CanFetch, Facade, Read, Write};
-use criterion::{criterion_group, criterion_main, Criterion};
+use anyhow::Context;
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 pub struct Position {
     x: f32,
@@ -46,19 +47,22 @@ struct CreateSystemData<'a> {
     velocities: Write<'a, Velocities>,
 }
 
-async fn create_system(mut facade: Facade) -> anyhow::Result<()> {
+async fn create_n_system(mut facade: Facade, mut n: usize) -> anyhow::Result<()> {
     let CreateSystemData {
         mut entities,
         mut positions,
         mut velocities,
     } = facade.fetch::<CreateSystemData>().await?;
-    let a = entities.create_entity();
-    let _ = positions.0.insert(a, Position { x: 0.0 });
-    let _ = velocities.0.insert(a, Velocity { x: 1.0 });
 
-    let b = entities.create_entity();
-    let _ = positions.0.insert(b, Position { x: 79.0 });
-    let _ = velocities.0.insert(b, Velocity { x: -1.0 });
+    let mut xs = (0..79usize).cycle();
+    while n > 0 {
+        let x = xs.next().context("could not get x")?;
+        let a = entities.create_entity();
+        let _ = positions.0.insert(a, Position { x: x as f32 });
+        let _ = velocities.0.insert(a, Velocity { x: 1.0 });
+        n -= 1;
+    }
+
     Ok(())
 }
 
@@ -110,27 +114,32 @@ async fn print_system(mut facade: Facade) -> anyhow::Result<()> {
 }
 
 pub fn create_move_print(c: &mut Criterion) {
-    c.bench_function("1000 ticks", |b| {
-        b.iter(|| {
-            let mut world = apecs::World::default();
+    let mut group = c.benchmark_group("create_move_print");
+    for size in [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024] {
+        group.throughput(Throughput::Elements(size as u64));
+        group.bench_with_input(BenchmarkId::new("1000_ticks", size), &size, |b, s| {
+            b.iter(|| {
+                let mut world = apecs::World::default();
 
-            world
-                .add_resource(Entities {
-                    next_entity: 0,
-                    used: vec![],
-                })
-                .unwrap();
-            world.add_default_resource::<Positions>().unwrap();
-            world.add_default_resource::<Velocities>().unwrap();
-            world.spawn_system("create", create_system);
-            world.spawn_system("move", move_system);
-            world.spawn_system("print", print_system);
+                world
+                    .add_resource(Entities {
+                        next_entity: 0,
+                        used: vec![],
+                    })
+                    .unwrap();
+                world.add_default_resource::<Positions>().unwrap();
+                world.add_default_resource::<Velocities>().unwrap();
+                world.spawn_system("create", |f| create_n_system(f, *s));
+                world.spawn_system("move", move_system);
+                world.spawn_system("print", print_system);
 
-            for _ in 0..1000 {
-                world.tick().unwrap();
-            }
-        })
-    });
+                for _ in 0..1000 {
+                    world.tick().unwrap();
+                }
+            })
+        });
+    }
+    group.finish();
 }
 
 criterion_group!(benches, create_move_print);
