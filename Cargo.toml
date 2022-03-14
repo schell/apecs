@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "crates/apecs",
+    "crates/apecs-derive",
+    "crates/xtask",
+]
