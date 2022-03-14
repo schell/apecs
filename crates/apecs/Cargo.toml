@@ -15,10 +15,12 @@ description = "An asyncronous and parallel entity-component system inspired by s
 [lib]
 name = "apecs"
 path = "src/lib.rs"
+bench = false
 
 [[bin]]
 name = "apecs_example"
 path = "src/main.rs"
+bench = false
 
 [dependencies]
 anyhow = "^1.0"

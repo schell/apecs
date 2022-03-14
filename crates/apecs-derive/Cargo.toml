@@ -13,6 +13,7 @@ description = "derive macros for the apecs library"
 
 [lib]
 proc-macro = true
+bench = false
 
 [dependencies]
 proc-macro2 = "^1.0"

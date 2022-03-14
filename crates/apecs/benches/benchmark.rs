@@ -115,7 +115,7 @@ async fn print_system(mut facade: Facade) -> anyhow::Result<()> {
 
 pub fn create_move_print(c: &mut Criterion) {
     let mut group = c.benchmark_group("create_move_print");
-    for size in [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024] {
+    for size in [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048] {
         group.throughput(Throughput::Elements(size as u64));
         group.bench_with_input(BenchmarkId::new("1000_ticks", size), &size, |b, s| {
             b.iter(|| {
