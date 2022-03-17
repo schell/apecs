@@ -13,6 +13,10 @@ pub struct Bench {
     /// Path to the long-lived benchmark yaml file
     #[clap(long)]
     benchmark_file: Option<PathBuf>,
+
+    /// Whether to append this run to the historical benchmark file
+    #[clap(long)]
+    append: bool
 }
 
 impl Bench {
@@ -41,6 +45,11 @@ impl Bench {
         store.sort();
 
         let date = Utc::now();
+        if let Some(prev) = store.find_last() {
+            let elapsed = date - prev.date;
+            let days = elapsed.num_minutes() as f32 / (24.0 * 60.0);
+            tracing::info!("{:.2}days since last stored event", days);
+        }
 
         let output = duct::cmd!(
             "cargo",
@@ -68,7 +77,14 @@ impl Bench {
             if let Some(prev) = store.find_latest_by_name(&historical_benchmark.benchmark.name) {
                 let change_ns = historical_benchmark.benchmark.ns - prev.benchmark.ns;
                 let change_percent = (change_ns as f32 / prev.benchmark.ns as f32) * 100.0;
-                if change_percent > 0.0 {
+                if change_percent >= 10.0 {
+                    tracing::error!(
+                        "{} {} +{:.2}%",
+                        historical_benchmark.benchmark.name,
+                        historical_benchmark.benchmark.ns,
+                        change_percent
+                    );
+                } else if change_percent > 0.0 {
                     tracing::warn!(
                         "{} {} +{:.2}%",
                         historical_benchmark.benchmark.name,
@@ -87,9 +103,12 @@ impl Bench {
             store.benchmarks.push(historical_benchmark);
         }
 
-        if let Some(file) = self.benchmark_file.as_ref() {
-            let contents = serde_yaml::to_string(&store).context("could not serialize store")?;
-            std::fs::write(file, contents).context("could not write benchmark file")?;
+        if self.append {
+            if let Some(file) = self.benchmark_file.as_ref() {
+                let contents = serde_yaml::to_string(&store).context("could not serialize store")?;
+                std::fs::write(file, contents).context("could not write benchmark file")?;
+                tracing::info!("saved benchmark file '{}'", file.display());
+            }
         }
 
         Ok(())
@@ -173,18 +192,22 @@ impl HistoricalBenchmarks {
 
         None
     }
+
+    fn find_last(&self) -> Option<&HistoricalBenchmark> {
+        self.benchmarks.last()
+    }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
 
-    const bench_line: &'static str =
+    const BENCH_LINE: &'static str =
         "test presize_cubic_cpu/400 ... bench:    17041704 ns/iter (+/- 349284)";
 
     #[test]
     fn parse_bench() {
-        let (i, name) = parse_bench_result_start(bench_line).unwrap();
+        let (i, name) = parse_bench_result_start(BENCH_LINE).unwrap();
         assert_eq!(name, "presize_cubic_cpu/400");
 
         let (i, (ns, range)) = parse_bench_result_rest(i).unwrap();

@@ -198,3 +198,135 @@ benchmarks:
       ns: 53451937
       range: 449469
     tags: []
+  - date: "2022-03-14T07:23:49.392613Z"
+    benchmark:
+      name: create_move_print/1000_ticks/2
+      ns: 1769979
+      range: 6943
+    tags: []
+  - date: "2022-03-14T07:23:49.392613Z"
+    benchmark:
+      name: create_move_print/1000_ticks/4
+      ns: 1843944
+      range: 13539
+    tags: []
+  - date: "2022-03-14T07:23:49.392613Z"
+    benchmark:
+      name: create_move_print/1000_ticks/8
+      ns: 1960194
+      range: 8975
+    tags: []
+  - date: "2022-03-14T07:23:49.392613Z"
+    benchmark:
+      name: create_move_print/1000_ticks/16
+      ns: 2155579
+      range: 9273
+    tags: []
+  - date: "2022-03-14T07:23:49.392613Z"
+    benchmark:
+      name: create_move_print/1000_ticks/32
+      ns: 2597797
+      range: 12529
+    tags: []
+  - date: "2022-03-14T07:23:49.392613Z"
+    benchmark:
+      name: create_move_print/1000_ticks/64
+      ns: 3442434
+      range: 16517
+    tags: []
+  - date: "2022-03-14T07:23:49.392613Z"
+    benchmark:
+      name: create_move_print/1000_ticks/128
+      ns: 5097295
+      range: 30979
+    tags: []
+  - date: "2022-03-14T07:23:49.392613Z"
+    benchmark:
+      name: create_move_print/1000_ticks/256
+      ns: 8527736
+      range: 39784
+    tags: []
+  - date: "2022-03-14T07:23:49.392613Z"
+    benchmark:
+      name: create_move_print/1000_ticks/512
+      ns: 15350463
+      range: 73481
+    tags: []
+  - date: "2022-03-14T07:23:49.392613Z"
+    benchmark:
+      name: create_move_print/1000_ticks/1024
+      ns: 29042604
+      range: 189330
+    tags: []
+  - date: "2022-03-14T07:23:49.392613Z"
+    benchmark:
+      name: create_move_print/1000_ticks/2048
+      ns: 57055895
+      range: 324366
+    tags: []
+  - date: "2022-03-17T07:59:00.725474Z"
+    benchmark:
+      name: create_move_print/1000_ticks/2
+      ns: 2253905
+      range: 22007
+    tags: []
+  - date: "2022-03-17T07:59:00.725474Z"
+    benchmark:
+      name: create_move_print/1000_ticks/4
+      ns: 2199460
+      range: 19564
+    tags: []
+  - date: "2022-03-17T07:59:00.725474Z"
+    benchmark:
+      name: create_move_print/1000_ticks/8
+      ns: 2292374
+      range: 10653
+    tags: []
+  - date: "2022-03-17T07:59:00.725474Z"
+    benchmark:
+      name: create_move_print/1000_ticks/16
+      ns: 2329876
+      range: 12204
+    tags: []
+  - date: "2022-03-17T07:59:00.725474Z"
+    benchmark:
+      name: create_move_print/1000_ticks/32
+      ns: 2488839
+      range: 17284
+    tags: []
+  - date: "2022-03-17T07:59:00.725474Z"
+    benchmark:
+      name: create_move_print/1000_ticks/64
+      ns: 2718698
+      range: 17264
+    tags: []
+  - date: "2022-03-17T07:59:00.725474Z"
+    benchmark:
+      name: create_move_print/1000_ticks/128
+      ns: 3203385
+      range: 13552
+    tags: []
+  - date: "2022-03-17T07:59:00.725474Z"
+    benchmark:
+      name: create_move_print/1000_ticks/256
+      ns: 4212125
+      range: 18768
+    tags: []
+  - date: "2022-03-17T07:59:00.725474Z"
+    benchmark:
+      name: create_move_print/1000_ticks/512
+      ns: 6139847
+      range: 33053
+    tags: []
+  - date: "2022-03-17T07:59:00.725474Z"
+    benchmark:
+      name: create_move_print/1000_ticks/1024
+      ns: 10078812
+      range: 47832
+    tags: []
+  - date: "2022-03-17T07:59:00.725474Z"
+    benchmark:
+      name: create_move_print/1000_ticks/2048
+      ns: 17920881
+      range: 115970
+    tags: []
