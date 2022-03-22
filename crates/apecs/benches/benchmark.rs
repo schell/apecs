@@ -1,6 +1,6 @@
-use apecs::{CanFetch, Facade, Read, Write, storage::*};
 use anyhow::Context;
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use apecs::{storage::*, CanFetch, Facade, Read, Write};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 #[derive(Clone)]
 pub struct Position {
@@ -13,10 +13,10 @@ pub struct Velocity {
 }
 
 #[derive(CanFetch)]
-struct CreateSystemData<'a> {
-    entities: Write<'a, Entities>,
-    positions: Write<'a, VecStorage<Position>>,
-    velocities: Write<'a, VecStorage<Velocity>>,
+struct CreateSystemData {
+    entities: Write<Entities>,
+    positions: Write<VecStorage<Position>>,
+    velocities: Write<VecStorage<Velocity>>,
 }
 
 async fn create_n_system(mut facade: Facade, mut n: usize) -> anyhow::Result<()> {
@@ -39,9 +39,9 @@ async fn create_n_system(mut facade: Facade, mut n: usize) -> anyhow::Result<()>
 }
 
 #[derive(CanFetch)]
-pub struct MoveSystemData<'a> {
-    positions: Write<'a, VecStorage<Position>>,
-    velocities: Write<'a, VecStorage<Velocity>>,
+pub struct MoveSystemData {
+    positions: Write<VecStorage<Position>>,
+    velocities: Write<VecStorage<Velocity>>,
 }
 
 async fn move_system(mut facade: Facade) -> anyhow::Result<()> {
@@ -51,7 +51,7 @@ async fn move_system(mut facade: Facade) -> anyhow::Result<()> {
             mut velocities,
         } = facade.fetch::<MoveSystemData>().await?;
 
-        for (mut position, mut velocity) in (&mut positions, &mut velocities).join() {
+        for (_, mut position, mut velocity) in (&mut positions, &mut velocities).join() {
             position.x += velocity.x;
             if position.x >= 79.0 {
                 velocity.x = -1.0;
@@ -66,7 +66,7 @@ async fn print_system(mut facade: Facade) -> anyhow::Result<()> {
     loop {
         let positions = facade.fetch::<Read<VecStorage<Position>>>().await?;
         let mut line = vec![" "; 80];
-        for position in positions.join() {
+        for (_, position) in positions.join() {
             anyhow::ensure!(
                 position.x >= 0.0 && position.x <= 79.0,
                 "{} is an invalid position",
@@ -86,13 +86,16 @@ pub fn create_move_print(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("1000_ticks", size), &size, |b, s| {
             b.iter(|| {
                 let mut world = apecs::World::default();
-
-                world.add_default_resource::<Entities>().unwrap();
-                world.add_default_resource::<VecStorage<Position>>().unwrap();
-                world.add_default_resource::<VecStorage<Velocity>>().unwrap();
-                world.spawn_system("create", |f| create_n_system(f, *s));
-                world.spawn_system("move", move_system);
-                world.spawn_system("print", print_system);
+                world
+                    .with_default_resource::<Entities>()
+                    .unwrap()
+                    .with_default_resource::<VecStorage<Position>>()
+                    .unwrap()
+                    .with_default_resource::<VecStorage<Velocity>>()
+                    .unwrap()
+                    .with_async_system("create", |f| create_n_system(f, *s))
+                    .with_async_system("move", move_system)
+                    .with_async_system("print", print_system);
 
                 for _ in 0..1000 {
                     world.tick().unwrap();

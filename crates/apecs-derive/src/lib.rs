@@ -1,9 +1,10 @@
+use std::collections::VecDeque;
+
 use proc_macro2::Span;
 use quote::quote;
 use syn::{
     parse_macro_input, punctuated::Punctuated, token::Comma, Data, DataStruct, DeriveInput, Field,
-    Fields, FieldsNamed, FieldsUnnamed, Ident, Lifetime, Type, TypeTuple, WhereClause,
-    WherePredicate,
+    Fields, FieldsNamed, FieldsUnnamed, Ident, Type, TypeTuple, WhereClause, WherePredicate,
 };
 
 fn collect_field_types(fields: &Punctuated<Field, Comma>) -> Vec<Type> {
@@ -15,9 +16,9 @@ fn gen_identifiers(fields: &Punctuated<Field, Comma>) -> Vec<Ident> {
 }
 
 /// Adds a `CanFetch<'lt>` bound on each of the system data types.
-fn constrain_system_data_types(clause: &mut WhereClause, fetch_lt: &Lifetime, tys: &[Type]) {
+fn constrain_system_data_types(clause: &mut WhereClause, tys: &[Type]) {
     for ty in tys.iter() {
-        let where_predicate: WherePredicate = syn::parse_quote!(#ty : CanFetch< #fetch_lt >);
+        let where_predicate: WherePredicate = syn::parse_quote!(#ty : CanFetch);
         clause.predicates.push(where_predicate);
     }
 }
@@ -48,13 +49,13 @@ fn gen_from_body(ast: &Data, name: &Ident) -> (proc_macro2::TokenStream, Vec<Typ
 
             quote! {
                 #name {
-                    #( #identifiers: apecs::CanFetch::construct(tx, fields)? ),*
+                    #( #identifiers: apecs::CanFetch::construct(tx.clone(), fields)? ),*
                 }
             }
         }
         DataType::Tuple => {
             let count = tys.len();
-            let fetch = vec![quote! { SystemData::fetch(world) }; count];
+            let fetch = vec![quote! { apecs::CanFetch::construct(tx.clone(), fields) }; count];
 
             quote! {
                 #name ( #( #fetch ),* )
@@ -71,21 +72,16 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
 
     let name = input.ident;
     let (construct_return, tys) = gen_from_body(&input.data, &name);
-    let lt = input
-        .generics
-        .lifetimes()
-        .next()
-        .expect("There has to be at least one lifetime");
     let mut generics = input.generics.clone();
     {
         let where_clause = generics.make_where_clause();
-        constrain_system_data_types(where_clause, &lt.lifetime, &tys)
+        constrain_system_data_types(where_clause, &tys)
     }
 
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
     let output = quote! {
-        impl #impl_generics apecs::CanFetch<#lt> for #name #ty_generics #where_clause {
+        impl #impl_generics apecs::CanFetch for #name #ty_generics #where_clause {
             fn reads() -> Vec<apecs::ResourceId> {
                 let mut r = Vec::new();
                 #({
@@ -103,7 +99,7 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
             }
 
             fn construct(
-                tx: &'a apecs::spsc::Sender<(apecs::ResourceId, apecs::Resource)>,
+                tx: apecs::mpsc::Sender<(apecs::ResourceId, apecs::Resource)>,
                 fields: &mut std::collections::HashMap<apecs::ResourceId, apecs::Resource>,
             ) -> anyhow::Result<Self> {
                 Ok(#construct_return)
@@ -115,65 +111,125 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
 }
 
 #[proc_macro]
-pub fn define_join_tuple(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+pub fn impl_canfetch_tuple(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let tuple: TypeTuple = parse_macro_input!(input);
     let tys = tuple.elems.iter().collect::<Vec<_>>();
-    let constraints = tys.iter().map(|ty| quote! {#ty: Join}).collect::<Vec<_>>();
-    let mask = tys
-        .iter()
-        .rev()
-        .fold(None, |acc, ty| match acc {
-            None => Some(quote! {#ty::Mask}),
-            Some(prev_quote) => Some(quote! {BitSetAnd<#ty::Mask, #prev_quote>}),
-        })
-        .unwrap();
-    let iter = tys
-        .iter()
-        .map(|ty| quote! {<#ty as Join>::Iter})
-        .collect::<Vec<_>>();
-    let ((ids, indexes), get_mask_lines): ((Vec<_>, Vec<_>), Vec<_>) = tys
-        .iter()
-        .zip(0..)
-        .map(|(_ty, n)| {
-            let name = Ident::new(&format!("iter_{}", n), Span::call_site());
-            let name_clone = name.clone();
-            let n = syn::Member::Unnamed(n.into());
-            let n_clone = n.clone();
-            (
-                (name_clone, n_clone),
-                quote! {
-                    let #name = self.#n.get_mask();
-                },
-            )
-        })
-        .unzip();
-    let get_mask_bitset = ids
-        .iter()
-        .rev()
-        .fold(None, |acc, id| match acc {
-            None => Some(quote! {#id}),
-            Some(prev) => Some(quote! { BitSetAnd(#id, #prev)}),
-        })
-        .unwrap();
-    let get_masked_iter_lines = ids.iter().zip(indexes.iter()).map(|(id, ndx)| quote!{
-        let #id = self.#ndx.get_masked_iter(mask.clone());
-    });
-
     let output = quote! {
-        impl <#(#constraints),*> Join for #tuple {
-            type Mask = #mask;
-            type Iter = Zip<( #(#iter),* )>;
-
-            fn get_mask(&self) -> Self::Mask {
-                #(#get_mask_lines)*
-                #get_mask_bitset
+        impl <#(#tys:CanFetch),*> CanFetch for #tuple {
+            fn reads() -> Vec<ResourceId> {
+                let mut r = Vec::new();
+                #(r.extend(<#tys as CanFetch>::reads());)*
+                r
             }
 
-            fn get_masked_iter<M: StaticMask>(self, mask: M) -> Self::Iter {
-                #(#get_masked_iter_lines)*
-                multizip((#(#ids,)*))
+            fn writes() -> Vec<ResourceId> {
+                let mut w = Vec::new();
+                #(w.extend(<#tys as CanFetch>::writes());)*
+                w
+            }
+
+            fn construct(
+                tx: mpsc::Sender<(ResourceId, Resource)>,
+                fields: &mut std::collections::HashMap<ResourceId, Resource>,
+            ) -> anyhow::Result<Self> {
+                Ok((
+                    #(#tys::construct(tx.clone(), fields)?),*
+                ))
             }
         }
+    };
+
+    output.into()
+}
+
+#[proc_macro]
+pub fn impl_join_tuple(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    let tuple: TypeTuple = parse_macro_input!(input);
+    let tys = tuple.elems.iter().collect::<Vec<_>>();
+    let wheres = tys.iter().map(|ty| quote! {
+        #ty: Iterator,
+        <#ty as Iterator>::Item: StorageComponent,
+    }).collect::<Vec<_>>();
+    let next_names = (0..tys.len()).map(|n| {
+        let name = Ident::new(&format!("next_{}", n), Span::call_site());
+        let n = syn::Member::Unnamed(n.into());
+        (name, n)
+    }).collect::<VecDeque<_>>();
+    let nexts = next_names.iter().map(|(name, n)| quote! {
+        let mut #name = self.0.#n.next()?.split();
+    }).collect::<VecDeque<_>>();
+    let while_check = {
+        let mut nexts = next_names.clone();
+        let first = nexts.pop_front().unwrap();
+        let next_a = first.0;
+        let checks = nexts
+            .iter()
+            .map(|(name, _)| quote!{ #next_a.0 == #name.0 })
+            .fold(None, |acc, check| match acc {
+                Some(prev) => Some(quote!{ #prev && #check }),
+                None => Some(quote!{ #check }),
+            })
+            .unwrap();
+        let syncs = nexts
+            .iter()
+            .map(|(name, n)| quote!{
+                sync(&mut self.0.0, &mut #next_a, &mut self.0.#n, &mut #name)?;
+            })
+            .collect::<Vec<_>>();
+        let result = nexts
+            .iter()
+            .fold(
+                quote!{#next_a.0, #next_a.1},
+                |acc, (name, _)| quote!{#acc, #name.1}
+            );
+        quote!{
+            while!(#checks) {
+                #(#syncs)*
+            }
+            Some((#result))
+        }
+    };
+
+    let self_ns = next_names.iter().map(|(_, n)| quote!{ self.#n.join() }).collect::<Vec<_>>();
+    let nexts = nexts.into_iter().collect::<Vec<_>>();
+
+    let iterator_for_joined_iter = quote! {
+        impl <#(#tys),*> Iterator for JoinedIter<#tuple>
+        where
+            #(#tys: Iterator,)*
+            #(<#tys as Iterator>::Item: StorageComponent,)*
+        {
+            type Item = (
+                u32,
+                #(<<#tys as Iterator>::Item as StorageComponent>::Component),*
+            );
+
+            fn next(&mut self) -> Option<Self::Item> {
+                #(#nexts)*
+                #while_check
+            }
+        }
+    };
+
+    let join_for_tuple = quote!{
+        impl <#(#tys),*> Join for #tuple
+        where
+            #(#tys: Join,)*
+            #(#tys::Iter: Iterator,)*
+            #(<#tys::Iter as Iterator>::Item: StorageComponent,)*
+        {
+            type Iter = JoinedIter<( #(#tys::Iter),* )>;
+
+            fn join(self) -> Self::Iter {
+                JoinedIter(( #(#self_ns),* ))
+            }
+        }
+    };
+
+    let output = quote! {
+        #iterator_for_joined_iter
+
+        #join_for_tuple
     };
 
     output.into()

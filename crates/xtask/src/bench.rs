@@ -84,7 +84,7 @@ impl Bench {
                         historical_benchmark.benchmark.ns,
                         change_percent
                     );
-                } else if change_percent > 0.0 {
+                } else if change_percent >= 4.0 {
                     tracing::warn!(
                         "{} {} +{:.2}%",
                         historical_benchmark.benchmark.name,
@@ -210,7 +210,7 @@ mod test {
         let (i, name) = parse_bench_result_start(BENCH_LINE).unwrap();
         assert_eq!(name, "presize_cubic_cpu/400");
 
-        let (i, (ns, range)) = parse_bench_result_rest(i).unwrap();
+        let (_, (ns, range)) = parse_bench_result_rest(i).unwrap();
         assert_eq!(ns, 17041704);
         assert_eq!(range, 349284);
     }
@@ -225,7 +225,7 @@ mod test {
             "bench:     4049764 ns/iter (+/- 3608244)",
         ].join("\n");
 
-        let (i, results) = parse_benchmarks(&lines).unwrap();
+        let (_, results) = parse_benchmarks(&lines).unwrap();
         assert_eq!(results.len(), 2);
         assert_eq!(
             results[0],
