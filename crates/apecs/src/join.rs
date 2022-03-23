@@ -1,14 +1,17 @@
 use std::iter::Map;
 
-use hibitset::{BitIter, BitSet, BitSetLike};
+use hibitset::{BitIter, BitSet};
 
-use crate::{IsResource, Read, Write, storage::{Entities, Entity, Storage, StorageComponent}};
+use crate::{
+    storage::{Entities, Entity, Entry, Storage, StorageComponent},
+    IsResource, Read, Write,
+};
 
 fn sync<A, B>(
     a: &mut A,
-    next_a: &mut (u32, <A::Item as StorageComponent>::Component),
+    next_a: &mut (usize, <A::Item as StorageComponent>::Component),
     b: &mut B,
-    next_b: &mut (u32, <B::Item as StorageComponent>::Component),
+    next_b: &mut (usize, <B::Item as StorageComponent>::Component),
 ) -> Option<()>
 where
     A: Iterator,
@@ -38,7 +41,10 @@ where
     A: Iterator,
     <A as Iterator>::Item: StorageComponent,
 {
-    type Item = (u32, <<A as Iterator>::Item as StorageComponent>::Component);
+    type Item = (
+        usize,
+        <<A as Iterator>::Item as StorageComponent>::Component,
+    );
 
     fn next(&mut self) -> Option<Self::Item> {
         let next_a = self.0 .0.next()?.split();
@@ -69,10 +75,10 @@ impl<'a, T: Storage> Join for &'a T {
 }
 
 impl<'a> Join for &'a Entities {
-    type Iter = BitIter<&'a BitSet>;
+    type Iter = Map<BitIter<&'a BitSet>, fn(u32) -> Entry<Entity>>;
 
     fn join(self) -> Self::Iter {
-        (&self.alive_set).iter()
+        self.iter()
     }
 }
 
@@ -118,39 +124,34 @@ apecs_derive::impl_join_tuple!((A, B, C, D, E, F, G, H, I, J, K, L));
 apecs_derive::impl_join_tuple!((A, B, C, D, E, F, G, H, I, J, K, L, M));
 apecs_derive::impl_join_tuple!((A, B, C, D, E, F, G, H, I, J, K, L, M, N));
 
-
 #[cfg(test)]
 mod test {
     use crate::{join::*, storage::*};
-
-    use super::*;
 
     #[test]
     fn can_join_entities() {
         let entities = Entities::default();
         let abc_store: VecStorage<String> = VecStorage::default();
-        for (_, _, _) in (&entities, &abc_store).join() {
-
-        }
+        for (_, _, _) in (&entities, &abc_store).join() {}
     }
 
     #[test]
     fn joiny_playground() {
         let mut abc_store: VecStorage<String> = VecStorage::default();
-        abc_store.insert(0, "a");
-        abc_store.insert(1, "b");
-        abc_store.insert(2, "c");
-        abc_store.insert(10, "ten");
+        abc_store.insert(0, "a".to_string());
+        abc_store.insert(1, "b".to_string());
+        abc_store.insert(2, "c".to_string());
+        abc_store.insert(10, "ten".to_string());
         let mut def_store: VecStorage<String> = VecStorage::default();
-        def_store.insert(1, "d");
-        def_store.insert(2, "e");
-        def_store.insert(3, "f");
-        def_store.insert(10, "10");
+        def_store.insert(1, "d".to_string());
+        def_store.insert(2, "e".to_string());
+        def_store.insert(3, "f".to_string());
+        def_store.insert(10, "10".to_string());
         let mut hij_store: VecStorage<String> = VecStorage::default();
-        hij_store.insert(2, "h");
-        hij_store.insert(3, "i");
-        hij_store.insert(4, "j");
-        hij_store.insert(10, "9+1");
+        hij_store.insert(2, "h".to_string());
+        hij_store.insert(3, "i".to_string());
+        hij_store.insert(4, "j".to_string());
+        hij_store.insert(10, "9+1".to_string());
 
         (|| -> Option<()> {
             let mut iter_a = abc_store.iter();

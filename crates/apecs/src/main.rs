@@ -65,7 +65,7 @@ async fn print_system(mut facade: Facade) -> anyhow::Result<()> {
     loop {
         let positions = facade.fetch::<Read<VecStorage<Position>>>().await?;
         let mut line = vec![" "; 80];
-        for (_, position) in positions.join() {
+        for (_, position) in (&positions,).join() {
             anyhow::ensure!(
                 position.x >= 0.0 && position.x <= 79.0,
                 "{} is an invalid position",
@@ -88,7 +88,7 @@ fn main() -> anyhow::Result<()> {
 
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
-    let mut world = apecs::World::default();
+    let mut world = apecs::world::World::default();
     world
         .with_default_resource::<Entities>()?
         .with_default_resource::<VecStorage<Position>>()?

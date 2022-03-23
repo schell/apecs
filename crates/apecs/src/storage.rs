@@ -1,84 +1,108 @@
 //! Entity component storage trait and implementations.
-use std::{
-    iter::Map,
-    ops::Deref,
-    slice::{Iter, IterMut},
-};
+use std::{iter::Map, ops::Deref};
 
 use hibitset::{BitIter, BitSet, BitSetLike};
 pub use itertools::{multizip, Zip};
 
+mod vec;
+pub use vec::*;
+
+mod sparse;
+pub use sparse::*;
+
 pub trait StorageComponent {
     type Component;
 
-    fn split(self) -> (u32, Self::Component);
+    fn split(self) -> (usize, Self::Component);
 
-    fn id(&self) -> u32;
+    fn id(&self) -> usize;
 }
 
-impl<A> StorageComponent for (u32, A) {
+impl<A> StorageComponent for (usize, A) {
     type Component = A;
 
-    fn split(self) -> (u32, Self::Component) {
+    fn split(self) -> (usize, Self::Component) {
         self
     }
 
-    fn id(&self) -> u32 {
+    fn id(&self) -> usize {
         self.0
     }
 }
 
-impl StorageComponent for u32 {
-    type Component = u32;
+impl StorageComponent for usize {
+    type Component = usize;
 
-    fn split(self) -> (u32, Self::Component) {
+    fn split(self) -> (usize, Self::Component) {
         (self, self)
     }
 
-    fn id(&self) -> u32 {
+    fn id(&self) -> usize {
         *self
+    }
+}
+
+pub struct Entry<T> {
+    key: usize,
+    pub value: T,
+}
+
+impl<T> StorageComponent for Entry<T> {
+    type Component = T;
+
+    fn split(self) -> (usize, Self::Component) {
+        (self.key, self.value)
+    }
+
+    fn id(&self) -> usize {
+        self.key()
+    }
+}
+
+impl<T> Entry<T> {
+    pub fn key(&self) -> usize {
+        self.key
+    }
+
+    pub fn as_ref(&self) -> Entry<&T> {
+        Entry {
+            key: self.key,
+            value: &self.value,
+        }
+    }
+
+    pub fn as_mut(&mut self) -> Entry<&mut T> {
+        Entry {
+            key: self.key,
+            value: &mut self.value,
+        }
     }
 }
 
 pub trait Storage: Sized {
     type Component;
-    type Iter<'a>: Iterator<Item = (u32, &'a Self::Component)>
+    type Iter<'a>: Iterator<Item = Entry<&'a Self::Component>>
     where
         Self: 'a;
-    type IterMut<'a>: Iterator<Item = (u32, &'a mut Self::Component)>
+    type IterMut<'a>: Iterator<Item = Entry<&'a mut Self::Component>>
     where
         Self: 'a;
 
     fn new() -> Self;
 
-    fn get(&self, id: &u32) -> Option<&Self::Component>;
+    fn get(&self, id: usize) -> Option<&Self::Component>;
 
-    fn get_mut(&mut self, id: &u32) -> Option<&mut Self::Component>;
+    fn get_mut(&mut self, id: usize) -> Option<&mut Self::Component>;
 
-    fn insert(&mut self, id: u32, component: impl Into<Self::Component>)
-        -> Option<Self::Component>;
+    fn insert(&mut self, id: usize, component: Self::Component) -> Option<Self::Component>;
 
-    fn remove(&mut self, id: &u32) -> Option<Self::Component>;
+    fn remove(&mut self, id: usize) -> Option<Self::Component>;
 
     /// Return an iterator over all entities and indices
     fn iter(&self) -> Self::Iter<'_>;
 
     /// Return an iterator over entities, with the mutable components and their indices.
     fn iter_mut(&mut self) -> Self::IterMut<'_>;
-}
-
-pub struct VecStorage<T>{
-    mask: BitSet,
-    store: Vec<(u32, T)>
-}
-
-impl<T> Default for VecStorage<T> {
-    fn default() -> Self {
-        VecStorage{
-            mask: BitSet::new(),
-            store: vec![]
-        }
-    }
 }
 
 //impl<'a, T> std::ops::Not for &'a VecStorage<T> {
@@ -89,87 +113,12 @@ impl<T> Default for VecStorage<T> {
 //    }
 //}
 
-impl<T> Storage for VecStorage<T> {
-    type Component = T;
-    type Iter<'a> = Map<Iter<'a, (u32, T)>, fn(&(u32, T)) -> (u32, &T)> where T: 'a;
-    type IterMut<'a> = Map<IterMut<'a, (u32, T)>, fn(&mut (u32, T)) -> (u32, &mut T)> where T: 'a;
-
-    fn new() -> Self {
-        Default::default()
-    }
-
-    fn get(&self, id: &u32) -> Option<&Self::Component> {
-        if self.mask.contains(*id) {
-            for (eid, t) in self.store.iter() {
-                if eid == id {
-                    return Some(t);
-                } else if eid > id {
-                    break;
-                }
-            }
-        }
-        None
-    }
-
-    fn get_mut(&mut self, id: &u32) -> Option<&mut Self::Component> {
-        if self.mask.contains(*id) {
-            for (eid, t) in self.store.iter_mut() {
-                if eid == id {
-                    return Some(t);
-                } else if *eid > *id {
-                    break;
-                }
-            }
-        }
-        None
-    }
-
-    fn insert(
-        &mut self,
-        id: u32,
-        component: impl Into<Self::Component>,
-    ) -> Option<Self::Component> {
-        if self.mask.contains(id) {
-            if let Some(t) = self.get_mut(&id) {
-                return Some(std::mem::replace(t, component.into()));
-            }
-        }
-        self.mask.add(id);
-        self.store.push((id, component.into()));
-        None
-    }
-
-    fn remove(&mut self, id: &u32) -> Option<Self::Component> {
-        if self.mask.contains(*id) {
-            self.mask.remove(*id);
-            let mut found = None;
-            for ((eid, _), i) in self.store.iter().zip(0..) {
-                if eid == id {
-                    found = Some(i);
-                    break;
-                }
-            }
-            found.map(|i| self.store.remove(i).1)
-        } else {
-            None
-        }
-    }
-
-    fn iter(&self) -> Self::Iter<'_> {
-        self.store.iter().map(|(id, t)| (*id, t))
-    }
-
-    fn iter_mut(&mut self) -> Self::IterMut<'_> {
-        self.store.iter_mut().map(|(id, t)| (*id, t))
-    }
-}
-
 pub struct Entity {
-    id: u32,
+    id: usize,
 }
 
 impl Deref for Entity {
-    type Target = u32;
+    type Target = usize;
 
     fn deref(&self) -> &Self::Target {
         &self.id
@@ -177,14 +126,14 @@ impl Deref for Entity {
 }
 
 impl Entity {
-    pub fn id(&self) -> u32 {
+    pub fn id(&self) -> usize {
         self.id
     }
 }
 
 #[derive(Default)]
 pub struct Entities {
-    pub(crate) next_k: u32,
+    pub(crate) next_k: usize,
     pub(crate) alive_set: BitSet,
 }
 
@@ -199,18 +148,19 @@ impl Entities {
     pub fn create(&mut self) -> Entity {
         let id = self.next_k;
         self.next_k += 1;
-        self.alive_set.add(id);
+        self.alive_set.add(id.try_into().unwrap());
         Entity { id }
     }
 
     pub fn destroy(&mut self, entity: Entity) {
-        self.alive_set.remove(entity.id);
+        self.alive_set.remove(entity.id.try_into().unwrap());
     }
 
-    pub fn iter(&self) -> Map<BitIter<&BitSet>, fn(u32) -> (usize, Entity)> {
-        (&self.alive_set)
-            .iter()
-            .map(|id| (id as usize, Entity { id }))
+    pub fn iter(&self) -> Map<BitIter<&BitSet>, fn(u32) -> Entry<Entity>> {
+        (&self.alive_set).iter().map(|id| Entry {
+            key: id as usize,
+            value: Entity { id: id as usize },
+        })
     }
 }
 
@@ -247,8 +197,7 @@ impl Entities {
 
 #[cfg(test)]
 mod test {
-    use crate::{storage::*, join::*};
-    use hibitset::{BitSet, BitSetLike};
+    use crate::{join::*, storage::*};
 
     fn make_abc_vecstorage() -> VecStorage<String> {
         let mut vs = VecStorage::new();
@@ -293,9 +242,9 @@ mod test {
             *s = format!("{}{}{}", s, entity.id(), n);
         }
 
-        assert_eq!(strings.get(&a), Some(&"A01".to_string()));
-        assert_eq!(strings.get(&b), Some(&"B12".to_string()));
-        assert_eq!(strings.get(&c), Some(&"C".to_string()));
+        assert_eq!(strings.get(a.id()), Some(&"A01".to_string()));
+        assert_eq!(strings.get(b.id()), Some(&"B12".to_string()));
+        assert_eq!(strings.get(c.id()), Some(&"C".to_string()));
     }
 
     //#[test]

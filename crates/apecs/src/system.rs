@@ -29,11 +29,11 @@ impl AsyncSystem {
 
         // receive any system resource requests
         if let Some(Request { resource_ids }) = self.resource_request_rx.try_recv().ok() {
-            let resources = crate::core::try_take_resources(resources, resource_ids.iter(), Some(&self.name))?;
+            let resources =
+                crate::world::try_take_resources(resources, resource_ids.iter(), Some(&self.name))?;
 
             // send them to the system
-            self
-                .resources_to_system_tx
+            self.resources_to_system_tx
                 .try_send(resources)
                 .context(format!("cannot send resources to system '{}'", self.name))?;
             // save these for later to confirm that resources have been returned

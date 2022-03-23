@@ -146,10 +146,6 @@ pub fn impl_canfetch_tuple(input: proc_macro::TokenStream) -> proc_macro::TokenS
 pub fn impl_join_tuple(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let tuple: TypeTuple = parse_macro_input!(input);
     let tys = tuple.elems.iter().collect::<Vec<_>>();
-    let wheres = tys.iter().map(|ty| quote! {
-        #ty: Iterator,
-        <#ty as Iterator>::Item: StorageComponent,
-    }).collect::<Vec<_>>();
     let next_names = (0..tys.len()).map(|n| {
         let name = Ident::new(&format!("next_{}", n), Span::call_site());
         let n = syn::Member::Unnamed(n.into());
@@ -200,7 +196,7 @@ pub fn impl_join_tuple(input: proc_macro::TokenStream) -> proc_macro::TokenStrea
             #(<#tys as Iterator>::Item: StorageComponent,)*
         {
             type Item = (
-                u32,
+                usize,
                 #(<<#tys as Iterator>::Item as StorageComponent>::Component),*
             );
 

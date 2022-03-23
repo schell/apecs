@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use apecs::{anyhow, join::*, storage::*, CanFetch, Facade, Read, World, Write};
+use apecs::{anyhow, join::*, storage::*, world::*, CanFetch, Facade, Read, Write};
 use cgmath::*;
 
 #[derive(Copy, Clone)]
@@ -89,12 +89,17 @@ pub fn new() -> World {
 pub fn main() -> anyhow::Result<()> {
     let start = Instant::now();
     let mut world = new();
+    let mut ticks = 0;
+
+    let waker = world.get_waker();
+    let mut ctx = std::task::Context::from_waker(&waker);
 
     while start.elapsed() < Duration::from_secs(5) {
-        for _ in 0..100 {
-            world.tick()?;
-        }
+        world.tick_with_context(&mut ctx)?;
+        ticks += 1;
     }
+
+    println!("{} ticks in 5secs", ticks);
 
     Ok(())
 }
