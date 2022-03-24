@@ -1,14 +1,11 @@
-//! Entity component storage trait and implementations.
-use std::{iter::Map, ops::Deref};
-
-use hibitset::{BitIter, BitSet, BitSetLike};
-pub use itertools::{multizip, Zip};
-
+//! Entity component storage traits.
 mod vec;
 pub use vec::*;
 
 mod sparse;
 pub use sparse::*;
+
+use crate::IsComponent;
 
 pub trait StorageComponent {
     type Component;
@@ -43,7 +40,7 @@ impl StorageComponent for usize {
 }
 
 pub struct Entry<T> {
-    key: usize,
+    pub(crate) key: usize,
     pub value: T,
 }
 
@@ -79,18 +76,25 @@ impl<T> Entry<T> {
     }
 }
 
-pub trait Storage: Sized {
+/// A storage that can only be read from
+pub trait CanReadStorage {
     type Component;
+
     type Iter<'a>: Iterator<Item = Entry<&'a Self::Component>>
     where
         Self: 'a;
+
+    fn get(&self, id: usize) -> Option<&Self::Component>;
+
+    /// Return an iterator over all entities and indices
+    fn iter(&self) -> Self::Iter<'_>;
+}
+
+/// A storage that can be read and written
+pub trait CanWriteStorage: CanReadStorage {
     type IterMut<'a>: Iterator<Item = Entry<&'a mut Self::Component>>
     where
         Self: 'a;
-
-    fn new() -> Self;
-
-    fn get(&self, id: usize) -> Option<&Self::Component>;
 
     fn get_mut(&mut self, id: usize) -> Option<&mut Self::Component>;
 
@@ -98,109 +102,16 @@ pub trait Storage: Sized {
 
     fn remove(&mut self, id: usize) -> Option<Self::Component>;
 
-    /// Return an iterator over all entities and indices
-    fn iter(&self) -> Self::Iter<'_>;
-
     /// Return an iterator over entities, with the mutable components and their indices.
     fn iter_mut(&mut self) -> Self::IterMut<'_>;
 }
 
-//impl<'a, T> std::ops::Not for &'a VecStorage<T> {
-//    type Output = Without<Self>;
-//
-//    fn not(self) -> Self::Output {
-//        Without(self)
-//    }
-//}
-
-pub struct Entity {
-    id: usize,
-}
-
-impl Deref for Entity {
-    type Target = usize;
-
-    fn deref(&self) -> &Self::Target {
-        &self.id
-    }
-}
-
-impl Entity {
-    pub fn id(&self) -> usize {
-        self.id
-    }
-}
-
-#[derive(Default)]
-pub struct Entities {
-    pub(crate) next_k: usize,
-    pub(crate) alive_set: BitSet,
-}
-
-impl Entities {
-    pub fn new() -> Self {
-        Entities {
-            next_k: 0,
-            alive_set: BitSet::new(),
-        }
-    }
-
-    pub fn create(&mut self) -> Entity {
-        let id = self.next_k;
-        self.next_k += 1;
-        self.alive_set.add(id.try_into().unwrap());
-        Entity { id }
-    }
-
-    pub fn destroy(&mut self, entity: Entity) {
-        self.alive_set.remove(entity.id.try_into().unwrap());
-    }
-
-    pub fn iter(&self) -> Map<BitIter<&BitSet>, fn(u32) -> Entry<Entity>> {
-        (&self.alive_set).iter().map(|id| Entry {
-            key: id as usize,
-            value: Entity { id: id as usize },
-        })
-    }
-}
-
-//pub struct Without<T>(T);
-//
-//pub struct Maybe<T>(pub T);
-//
-//pub trait MaybeJoin: Sized {
-//    fn maybe(&self) -> Maybe<&Self>;
-//    fn maybe_mut(&mut self) -> Maybe<&mut Self>;
-//}
-//
-//impl<T: Storage> MaybeJoin for T {
-//    fn maybe(&self) -> Maybe<&Self> {
-//        Maybe(self)
-//    }
-//
-//    fn maybe_mut(&mut self) -> Maybe<&mut Self> {
-//        Maybe(self)
-//    }
-//}
-//
-//impl<'a, T: Storage> Join for Maybe<&'a T> {
-//    type Iter = T::Iter<'a>;
-//
-//    fn join(self) -> JoinIter<Self::Iter> {
-//        todo!()
-//    }
-//}
-//
-//impl<'a, T: Storage> Join for Maybe<&'a mut T> {}
-//
-//impl<T: Join> Join for Without<T> {}
-
 #[cfg(test)]
-mod test {
-    use crate::{join::*, storage::*};
+pub mod test {
+    use crate::{entities::*, join::*, storage::*};
 
-    fn make_abc_vecstorage() -> VecStorage<String> {
-        let mut vs = VecStorage::new();
+    pub fn make_abc_vecstorage() -> VecStorage<String> {
+        let mut vs = VecStorage::default();
         assert!(vs.insert(0, "abc".to_string()).is_none());
         assert!(vs.insert(1, "def".to_string()).is_none());
         assert!(vs.insert(2, "hij".to_string()).is_none());
@@ -209,8 +120,8 @@ mod test {
         vs
     }
 
-    fn make_2468_vecstorage() -> VecStorage<i32> {
-        let mut vs = VecStorage::new();
+    pub fn make_2468_vecstorage() -> VecStorage<i32> {
+        let mut vs = VecStorage::default();
         assert!(vs.insert(0, 0).is_none());
         assert!(vs.insert(2, 2).is_none());
         assert!(vs.insert(4, 4).is_none());
@@ -224,8 +135,8 @@ mod test {
     #[test]
     fn can_thruple_join() {
         let mut entities = Entities::new();
-        let mut strings: VecStorage<String> = VecStorage::new();
-        let mut numbers: VecStorage<u32> = VecStorage::new();
+        let mut strings: VecStorage<String> = VecStorage::default();
+        let mut numbers: VecStorage<u32> = VecStorage::default();
 
         let a = entities.create();
         strings.insert(a.id(), "A".to_string());
@@ -257,16 +168,6 @@ mod test {
     //    assert_eq!(joined.next().unwrap(), (&"def".to_string(), None));
     //    assert_eq!(joined.next().unwrap(), (&"hij".to_string(), Some(&2)));
     //    assert_eq!(joined.next().unwrap(), (&"666".to_string(), None));
-    //    assert_eq!(joined.next(), None);
-    //}
-
-    //#[test]
-    //fn can_join_without() {
-    //    let vs_abc = make_abc_vecstorage();
-    //    let vs_246 = make_2468_vecstorage();
-
-    //    let mut joined = (&vs_abc, !&vs_246).join();
-    //    assert_eq!(joined.next(), Some((&"def".to_string(), ())));
     //    assert_eq!(joined.next(), None);
     //}
 

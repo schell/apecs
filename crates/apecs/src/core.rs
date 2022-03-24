@@ -21,14 +21,25 @@ pub mod spsc {
 mod fetch;
 pub use fetch::*;
 
+use crate::storage::{CanReadStorage, CanWriteStorage};
+
 pub trait IsResource: Any + Send + Sync + 'static {}
 impl<T: Any + Send + Sync + 'static> IsResource for T {}
 
+pub trait IsComponent: Any + Send + Sync + 'static {}
+impl<T: Any + Send + Sync + 'static> IsComponent for T {}
+
 pub type Resource = Box<dyn Any + Send + Sync + 'static>;
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ResourceTypeId {
+    Raw(TypeId),
+    Storage(TypeId),
+}
 
 #[derive(Clone, Debug, Eq)]
 pub struct ResourceId {
-    pub(crate) type_id: TypeId,
+    pub(crate) type_id: ResourceTypeId,
     pub(crate) name: String,
 }
 
@@ -53,7 +64,14 @@ impl PartialEq for ResourceId {
 impl ResourceId {
     pub fn new<T: IsResource>() -> Self {
         ResourceId {
-            type_id: TypeId::of::<T>(),
+            type_id: ResourceTypeId::Raw(TypeId::of::<T>()),
+            name: std::any::type_name::<T>().to_string(),
+        }
+    }
+
+    pub fn new_storage<T: IsComponent>() -> Self {
+        ResourceId {
+            type_id: ResourceTypeId::Storage(TypeId::of::<T>()),
             name: std::any::type_name::<T>().to_string(),
         }
     }
@@ -110,6 +128,44 @@ impl<'a, T: IsResource> DerefMut for Write<T> {
     }
 }
 
+impl<T: IsResource + CanReadStorage> CanReadStorage for Write<T> {
+    type Component = T::Component;
+
+    type Iter<'a> = T::Iter<'a>
+    where
+        Self: 'a;
+
+    fn get(&self, id: usize) -> Option<&Self::Component> {
+        self.fetched.get(id)
+    }
+
+    fn iter(&self) -> Self::Iter<'_> {
+        self.fetched.iter()
+    }
+}
+
+impl<T: IsResource + CanWriteStorage> CanWriteStorage for Write<T> {
+    type IterMut<'a> = T::IterMut<'a>
+    where
+        Self: 'a;
+
+    fn get_mut(&mut self, id: usize) -> Option<&mut Self::Component> {
+        self.fetched.get_mut(id)
+    }
+
+    fn insert(&mut self, id: usize, component: Self::Component) -> Option<Self::Component> {
+        self.fetched.insert(id, component)
+    }
+
+    fn remove(&mut self, id: usize) -> Option<Self::Component> {
+        self.fetched.remove(id)
+    }
+
+    fn iter_mut(&mut self) -> Self::IterMut<'_> {
+        self.fetched.iter_mut()
+    }
+}
+
 pub struct Read<T: IsResource> {
     fetched: Fetched<T>,
 }
@@ -119,6 +175,22 @@ impl<'a, T: IsResource> Deref for Read<T> {
 
     fn deref(&self) -> &Self::Target {
         self.fetched.inner.as_ref().unwrap()
+    }
+}
+
+impl<T: IsResource + CanReadStorage> CanReadStorage for Read<T> {
+    type Component = T::Component;
+
+    type Iter<'a> = T::Iter<'a>
+    where
+        Self: 'a;
+
+    fn get(&self, id: usize) -> Option<&Self::Component> {
+        self.fetched.get(id)
+    }
+
+    fn iter(&self) -> Self::Iter<'_> {
+        self.fetched.iter()
     }
 }
 

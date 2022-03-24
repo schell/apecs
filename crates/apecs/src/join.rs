@@ -2,10 +2,7 @@ use std::iter::Map;
 
 use hibitset::{BitIter, BitSet};
 
-use crate::{
-    storage::{Entities, Entity, Entry, Storage, StorageComponent},
-    IsResource, Read, Write,
-};
+use crate::{entities::*, storage::*};
 
 fn sync<A, B>(
     a: &mut A,
@@ -58,7 +55,7 @@ pub trait Join {
     fn join(self) -> Self::Iter;
 }
 
-impl<'a, T: Storage> Join for &'a mut T {
+impl<'a, T: CanWriteStorage> Join for &'a mut T {
     type Iter = T::IterMut<'a>;
 
     fn join(self) -> Self::Iter {
@@ -66,7 +63,7 @@ impl<'a, T: Storage> Join for &'a mut T {
     }
 }
 
-impl<'a, T: Storage> Join for &'a T {
+impl<'a, T: CanReadStorage> Join for &'a T {
     type Iter = T::Iter<'a>;
 
     fn join(self) -> Self::Iter {
@@ -82,21 +79,94 @@ impl<'a> Join for &'a Entities {
     }
 }
 
-impl<'a, T: IsResource + Storage> Join for &'a mut Write<T> {
-    type Iter = T::IterMut<'a>;
+pub struct Without<T>(pub(crate) T);
 
-    fn join(self) -> Self::Iter {
-        self.iter_mut()
+pub struct WithoutIter<T: Iterator> {
+    iter: T,
+    id: usize,
+    next_id: usize,
+}
+
+impl<T> WithoutIter<T>
+where
+    T: Iterator,
+    T::Item: StorageComponent,
+{
+    pub(crate) fn new(mut iter: T) -> Self {
+        let next_id = iter.next().map(|e| e.id()).unwrap_or_else(|| usize::MAX);
+        WithoutIter {
+            iter,
+            id: 0,
+            next_id,
+        }
     }
 }
 
-impl<'a, T: IsResource + Storage> Join for &'a Read<T> {
-    type Iter = T::Iter<'a>;
+impl<T: Iterator> Iterator for WithoutIter<T>
+where
+    T: Iterator,
+    T::Item: StorageComponent,
+{
+    type Item = Entry<()>;
 
-    fn join(self) -> Self::Iter {
-        self.iter()
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.id == self.next_id {
+            self.next_id = self
+                .iter
+                .next()
+                .map(|e| e.id())
+                .unwrap_or_else(|| usize::MAX);
+            self.id += 1;
+        }
+
+        let entry = Entry {
+            key: self.id,
+            value: (),
+        };
+        self.id += 1;
+        Some(entry)
     }
 }
+
+impl<T> Join for WithoutIter<T>
+where
+    T: Iterator,
+    T::Item: StorageComponent,
+{
+    type Iter = WithoutIter<T>;
+
+    fn join(self) -> Self::Iter {
+        self
+    }
+}
+
+//pub struct Maybe<T>(pub T);
+//
+//pub trait MaybeJoin: Sized {
+//    fn maybe(&self) -> Maybe<&Self>;
+//    fn maybe_mut(&mut self) -> Maybe<&mut Self>;
+//}
+//
+//impl<T: Storage> MaybeJoin for T {
+//    fn maybe(&self) -> Maybe<&Self> {
+//        Maybe(self)
+//    }
+//
+//    fn maybe_mut(&mut self) -> Maybe<&mut Self> {
+//        Maybe(self)
+//    }
+//}
+//
+//impl<'a, T: Storage> Join for Maybe<&'a T> {
+//    type Iter = T::Iter<'a>;
+//
+//    fn join(self) -> JoinIter<Self::Iter> {
+//        todo!()
+//    }
+//}
+//
+//impl<'a, T: Storage> Join for Maybe<&'a mut T> {}
+//
 
 impl<A: Join> Join for (A,)
 where
@@ -126,13 +196,33 @@ apecs_derive::impl_join_tuple!((A, B, C, D, E, F, G, H, I, J, K, L, M, N));
 
 #[cfg(test)]
 mod test {
-    use crate::{join::*, storage::*};
+    use crate::join::*;
 
     #[test]
     fn can_join_entities() {
         let entities = Entities::default();
         let abc_store: VecStorage<String> = VecStorage::default();
         for (_, _, _) in (&entities, &abc_store).join() {}
+    }
+
+    #[test]
+    fn can_join_without() {
+        let vs_abc = crate::storage::test::make_abc_vecstorage();
+        let vs_246 = crate::storage::test::make_2468_vecstorage();
+
+        let mut joined = (&vs_abc, !&vs_246).join();
+        assert_eq!(joined.next(), Some((1, &"def".to_string(), ())));
+        assert_eq!(joined.next(), None);
+
+        let mut vs_a: VecStorage<&str> = VecStorage::default();
+        vs_a.insert(0, "a0");
+        vs_a.insert(1, "a1");
+        vs_a.insert(3, "a3");
+        vs_a.insert(4, "a4");
+        vs_a.insert(8, "a8");
+
+        let withouts = (!&vs_a,).join().take(5).map(|e| e.0).collect::<Vec<_>>();
+        assert_eq!(&withouts, &[2, 5, 6, 7, 9]);
     }
 
     #[test]

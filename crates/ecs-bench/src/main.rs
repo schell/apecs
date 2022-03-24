@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use apecs::{anyhow, join::*, storage::*, world::*, CanFetch, Facade, Read, Write};
+use apecs::{anyhow, entities::*, join::*, storage::*, world::*, CanFetch, Facade, Read, Write};
 use cgmath::*;
 
 #[derive(Copy, Clone)]

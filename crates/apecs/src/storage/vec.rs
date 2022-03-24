@@ -1,10 +1,8 @@
 //! Storage using a naive vector.
 use std::slice::{Iter, IterMut};
 
+use crate::{join::{Without, WithoutIter}, storage::*};
 use hibitset::BitSet;
-pub use itertools::{multizip, Zip};
-
-use crate::storage::Storage;
 
 use super::Entry;
 
@@ -61,15 +59,9 @@ impl<'a, T> Iterator for VecStorageIterMut<'a, T> {
         }
     }
 }
-
-impl<T> Storage for VecStorage<T> {
+impl<T> CanReadStorage for VecStorage<T> {
     type Component = T;
     type Iter<'a> = VecStorageIter<'a, T> where T: 'a;
-    type IterMut<'a> = VecStorageIterMut<'a, T> where T: 'a;
-
-    fn new() -> Self {
-        Default::default()
-    }
 
     fn get(&self, id: usize) -> Option<&Self::Component> {
         if self.mask.contains(id as u32) {
@@ -81,6 +73,14 @@ impl<T> Storage for VecStorage<T> {
             None
         }
     }
+
+    fn iter(&self) -> Self::Iter<'_> {
+        VecStorageIter(self.store.iter())
+    }
+}
+
+impl<T> CanWriteStorage for VecStorage<T> {
+    type IterMut<'a> = VecStorageIterMut<'a, T> where T: 'a;
 
     fn get_mut(&mut self, id: usize) -> Option<&mut Self::Component> {
         if self.mask.contains(id as u32) {
@@ -119,11 +119,15 @@ impl<T> Storage for VecStorage<T> {
         None
     }
 
-    fn iter(&self) -> Self::Iter<'_> {
-        VecStorageIter(self.store.iter())
-    }
-
     fn iter_mut(&mut self) -> Self::IterMut<'_> {
         VecStorageIterMut(self.store.iter_mut())
+    }
+}
+
+impl<'a, T> std::ops::Not for &'a VecStorage<T> {
+    type Output = WithoutIter<VecStorageIter<'a, T>>;
+
+    fn not(self) -> Self::Output {
+        WithoutIter::new(self.iter())
     }
 }

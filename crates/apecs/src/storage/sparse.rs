@@ -11,9 +11,7 @@ use std::{
     slice::{Iter, IterMut},
 };
 
-pub use itertools::{multizip, Zip};
-
-use crate::storage::Storage;
+use crate::storage::*;
 
 use super::Entry;
 
@@ -35,20 +33,29 @@ impl<T> Default for SparseStorage<T> {
     }
 }
 
-impl<T> Storage for SparseStorage<T> {
+impl<T> CanReadStorage for SparseStorage<T> {
     type Component = T;
 
     type Iter<'a> = Map<Iter<'a, Entry<T>>, fn(&Entry<T>) -> Entry<&T>> where T: 'a;
-    type IterMut<'a> = Map<IterMut<'a, Entry<T>>, fn(&mut Entry<T>) -> Entry<&mut T>> where T: 'a;
-
-    fn new() -> Self {
-        SparseStorage::new_with_capacity(32)
-    }
 
     fn get(&self, id: usize) -> Option<&Self::Component> {
         let dense_id = self.sparse.get(id)?;
         Some(&self.dense.get(*dense_id)?.value)
     }
+
+    fn iter(&self) -> Self::Iter<'_> {
+        if self.unsorted {
+            panic!(
+                "{} is possibly not monotonic",
+                std::any::type_name::<Self>()
+            );
+        }
+        self.dense.iter().map(Entry::as_ref)
+    }
+}
+
+impl<T> CanWriteStorage for SparseStorage<T> {
+    type IterMut<'a> = Map<IterMut<'a, Entry<T>>, fn(&mut Entry<T>) -> Entry<&mut T>> where T: 'a;
 
     fn get_mut(&mut self, id: usize) -> Option<&mut Self::Component> {
         let dense_id = self.dense_id(id)?;
@@ -107,16 +114,6 @@ impl<T> Storage for SparseStorage<T> {
         }
     }
 
-    fn iter(&self) -> Self::Iter<'_> {
-        if self.unsorted {
-            panic!(
-                "{} is possibly not monotonic",
-                std::any::type_name::<Self>()
-            );
-        }
-        self.dense.iter().map(Entry::as_ref)
-    }
-
     fn iter_mut(&mut self) -> Self::IterMut<'_> {
         if self.unsorted {
             self.sort();
@@ -160,12 +157,12 @@ impl<T> SparseStorage<T> {
 
     /// Returns an iterator over the dense keys in the order they
     /// were inserted or sorted.
-    pub(crate) fn keys<'a>(&'a self) -> impl Iterator<Item = usize> + 'a {
+    pub fn keys<'a>(&'a self) -> impl Iterator<Item = usize> + 'a {
         self.dense.iter().map(|e| e.key())
     }
 
     /// Returns an iterator over the sparse pointers.
-    pub(crate) fn pointers<'a>(&'a self) -> impl Iterator<Item = usize> + 'a {
+    pub fn pointers<'a>(&'a self) -> impl Iterator<Item = usize> + 'a {
         self.sparse.iter().map(|i| *i)
     }
 
@@ -185,7 +182,7 @@ mod test {
 
     #[test]
     pub fn sparse_sorting_problem() {
-        let mut sparse: SparseStorage<&str> = SparseStorage::new();
+        let mut sparse: SparseStorage<&str> = SparseStorage::default();
         sparse.insert(0, "zero");
         sparse.insert(1, "one");
         sparse.insert(2, "two");

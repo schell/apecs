@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use apecs::{CanFetch, Facade, Read, Write, storage::{Entities, Storage, VecStorage}, join::* };
+use apecs::{entities::Entities, join::*, storage::*, CanFetch, Facade, Read, Write};
 use tracing::Level;
 
 #[derive(Clone)]
