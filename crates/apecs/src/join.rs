@@ -1,8 +1,64 @@
 use std::iter::Map;
 
 use hibitset::{BitIter, BitSet};
+pub use rayon::iter::{
+    FilterMap, IndexedParallelIterator, IntoParallelIterator, MultiZip, ParallelIterator, Zip,
+};
 
 use crate::{entities::*, storage::*};
+
+pub trait ParJoin {
+    type Iter: ParallelIterator;
+
+    fn par_join(self) -> Self::Iter;
+}
+
+impl<StoreA, StoreB, IterA, IterB, A, B> ParJoin for (StoreA, StoreB)
+where
+    StoreA: IntoParallelIterator<Iter = IterA>,
+    StoreB: IntoParallelIterator<Iter = IterB>,
+    IterA: IndexedParallelIterator<Item = Option<A>>,
+    IterB: IndexedParallelIterator<Item = Option<B>>,
+    A: Send,
+    B: Send,
+{
+    type Iter = FilterMap<MultiZip<(IterA, IterB)>, fn((Option<A>, Option<B>)) -> Option<(A, B)>>;
+
+    fn par_join(self) -> Self::Iter {
+        self.into_par_iter().filter_map(|(ma, mb)| {
+            let a = ma?;
+            let b = mb?;
+            Some((a, b))
+        })
+    }
+}
+
+impl<StoreA, StoreB, StoreC, IterA, IterB, IterC, A, B, C> ParJoin for (StoreA, StoreB, StoreC)
+where
+    StoreA: IntoParallelIterator<Iter = IterA>,
+    StoreB: IntoParallelIterator<Iter = IterB>,
+    StoreC: IntoParallelIterator<Iter = IterC>,
+    IterA: IndexedParallelIterator<Item = Option<A>>,
+    IterB: IndexedParallelIterator<Item = Option<B>>,
+    IterC: IndexedParallelIterator<Item = Option<C>>,
+    A: Send,
+    B: Send,
+    C: Send,
+{
+    type Iter = FilterMap<
+        MultiZip<(IterA, IterB, IterC)>,
+        fn((Option<A>, Option<B>, Option<C>)) -> Option<(A, B, C)>,
+    >;
+
+    fn par_join(self) -> Self::Iter {
+        self.into_par_iter().filter_map(|(ma, mb, mc)| {
+            let a = ma?;
+            let b = mb?;
+            let c = mc?;
+            Some((a, b, c))
+        })
+    }
+}
 
 fn sync<A, B>(
     a: &mut A,
@@ -79,94 +135,29 @@ impl<'a> Join for &'a Entities {
     }
 }
 
-pub struct Without<T>(pub(crate) T);
-
-pub struct WithoutIter<T: Iterator> {
-    iter: T,
-    id: usize,
-    next_id: usize,
-}
-
-impl<T> WithoutIter<T>
-where
-    T: Iterator,
-    T::Item: StorageComponent,
-{
-    pub(crate) fn new(mut iter: T) -> Self {
-        let next_id = iter.next().map(|e| e.id()).unwrap_or_else(|| usize::MAX);
-        WithoutIter {
-            iter,
-            id: 0,
-            next_id,
-        }
-    }
-}
-
-impl<T: Iterator> Iterator for WithoutIter<T>
-where
-    T: Iterator,
-    T::Item: StorageComponent,
-{
-    type Item = Entry<()>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        while self.id == self.next_id {
-            self.next_id = self
-                .iter
-                .next()
-                .map(|e| e.id())
-                .unwrap_or_else(|| usize::MAX);
-            self.id += 1;
-        }
-
-        let entry = Entry {
-            key: self.id,
-            value: (),
-        };
-        self.id += 1;
-        Some(entry)
-    }
-}
-
 impl<T> Join for WithoutIter<T>
 where
     T: Iterator,
     T::Item: StorageComponent,
 {
-    type Iter = WithoutIter<T>;
+    type Iter = Self;
 
     fn join(self) -> Self::Iter {
         self
     }
 }
 
-//pub struct Maybe<T>(pub T);
-//
-//pub trait MaybeJoin: Sized {
-//    fn maybe(&self) -> Maybe<&Self>;
-//    fn maybe_mut(&mut self) -> Maybe<&mut Self>;
-//}
-//
-//impl<T: Storage> MaybeJoin for T {
-//    fn maybe(&self) -> Maybe<&Self> {
-//        Maybe(self)
-//    }
-//
-//    fn maybe_mut(&mut self) -> Maybe<&mut Self> {
-//        Maybe(self)
-//    }
-//}
-//
-//impl<'a, T: Storage> Join for Maybe<&'a T> {
-//    type Iter = T::Iter<'a>;
-//
-//    fn join(self) -> JoinIter<Self::Iter> {
-//        todo!()
-//    }
-//}
-//
-//impl<'a, T: Storage> Join for Maybe<&'a mut T> {}
-//
+impl<T> Join for MaybeIter<T>
+where
+    T: Iterator,
+    T::Item: StorageComponent,
+{
+    type Iter = Self;
+
+    fn join(self) -> Self::Iter {
+        self
+    }
+}
 
 impl<A: Join> Join for (A,)
 where
@@ -199,6 +190,38 @@ mod test {
     use crate::join::*;
 
     #[test]
+    fn can_par_join() {
+        let mut store_a = VecStorage::new_with_capacity(1000);
+        let mut store_b = VecStorage::new_with_capacity(1000);
+        let mut store_c = VecStorage::new_with_capacity(1000);
+        let mut check = vec![];
+
+        for i in 0..1000 {
+            if i % 2 == 0 {
+                store_a.insert(i, i);
+            }
+            if i % 3 == 0 {
+                store_b.insert(i, i);
+            }
+            if i % 4 == 0 {
+                store_c.insert(i, i);
+            }
+            if i % 2 == 0 && i % 3 == 0 && i % 4 == 0 {
+                check.push((i, i, i));
+            }
+        }
+
+        let result = (&store_a, &store_b, &store_c)
+            .par_join()
+            .map(|(a, b, c)| (*a, *b, *c))
+            .collect::<Vec<_>>();
+
+        assert_eq!(check, result);
+
+        let _ = (&store_a, &store_b).par_join().collect::<Vec<_>>();
+    }
+
+    #[test]
     fn can_join_entities() {
         let entities = Entities::default();
         let abc_store: VecStorage<String> = VecStorage::default();
@@ -223,6 +246,29 @@ mod test {
 
         let withouts = (!&vs_a,).join().take(5).map(|e| e.0).collect::<Vec<_>>();
         assert_eq!(&withouts, &[2, 5, 6, 7, 9]);
+    }
+
+    #[test]
+    fn can_join_maybe() {
+        let mut vs: VecStorage<&str> = VecStorage::default();
+        vs.insert(1, "1");
+        vs.insert(2, "2");
+        vs.insert(3, "3");
+        vs.insert(6, "6");
+
+        let maybes = (vs.maybe(),).join().take(7).collect::<Vec<_>>();
+        assert_eq!(
+            &maybes,
+            &[
+                (0usize, None),
+                (1, Some(&"1")),
+                (2, Some(&"2")),
+                (3, Some(&"3")),
+                (4, None),
+                (5, None),
+                (6, Some(&"6"))
+            ]
+        );
     }
 
     #[test]

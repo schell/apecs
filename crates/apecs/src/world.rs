@@ -11,7 +11,7 @@ use anyhow::Context;
 
 use smol::future::FutureExt;
 
-use crate::{mpsc, AsyncSystem, CanFetch, IsResource, Resource, ResourceId, SyncSystem, Facade, spsc};
+use crate::{mpsc, AsyncSystem, CanFetch, IsResource, Resource, ResourceId, SyncSystem, Facade, spsc, storage::{CanReadStorage, CanWriteStorage}};
 
 struct DummyWaker;
 
@@ -185,11 +185,12 @@ impl World {
         });
         let mut cx = std::task::Context::from_waker(&waker);
 
-        self.tick_with_context(&mut cx)
+        self.tick_with_context(Some(&mut cx))
     }
 
-    /// Conduct a world tick but use an explicit
-    pub fn tick_with_context<'a>(&mut self, cx: &mut Ctx) -> anyhow::Result<()> {
+    /// Conduct a world tick but use an explicit context.
+    /// If no context is given, async systems and futures will not be ticked.
+    pub fn tick_with_context<'a>(&mut self, mut cx: Option<&mut Ctx>) -> anyhow::Result<()> {
         tracing::trace!("tick");
 
         // run through all the systems and poll them all
@@ -206,25 +207,27 @@ impl World {
             (system.function)(self.resources_from_system.0.clone(), resources)?;
         }
 
-        self.async_systems.retain_mut(|system| {
-            tracing::trace!("running async system '{}'", system.name);
-            clear_returned_resources(
-                Some(&system.name),
-                &self.resources_from_system.1,
-                &mut self.resources,
-            )
-            .unwrap();
-            system
-                .tick_async_system(cx, &mut self.resources)
-                .unwrap()
-        });
+        if let Some(cx) = cx.as_mut() {
+            self.async_systems.retain_mut(|system| {
+                tracing::trace!("running async system '{}'", system.name);
+                clear_returned_resources(
+                    Some(&system.name),
+                    &self.resources_from_system.1,
+                    &mut self.resources,
+                )
+                    .unwrap();
+                system
+                    .tick_async_system(cx, &mut self.resources)
+                    .unwrap()
+            });
 
-        // run the non-system futures and remove the finished tasks
-        if !self.tasks.is_empty() {
-            let _ = self.executor.try_tick();
-            for mut task in std::mem::take(&mut self.tasks) {
-                if let std::task::Poll::Pending = task.poll(cx) {
-                    self.tasks.push(task);
+            // run the non-system futures and remove the finished tasks
+            if !self.tasks.is_empty() {
+                let _ = self.executor.try_tick();
+                for mut task in std::mem::take(&mut self.tasks) {
+                    if let std::task::Poll::Pending = task.poll(cx) {
+                        self.tasks.push(task);
+                    }
                 }
             }
         }
@@ -258,7 +261,7 @@ impl World {
         let mut cx = std::task::Context::from_waker(&waker);
 
         loop {
-            self.tick_with_context(&mut cx)?;
+            self.tick_with_context(Some(&mut cx))?;
             if self.async_systems.is_empty()
                 && self.sync_systems.is_empty()
                 && self.tasks.is_empty()

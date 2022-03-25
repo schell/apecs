@@ -1,5 +1,5 @@
 use anyhow::Context;
-use apecs::{join::*, storage::*, CanFetch, Facade, Read, Write};
+use apecs::{entities::*, join::*, storage::*, CanFetch, Facade, Read, Write};
 
 #[derive(Clone)]
 pub struct Position {
@@ -135,7 +135,7 @@ pub fn create_move_print(syncronicity: super::Syncronicity, size: usize) -> anyh
     let waker = world.get_waker();
     let mut cx = std::task::Context::from_waker(&waker);
     for _ in 0..1000 {
-        world.tick_with_context(&mut cx)?;
+        world.tick_with_context(Some(&mut cx))?;
     }
 
     Ok(())

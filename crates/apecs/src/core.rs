@@ -20,6 +20,7 @@ pub mod spsc {
 
 mod fetch;
 pub use fetch::*;
+use rayon::iter::IntoParallelIterator;
 
 use crate::storage::{CanReadStorage, CanWriteStorage};
 

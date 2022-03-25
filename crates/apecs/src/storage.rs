@@ -1,11 +1,10 @@
 //! Entity component storage traits.
 mod vec;
+use rayon::iter::ParallelIterator;
 pub use vec::*;
 
 mod sparse;
 pub use sparse::*;
-
-use crate::IsComponent;
 
 pub trait StorageComponent {
     type Component;
@@ -76,6 +75,119 @@ impl<T> Entry<T> {
     }
 }
 
+/// An iterator that wraps a storage iterator, producing values
+/// for indicies that **are not** contained within the storage.
+pub struct WithoutIter<T: Iterator> {
+    iter: T,
+    id: usize,
+    next_id: usize,
+}
+
+impl<T> WithoutIter<T>
+where
+    T: Iterator,
+    T::Item: StorageComponent,
+{
+    pub(crate) fn new(mut iter: T) -> Self {
+        let next_id = iter.next().map(|e| e.id()).unwrap_or_else(|| usize::MAX);
+        WithoutIter {
+            iter,
+            id: 0,
+            next_id,
+        }
+    }
+}
+
+impl<T: Iterator> Iterator for WithoutIter<T>
+where
+    T: Iterator,
+    T::Item: StorageComponent,
+{
+    type Item = Entry<()>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.id == self.next_id {
+            self.next_id = self
+                .iter
+                .next()
+                .map(|e| e.id())
+                .unwrap_or_else(|| usize::MAX);
+            self.id += 1;
+        }
+
+        let entry = Entry {
+            key: self.id,
+            value: (),
+        };
+        self.id += 1;
+        Some(entry)
+    }
+}
+
+pub struct MaybeIter<T: Iterator>
+where
+    T::Item: StorageComponent,
+{
+    iter: T,
+    id: usize,
+    next_id: usize,
+    next_value: Option<<T::Item as StorageComponent>::Component>,
+}
+
+fn maybe_next<T: Iterator>(
+    iter: &mut T,
+) -> (usize, Option<<T::Item as StorageComponent>::Component>)
+where
+    T::Item: StorageComponent,
+{
+    iter.next()
+        .map(|mn| {
+            let (id, value) = mn.split();
+            (id, Some(value))
+        })
+        .unwrap_or_else(|| (usize::MAX, None))
+}
+
+impl<T> MaybeIter<T>
+where
+    T: Iterator,
+    T::Item: StorageComponent,
+{
+    pub(crate) fn new(mut iter: T) -> Self {
+        let (next_id, next_value) = maybe_next(&mut iter);
+        MaybeIter {
+            iter,
+            id: 0,
+            next_id,
+            next_value,
+        }
+    }
+}
+
+impl<T: Iterator> Iterator for MaybeIter<T>
+where
+    T: Iterator,
+    T::Item: StorageComponent,
+{
+    type Item = Entry<Option<<T::Item as StorageComponent>::Component>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let value = if self.id == self.next_id {
+            let (next_id, next_value) = maybe_next(&mut self.iter);
+            self.next_id = next_id;
+            std::mem::replace(&mut self.next_value, next_value)
+        } else {
+            None
+        };
+        let entry = Entry {
+            key: self.id,
+            value,
+        };
+        self.id += 1;
+        Some(entry)
+    }
+}
+
 /// A storage that can only be read from
 pub trait CanReadStorage {
     type Component;
@@ -88,6 +200,12 @@ pub trait CanReadStorage {
 
     /// Return an iterator over all entities and indices
     fn iter(&self) -> Self::Iter<'_>;
+
+    /// Return an iterator over all contiguous entities, regardless
+    /// of whether they reside in the storage.
+    fn maybe(&self) -> MaybeIter<Self::Iter<'_>> {
+        MaybeIter::new(self.iter())
+    }
 }
 
 /// A storage that can be read and written
@@ -104,6 +222,12 @@ pub trait CanWriteStorage: CanReadStorage {
 
     /// Return an iterator over entities, with the mutable components and their indices.
     fn iter_mut(&mut self) -> Self::IterMut<'_>;
+
+    /// Return an iterator over all contiguous entities, regardless
+    /// of whether they reside in the storage. Uses mutable components.
+    fn maybe_mut(&mut self) -> MaybeIter<Self::IterMut<'_>> {
+        MaybeIter::new(self.iter_mut())
+    }
 }
 
 #[cfg(test)]

@@ -95,7 +95,7 @@ pub fn main() -> anyhow::Result<()> {
     let mut ctx = std::task::Context::from_waker(&waker);
 
     while start.elapsed() < Duration::from_secs(5) {
-        world.tick_with_context(&mut ctx)?;
+        world.tick_with_context(Some(&mut ctx))?;
         ticks += 1;
     }
 

@@ -1,21 +1,21 @@
 # apecs
 **A**syncronous **P**arallel **E**ntity **C**omponent **S**ystem
 
-> NOTE: not yet parallel
-
-`apecs` is an entity-component system that spawns asyncronous and possibly
+`apecs` is an entity-component system that supports syncronous and asyncronous, possibly
 short-lived systems.
 
 ## Goals
 * ease of use - the API is very small and friendly, errors are well explained
-* speed - performance should be competitive with inspirational ECS libraries ie `specs`, `legion`, `shipyard`
+* speed - performance should be competitive with inspirational ECS libraries ie `specs`, `bevy_ecs`, `hecs`, `legion`, `shipyard`
 
-## TODO
+## Features
 [x] fetch resources from the world asyncronously
-[x] variable systems, ie systems that exit early and change over time
-[x] support for general futures
+[x] async systems, ie systems that exit early and change over time (for scenes, stories, etc)
+[x] sync systems with failure
+[x] futures
 [x] system data derive macros
+[x] efficient (in space or iteration) component storages
 [x] joins / queries
-[ ] efficient component storages
-[ ] parallel system scheduling
+[x] parallel joins / queries (inner parallelism)
+[ ] parallel system scheduling (outer parallelism)
 [ ] plugins/bundles
