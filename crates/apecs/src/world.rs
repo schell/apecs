@@ -336,6 +336,10 @@ impl World {
         self.waker = Some(waker);
         Ok(self)
     }
+
+    pub fn get_schedule_description(&self) -> String {
+        format!("{:#?}", self.sync_schedule)
+    }
 }
 
 #[cfg(test)]
