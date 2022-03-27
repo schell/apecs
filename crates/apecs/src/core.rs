@@ -1,9 +1,10 @@
 //! Core types and processes
-//!
 use std::{
     any::{Any, TypeId},
     collections::HashMap,
+    marker::PhantomData,
     ops::{Deref, DerefMut},
+    sync::Arc,
 };
 
 use anyhow::Context;
@@ -20,9 +21,11 @@ pub mod spsc {
 
 mod fetch;
 pub use fetch::*;
-use rayon::iter::IntoParallelIterator;
 
-use crate::storage::{CanReadStorage, CanWriteStorage};
+use crate::{
+    storage::{CanReadStorage, CanWriteStorage},
+    Borrow,
+};
 
 pub trait IsResource: Any + Send + Sync + 'static {}
 impl<T: Any + Send + Sync + 'static> IsResource for T {}
@@ -30,7 +33,31 @@ impl<T: Any + Send + Sync + 'static> IsResource for T {}
 pub trait IsComponent: Any + Send + Sync + 'static {}
 impl<T: Any + Send + Sync + 'static> IsComponent for T {}
 
+/// A type-erased resource.
 pub type Resource = Box<dyn Any + Send + Sync + 'static>;
+
+/// A resource that is ready for fetching, which means it is
+/// either owned (and therefore mutable by the owner) or sitting in an Arc.
+pub enum FetchReadyResource {
+    Owned(Resource),
+    Ref(Arc<Resource>),
+}
+
+impl FetchReadyResource {
+    fn into_owned(self) -> Option<Resource> {
+        match self {
+            FetchReadyResource::Owned(r) => Some(r),
+            FetchReadyResource::Ref(_) => None,
+        }
+    }
+
+    fn into_ref(self) -> Option<Arc<Resource>> {
+        match self {
+            FetchReadyResource::Owned(_) => None,
+            FetchReadyResource::Ref(r) => Some(r),
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ResourceTypeId {
@@ -40,13 +67,13 @@ pub enum ResourceTypeId {
 
 #[derive(Clone, Debug, Eq)]
 pub struct ResourceId {
-    pub(crate) type_id: ResourceTypeId,
-    pub(crate) name: String,
+    pub(crate) type_id: TypeId,
+    pub(crate) name: &'static str,
 }
 
 impl std::fmt::Display for ResourceId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.name.as_str())
+        f.write_str(self.name)
     }
 }
 
@@ -65,17 +92,17 @@ impl PartialEq for ResourceId {
 impl ResourceId {
     pub fn new<T: IsResource>() -> Self {
         ResourceId {
-            type_id: ResourceTypeId::Raw(TypeId::of::<T>()),
-            name: std::any::type_name::<T>().to_string(),
+            type_id: TypeId::of::<T>(), //ResourceTypeId::Raw(TypeId::of::<T>()),
+            name: std::any::type_name::<T>(),
         }
     }
 
-    pub fn new_storage<T: IsComponent>() -> Self {
-        ResourceId {
-            type_id: ResourceTypeId::Storage(TypeId::of::<T>()),
-            name: std::any::type_name::<T>().to_string(),
-        }
-    }
+    //pub fn new_storage<T: IsComponent>() -> Self {
+    //    ResourceId {
+    //        type_id: ResourceTypeId::Storage(TypeId::of::<T>()),
+    //        name: std::any::type_name::<T>().to_string(),
+    //    }
+    //}
 }
 
 /// Wrapper for one fetched resource.
@@ -168,14 +195,16 @@ impl<T: IsResource + CanWriteStorage> CanWriteStorage for Write<T> {
 }
 
 pub struct Read<T: IsResource> {
-    fetched: Fetched<T>,
+    inner: Arc<Resource>,
+    _phantom: PhantomData<T>,
 }
 
 impl<'a, T: IsResource> Deref for Read<T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        self.fetched.inner.as_ref().unwrap()
+        // I don't like this unwrap, but it works
+        self.inner.downcast_ref().unwrap()
     }
 }
 
@@ -187,35 +216,41 @@ impl<T: IsResource + CanReadStorage> CanReadStorage for Read<T> {
         Self: 'a;
 
     fn get(&self, id: usize) -> Option<&Self::Component> {
-        self.fetched.get(id)
+        self.deref().get(id)
     }
 
     fn iter(&self) -> Self::Iter<'_> {
-        self.fetched.iter()
+        self.deref().iter()
     }
 }
 
 pub(crate) struct Request {
-    pub resource_ids: Vec<ResourceId>,
+    pub borrows: Vec<Borrow>,
 }
 
 pub struct Facade {
     // Unbounded. Sending from the system should not yield the async
     pub(crate) resource_request_tx: spsc::Sender<Request>,
     // Bounded(1). Awaiting in the system should yield the async
-    pub(crate) resources_to_system_rx: spsc::Receiver<HashMap<ResourceId, Resource>>,
+    pub(crate) resources_to_system_rx: spsc::Receiver<HashMap<ResourceId, FetchReadyResource>>,
     // Unbounded. Sending from the system should not yield the async
     pub(crate) resources_from_system_tx: mpsc::Sender<(ResourceId, Resource)>,
 }
 
 impl Facade {
     pub async fn fetch<'a, T: CanFetch>(&'a mut self) -> anyhow::Result<T> {
-        let reads = T::reads();
-        let writes = T::writes();
-        let mut resource_ids = reads;
-        resource_ids.extend(writes);
+        let reads = T::reads().into_iter().map(|id| Borrow {
+            id,
+            is_exclusive: false,
+        });
+        let writes = T::writes().into_iter().map(|id| Borrow {
+            id,
+            is_exclusive: true,
+        });
         self.resource_request_tx
-            .try_send(Request { resource_ids })
+            .try_send(Request {
+                borrows: reads.chain(writes).collect(),
+            })
             .context("could not send request for resources")?;
 
         let mut resources = self
@@ -233,7 +268,7 @@ pub trait CanFetch: Sized {
     fn writes() -> Vec<ResourceId>;
     fn construct<'a>(
         resource_return_tx: mpsc::Sender<(ResourceId, Resource)>,
-        fields: &mut HashMap<ResourceId, Resource>,
+        fields: &mut HashMap<ResourceId, FetchReadyResource>,
     ) -> anyhow::Result<Self>;
 }
 
@@ -248,13 +283,18 @@ impl<'a, T: IsResource> CanFetch for Write<T> {
 
     fn construct(
         resource_return_tx: mpsc::Sender<(ResourceId, Resource)>,
-        fields: &mut HashMap<ResourceId, Resource>,
+        fields: &mut HashMap<ResourceId, FetchReadyResource>,
     ) -> anyhow::Result<Self> {
         let id = ResourceId::new::<T>();
-        let t: Resource = fields.remove(&id).context(format!(
-            "could not find '{}' in resources",
-            std::any::type_name::<T>(),
-        ))?;
+        let t: FetchReadyResource = fields.remove(&id).with_context(|| {
+            format!(
+                "could not find '{}' in resources",
+                std::any::type_name::<T>(),
+            )
+        })?;
+        let t = t
+            .into_owned()
+            .with_context(|| format!("resource is not owned"))?;
         let inner: Option<Box<T>> = Some(t.downcast::<T>().map_err(|_| {
             anyhow::anyhow!(
                 "could not cast resource as '{}'",
@@ -267,10 +307,6 @@ impl<'a, T: IsResource> CanFetch for Write<T> {
         };
         Ok(Write { fetched })
     }
-
-    //fn deconstruct(self) -> HashMap<ResourceId, Resource> {
-    //    HashMap::from([(ResourceId::new::<T>(), self.inner as Resource)])
-    //}
 }
 
 impl<'a, T: IsResource> CanFetch for Read<T> {
@@ -283,30 +319,23 @@ impl<'a, T: IsResource> CanFetch for Read<T> {
     }
 
     fn construct(
-        resource_return_tx: mpsc::Sender<(ResourceId, Resource)>,
-        fields: &mut HashMap<ResourceId, Resource>,
+        _: mpsc::Sender<(ResourceId, Resource)>,
+        fields: &mut HashMap<ResourceId, FetchReadyResource>,
     ) -> anyhow::Result<Self> {
         let id = ResourceId::new::<T>();
-        let t: Resource = fields.remove(&id).context(format!(
-            "could not find '{}' in resources",
-            std::any::type_name::<T>(),
-        ))?;
-        let inner: Option<Box<T>> = Some(t.downcast().map_err(|_| {
-            anyhow::anyhow!(
-                "could not cast resource as '{}'",
+        let t: FetchReadyResource = fields.remove(&id).with_context(|| {
+            format!(
+                "could not find '{}' in resources",
                 std::any::type_name::<T>(),
             )
-        })?);
-        let fetched = Fetched {
-            resource_return_tx,
-            inner,
-        };
-        Ok(Read { fetched })
-    }
+        })?;
+        let inner = t.into_ref().context("resource is not borrowed")?;
 
-    //fn deconstruct(self) -> HashMap<ResourceId, Resource> {
-    //    HashMap::from([(ResourceId::new::<T>(), self.inner as Resource)])
-    //}
+        Ok(Read {
+            inner,
+            _phantom: PhantomData,
+        })
+    }
 }
 
 #[cfg(test)]

@@ -5,12 +5,15 @@
 short-lived systems.
 
 ## Goals
-* ease of use - the API is very small and friendly, errors are well explained
-* speed - performance should be competitive with inspirational ECS libraries ie `specs`, `bevy_ecs`, `hecs`, `legion`, `shipyard`
+* productivity
+* flexibility
+* don't be too magical / explicit API (within reason)
+* performance should be competitive with inspirational ECS libraries
+  - like `specs`, `bevy_ecs`, `hecs`, `legion`, `shipyard`
 
 ## Features
 [x] fetch resources from the world asyncronously
-[x] async systems, ie systems that exit early and change over time (for scenes, stories, etc)
+[x] async systems, ie systems that end and/or change over time (for scenes, stories, etc)
 [x] sync systems with failure
 [x] futures
 [x] system data derive macros
@@ -19,3 +22,4 @@ short-lived systems.
 [x] parallel joins / queries (inner parallelism)
 [ ] parallel system scheduling (outer parallelism)
 [ ] plugins/bundles
+[ ] flagged storage (components created, updated, modified)

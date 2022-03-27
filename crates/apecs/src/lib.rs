@@ -3,16 +3,16 @@
 #![feature(generic_associated_types)]
 #![feature(vec_retain_mut)]
 mod core;
-pub use crate::core::*;
+mod system;
 
 pub mod entities;
-pub mod storage;
 pub mod join;
+pub mod schedule;
+pub mod storage;
 pub mod world;
-
 pub mod anyhow {
     pub use anyhow::*;
 }
 
-mod system;
+pub use crate::core::*;
 pub use system::*;

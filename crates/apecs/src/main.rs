@@ -83,7 +83,7 @@ fn main() -> anyhow::Result<()> {
     let subscriber = tracing_subscriber::FmtSubscriber::builder()
         // `ng` will TRACE, so if you don't want to see all the engine output
         // set something higher than `Level::TRACE`.
-        .with_max_level(Level::INFO)
+        .with_max_level(Level::DEBUG)
         .finish();
 
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
@@ -97,14 +97,15 @@ fn main() -> anyhow::Result<()> {
         .with_async_system("move", move_system)
         .with_async_system("print", print_system);
 
-    let start = Instant::now();
-    for _ in 0..1000 {
-        world.tick()?;
-    }
+    //let start = Instant::now();
+    //for _ in 0..1000 {
+    //    world.tick()?;
+    //}
+    world.run()?;
 
-    let elapsed = start.elapsed().as_secs_f32();
-    tracing::info!("finished 1000 frames in {:.2}seconds", elapsed);
-    tracing::info!("average {}fps", 1000.0 / elapsed);
+    //let elapsed = start.elapsed().as_secs_f32();
+    //tracing::info!("finished 1000 frames in {:.2}seconds", elapsed);
+    //tracing::info!("average {}fps", 1000.0 / elapsed);
 
     Ok(())
 }

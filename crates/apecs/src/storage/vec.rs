@@ -1,7 +1,7 @@
 //! Storage using a naive vector.
 use crate::{storage::*, Write};
 use hibitset::BitSet;
-use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 use super::Entry;
 

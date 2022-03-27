@@ -1,5 +1,5 @@
 //! Implementations of `CanFetch`.
-use crate::{CanFetch, ResourceId, Resource, mpsc};
+use crate::{CanFetch, ResourceId, Resource, FetchReadyResource, mpsc};
 
 apecs_derive::impl_canfetch_tuple!((A, B));
 apecs_derive::impl_canfetch_tuple!((A, B, C));

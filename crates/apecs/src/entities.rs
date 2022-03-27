@@ -4,7 +4,8 @@ use std::{iter::Map, ops::Deref};
 
 use hibitset::{BitIter, BitSet, BitSetLike};
 
-use crate::{storage::Entry, world::World};
+use crate::storage::Entry;
+
 pub struct Entity {
     id: usize,
 }

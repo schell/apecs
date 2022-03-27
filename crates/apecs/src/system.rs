@@ -1,13 +1,20 @@
-use std::{collections::HashMap, future::Future, pin::Pin};
+use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 
 use anyhow::Context;
 use smol::future::FutureExt;
 
-use crate::{mpsc, spsc, Request, Resource, ResourceId};
+use crate::{
+    mpsc,
+    schedule::{IsBatch, IsBorrow, IsSchedule, IsSystem},
+    spsc, FetchReadyResource, Request, Resource, ResourceId,
+};
 
 pub type AsyncSystemFuture =
     Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + Sync + 'static>>;
 
+// TODO: Add async systems as general futures and simply schedule requests for
+// resources in the world tick, then tick the smol executor until the resources
+// come back.
 pub(crate) struct AsyncSystem {
     pub name: String,
     // The system logic as a future.
@@ -15,7 +22,7 @@ pub(crate) struct AsyncSystem {
     // Unbounded. Used to send resource requests from the system to the world.
     pub resource_request_rx: spsc::Receiver<Request>,
     // Bounded (1). Used to send resources from the world to the system.
-    pub resources_to_system_tx: spsc::Sender<HashMap<ResourceId, Resource>>,
+    pub resources_to_system_tx: spsc::Sender<HashMap<ResourceId, FetchReadyResource>>,
 }
 
 impl AsyncSystem {
@@ -28,17 +35,29 @@ impl AsyncSystem {
         let mut sent_resources = None;
 
         // receive any system resource requests
-        if let Some(Request { resource_ids }) = self.resource_request_rx.try_recv().ok() {
-            let resources =
-                crate::world::try_take_resources(resources, resource_ids.iter(), Some(&self.name))?;
+        let borrowed_resources = if let Some(mut request) = self.resource_request_rx.try_recv().ok()
+        {
+            // get the outgoing resources (owned and refs) and a clone of the
+            // refs
+            let (resources, staying_refs) = crate::world::try_take_resources(
+                resources,
+                request.borrows.iter(),
+                Some(&self.name),
+            )?;
 
             // send them to the system
             self.resources_to_system_tx
                 .try_send(resources)
                 .context(format!("cannot send resources to system '{}'", self.name))?;
-            // save these for later to confirm that resources have been returned
-            sent_resources = Some(resource_ids);
-        }
+            // save the request for later to confirm that the owned resources have been returned
+            request
+                .borrows
+                .retain(|b| !staying_refs.contains_key(&b.id));
+            sent_resources = Some(request);
+            staying_refs
+        } else {
+            HashMap::default()
+        };
 
         // run the system, bailing if it errs
         let system_done = match self.future.poll(cx) {
@@ -55,17 +74,17 @@ impl AsyncSystem {
         };
 
         // try to get the resources back, if possible
-        if let Some(sent_resources) = sent_resources.as_mut() {
+        if let Some(request) = sent_resources.as_mut() {
             if cfg!(feature = "debug_async") {
                 // ensure that all the sent resources have been given back
-                sent_resources.retain(|k| !resources.contains_key(k));
+                request.borrows.retain(|k| !resources.contains_key(&k.id));
             }
             // if we've received all the resources we sent
-            if cfg!(feature = "debug_async") && !sent_resources.is_empty() {
+            if cfg!(feature = "debug_async") && !request.borrows.is_empty() {
                 tracing::error!(
-                        "system '{}' is holding onto world resources '{:?}' longer than one frame, downstream systems may fail",
+                        "system '{}' is holding on to world resources '{:?}' longer than one frame, downstream systems may fail",
                         self.name,
-                        sent_resources.iter().map(|k| k.name.as_str()).collect::<Vec<_>>(),
+                        request.borrows.iter().map(|k| k.id.name).collect::<Vec<_>>(),
                     );
                 if system_done {
                     anyhow::bail!(
@@ -76,21 +95,114 @@ impl AsyncSystem {
             }
         }
 
+        // put the borrowed resources back
+        for (id, rez) in borrowed_resources.into_iter() {
+            let rez = Arc::try_unwrap(rez)
+                .map_err(|_| anyhow::anyhow!("could not retreive borrowed resource"))?;
+            resources.insert(id, rez);
+        }
+
         Ok(!system_done)
     }
 }
 
-pub(crate) struct SyncSystem {
-    pub name: String,
-    pub reads: Vec<ResourceId>,
-    pub writes: Vec<ResourceId>,
-    pub function: SystemFunction,
+#[derive(Clone, Debug)]
+pub(crate) struct Borrow {
+    pub id: ResourceId,
+    pub is_exclusive: bool,
+}
+
+impl IsBorrow for Borrow {
+    fn type_id(&self) -> std::any::TypeId {
+        self.id.type_id
+    }
+
+    fn name(&self) -> &str {
+        self.id.name
+    }
+
+    fn is_exclusive(&self) -> bool {
+        self.is_exclusive
+    }
 }
 
 pub type SystemFunction = Box<
     dyn FnMut(
             mpsc::Sender<(ResourceId, Resource)>,
-            HashMap<ResourceId, Resource>,
+            HashMap<ResourceId, FetchReadyResource>,
         ) -> anyhow::Result<()>
         + 'static,
 >;
+
+pub(crate) struct SyncSystem {
+    pub name: String,
+    pub borrows: Vec<Borrow>,
+    pub function: SystemFunction,
+}
+
+impl std::fmt::Debug for SyncSystem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SyncSystem")
+            .field("name", &self.name)
+            .field("borrows", &self.borrows)
+            .field("function", &"FnMut(_)")
+            .finish()
+    }
+}
+
+impl IsSystem for SyncSystem {
+    type Borrow = Borrow;
+
+    fn name(&self) -> &str {
+        self.name.as_str()
+    }
+
+    fn borrows(&self) -> &[Self::Borrow] {
+        &self.borrows
+    }
+
+    fn conflicts_with(&self, other: &impl IsSystem) -> bool {
+        for borrow_here in self.borrows.iter() {
+            for borrow_there in other.borrows() {
+                if borrow_here.type_id() == borrow_there.type_id()
+                    && (borrow_here.is_exclusive() || borrow_there.is_exclusive())
+                {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct SyncBatch(Vec<SyncSystem>);
+
+impl IsBatch for SyncBatch {
+    type System = SyncSystem;
+
+    fn systems(&self) -> &[Self::System] {
+        &self.0
+    }
+
+    fn add_system(&mut self, system: Self::System) {
+        self.0.push(system);
+    }
+}
+
+#[derive(Debug)]
+pub struct SyncSchedule(Vec<SyncBatch>);
+
+impl IsSchedule for SyncSchedule {
+    type System = SyncSystem;
+
+    type Batch = SyncBatch;
+
+    fn batches_mut(&mut self) -> &mut [Self::Batch] {
+        &mut self.0
+    }
+
+    fn add_batch(&mut self, batch: Self::Batch) {
+        self.0.push(batch);
+    }
+}

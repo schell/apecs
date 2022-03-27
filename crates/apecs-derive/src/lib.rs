@@ -100,7 +100,7 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
 
             fn construct(
                 tx: apecs::mpsc::Sender<(apecs::ResourceId, apecs::Resource)>,
-                fields: &mut std::collections::HashMap<apecs::ResourceId, apecs::Resource>,
+                fields: &mut std::collections::HashMap<apecs::ResourceId, apecs::FetchReadyResource>,
             ) -> anyhow::Result<Self> {
                 Ok(#construct_return)
             }
@@ -130,7 +130,7 @@ pub fn impl_canfetch_tuple(input: proc_macro::TokenStream) -> proc_macro::TokenS
 
             fn construct(
                 tx: mpsc::Sender<(ResourceId, Resource)>,
-                fields: &mut std::collections::HashMap<ResourceId, Resource>,
+                fields: &mut std::collections::HashMap<ResourceId, FetchReadyResource>,
             ) -> anyhow::Result<Self> {
                 Ok((
                     #(#tys::construct(tx.clone(), fields)?),*

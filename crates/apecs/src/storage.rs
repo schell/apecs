@@ -1,6 +1,5 @@
 //! Entity component storage traits.
 mod vec;
-use rayon::iter::ParallelIterator;
 pub use vec::*;
 
 mod sparse;
