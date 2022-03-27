@@ -12,8 +12,10 @@ use anyhow::Context;
 use smol::future::FutureExt;
 
 use crate::{
-    mpsc, spsc, AsyncSystem, Borrow, CanFetch, Facade, FetchReadyResource, IsResource, Resource,
-    ResourceId, SyncSystem,
+    mpsc,
+    schedule::{IsBorrow, IsSchedule},
+    spsc, AsyncSystem, Borrow, CanFetch, Facade, FetchReadyResource, IsResource, Resource,
+    ResourceId, SyncSchedule, SyncSystem,
 };
 
 struct DummyWaker;
@@ -34,7 +36,7 @@ pub struct World {
         mpsc::Sender<(ResourceId, Resource)>,
         mpsc::Receiver<(ResourceId, Resource)>,
     ),
-    sync_systems: Vec<SyncSystem>,
+    sync_schedule: SyncSchedule,
     async_systems: Vec<AsyncSystem>,
     // executor for non-system futures
     executor: smol::Executor<'static>,
@@ -49,7 +51,7 @@ impl Default for World {
             resources: Default::default(),
             loaned_resources: HashMap::new(),
             resources_from_system: mpsc::unbounded(),
-            sync_systems: vec![],
+            sync_schedule: SyncSchedule::default(),
             async_systems: vec![],
             executor: Default::default(),
             tasks: vec![],
@@ -57,7 +59,7 @@ impl Default for World {
     }
 }
 
-fn clear_returned_resources(
+pub(crate) fn clear_returned_resources(
     system_name: Option<&str>,
     resources_from_system_rx: &mpsc::Receiver<(ResourceId, Resource)>,
     resources: &mut HashMap<ResourceId, Resource>,
@@ -88,7 +90,7 @@ fn clear_returned_resources(
 
 pub(crate) fn try_take_resources<'a>(
     resources: &mut HashMap<ResourceId, Resource>,
-    borrows: impl Iterator<Item = &'a Borrow>,
+    borrows: impl Iterator<Item = &'a (impl IsBorrow + 'a)>,
     system_name: Option<&str>,
 ) -> anyhow::Result<(
     HashMap<ResourceId, FetchReadyResource>,
@@ -98,11 +100,11 @@ pub(crate) fn try_take_resources<'a>(
     let mut ready_resources: HashMap<ResourceId, FetchReadyResource> = HashMap::default();
     let mut stay_resources: HashMap<ResourceId, Arc<Resource>> = HashMap::default();
     for borrow in borrows {
-        let rez: Resource = resources.remove(&borrow.id).with_context(|| {
+        let rez: Resource = resources.remove(&borrow.rez_id()).with_context(|| {
             format!(
                 r#"system '{}' requested missing resource "{}" encountered while building request for {:?}"#,
                 system_name.unwrap_or_else(|| "world"),
-                borrow.id.name,
+                borrow.rez_id().name,
                 resources
                     .keys()
                     .map(|k| k.name)
@@ -110,19 +112,19 @@ pub(crate) fn try_take_resources<'a>(
             )
         })?;
 
-        let ready_rez = if borrow.is_exclusive {
+        let ready_rez = if borrow.is_exclusive() {
             FetchReadyResource::Owned(rez)
         } else {
             let stay_rez = Arc::new(rez);
             let ready_rez = FetchReadyResource::Ref(stay_rez.clone());
-            let _ = stay_resources.insert(borrow.id.clone(), stay_rez);
+            let _ = stay_resources.insert(borrow.rez_id().clone(), stay_rez);
             ready_rez
         };
-        let prev_inserted_rez = ready_resources.insert(borrow.id.clone(), ready_rez);
+        let prev_inserted_rez = ready_resources.insert(borrow.rez_id(), ready_rez);
         assert!(
             prev_inserted_rez.is_none(),
             "cannot request multiple resources of the same type: '{:?}'",
-            borrow.id
+            borrow.rez_id()
         );
     }
 
@@ -149,7 +151,7 @@ impl World {
 
     pub fn with_system<T, F>(&mut self, name: impl AsRef<str>, mut sys_fn: F) -> &mut Self
     where
-        F: FnMut(T) -> anyhow::Result<()> + 'static,
+        F: FnMut(T) -> anyhow::Result<()> + Send + Sync + 'static,
         T: CanFetch,
     {
         let system = SyncSystem {
@@ -171,7 +173,12 @@ impl World {
             }),
         };
 
-        self.sync_systems.push(system);
+        self.sync_schedule.add_system(system);
+        self
+    }
+
+    pub fn with_sync_systems_run_in_parallel(&mut self, parallelize: bool) -> &mut Self {
+        self.sync_schedule.set_should_parallelize(parallelize);
         self
     }
 
@@ -263,23 +270,16 @@ impl World {
             }
         }
 
-        // run through all the systems and poll them all
-        for system in self.sync_systems.iter_mut() {
-            tracing::trace!("running sync system '{}'", system.name);
-            clear_returned_resources(
-                Some(&system.name),
-                &self.resources_from_system.1,
-                &mut self.resources,
-                &mut self.loaned_resources,
-            )?;
-            let (resources, staying_resources) = try_take_resources(
-                &mut self.resources,
-                system.borrows.iter(),
-                Some(&system.name),
-            )?;
-            (system.function)(self.resources_from_system.0.clone(), resources)?;
-            self.loaned_resources.extend(staying_resources);
-        }
+        clear_returned_resources(
+            None,
+            &self.resources_from_system.1,
+            &mut self.resources,
+            &mut self.loaned_resources,
+        )?;
+
+        // run the scheduled sync systems
+        self.sync_schedule
+            .run(&mut self.resources, &self.resources_from_system)?;
 
         Ok(())
     }
@@ -326,7 +326,7 @@ impl World {
         loop {
             self.tick_with_context(Some(&mut cx))?;
             if self.async_systems.is_empty()
-                && self.sync_systems.is_empty()
+                && self.sync_schedule.is_empty()
                 && self.tasks.is_empty()
             {
                 break;
@@ -405,11 +405,13 @@ mod test {
             Ok(())
         }
 
-        fn maintain_map(mut data: (
-            Read<VecStorage<String>>,
-            Read<VecStorage<u32>>,
-            Write<HashMap<String, u32>>,
-        )) -> anyhow::Result<()> {
+        fn maintain_map(
+            mut data: (
+                Read<VecStorage<String>>,
+                Read<VecStorage<u32>>,
+                Write<HashMap<String, u32>>,
+            ),
+        ) -> anyhow::Result<()> {
             for (_, name, number) in (&data.0, &data.1).join() {
                 if !data.2.contains_key(name) {
                     let _ = data.2.insert(name.to_string(), *number);

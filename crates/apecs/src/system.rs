@@ -113,8 +113,8 @@ pub(crate) struct Borrow {
 }
 
 impl IsBorrow for Borrow {
-    fn type_id(&self) -> std::any::TypeId {
-        self.id.type_id
+    fn rez_id(&self) -> ResourceId {
+        self.id.clone()
     }
 
     fn name(&self) -> &str {
@@ -131,6 +131,8 @@ pub type SystemFunction = Box<
             mpsc::Sender<(ResourceId, Resource)>,
             HashMap<ResourceId, FetchReadyResource>,
         ) -> anyhow::Result<()>
+        + Send
+        + Sync
         + 'static,
 >;
 
@@ -164,7 +166,7 @@ impl IsSystem for SyncSystem {
     fn conflicts_with(&self, other: &impl IsSystem) -> bool {
         for borrow_here in self.borrows.iter() {
             for borrow_there in other.borrows() {
-                if borrow_here.type_id() == borrow_there.type_id()
+                if borrow_here.rez_id() == borrow_there.rez_id()
                     && (borrow_here.is_exclusive() || borrow_there.is_exclusive())
                 {
                     return true;
@@ -172,6 +174,14 @@ impl IsSystem for SyncSystem {
             }
         }
         return false;
+    }
+
+    fn run(
+        &mut self,
+        tx: mpsc::Sender<(ResourceId, Resource)>,
+        resources: HashMap<ResourceId, FetchReadyResource>,
+    ) -> anyhow::Result<()> {
+        (self.function)(tx, resources)
     }
 }
 
@@ -185,13 +195,20 @@ impl IsBatch for SyncBatch {
         &self.0
     }
 
+    fn systems_mut(&mut self) -> &mut [Self::System] {
+        &mut self.0
+    }
+
     fn add_system(&mut self, system: Self::System) {
         self.0.push(system);
     }
 }
 
-#[derive(Debug)]
-pub struct SyncSchedule(Vec<SyncBatch>);
+#[derive(Debug, Default)]
+pub struct SyncSchedule {
+    batches: Vec<SyncBatch>,
+    should_run_parallel: bool
+}
 
 impl IsSchedule for SyncSchedule {
     type System = SyncSystem;
@@ -199,10 +216,23 @@ impl IsSchedule for SyncSchedule {
     type Batch = SyncBatch;
 
     fn batches_mut(&mut self) -> &mut [Self::Batch] {
-        &mut self.0
+        &mut self.batches
+    }
+
+    fn batches(&self) -> &[Self::Batch] {
+        &self.batches
     }
 
     fn add_batch(&mut self, batch: Self::Batch) {
-        self.0.push(batch);
+        self.batches.push(batch);
     }
+
+    fn set_should_parallelize(&mut self, should: bool) {
+        self.should_run_parallel = should;
+    }
+
+    fn get_should_parallelize(&self) -> bool {
+        self.should_run_parallel
+    }
+
 }
