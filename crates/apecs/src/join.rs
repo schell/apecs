@@ -33,32 +33,16 @@ where
     }
 }
 
-impl<StoreA, StoreB, StoreC, IterA, IterB, IterC, A, B, C> ParJoin for (StoreA, StoreB, StoreC)
-where
-    StoreA: IntoParallelIterator<Iter = IterA>,
-    StoreB: IntoParallelIterator<Iter = IterB>,
-    StoreC: IntoParallelIterator<Iter = IterC>,
-    IterA: IndexedParallelIterator<Item = Option<A>>,
-    IterB: IndexedParallelIterator<Item = Option<B>>,
-    IterC: IndexedParallelIterator<Item = Option<C>>,
-    A: Send,
-    B: Send,
-    C: Send,
-{
-    type Iter = FilterMap<
-        MultiZip<(IterA, IterB, IterC)>,
-        fn((Option<A>, Option<B>, Option<C>)) -> Option<(A, B, C)>,
-    >;
-
-    fn par_join(self) -> Self::Iter {
-        self.into_par_iter().filter_map(|(ma, mb, mc)| {
-            let a = ma?;
-            let b = mb?;
-            let c = mc?;
-            Some((a, b, c))
-        })
-    }
-}
+apecs_derive::impl_parjoin_tuple!((A, B, C));
+apecs_derive::impl_parjoin_tuple!((A, B, C, D));
+apecs_derive::impl_parjoin_tuple!((A, B, C, D, E));
+apecs_derive::impl_parjoin_tuple!((A, B, C, D, E, F));
+apecs_derive::impl_parjoin_tuple!((A, B, C, D, E, F, G));
+apecs_derive::impl_parjoin_tuple!((A, B, C, D, E, F, G, H));
+apecs_derive::impl_parjoin_tuple!((A, B, C, D, E, F, G, H, I));
+apecs_derive::impl_parjoin_tuple!((A, B, C, D, E, F, G, H, I, J));
+apecs_derive::impl_parjoin_tuple!((A, B, C, D, E, F, G, H, I, J, K));
+apecs_derive::impl_parjoin_tuple!((A, B, C, D, E, F, G, H, I, J, K, L));
 
 fn sync<A, B>(
     a: &mut A,

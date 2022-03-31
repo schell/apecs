@@ -163,12 +163,17 @@ impl<T: IsResource + CanReadStorage> CanReadStorage for Write<T> {
     where
         Self: 'a;
 
+
     fn get(&self, id: usize) -> Option<&Self::Component> {
         self.fetched.get(id)
     }
 
     fn iter(&self) -> Self::Iter<'_> {
         self.fetched.iter()
+    }
+
+    fn last(&self) -> Option<crate::storage::Entry<&Self::Component>> {
+        self.fetched.last()
     }
 }
 
@@ -221,6 +226,10 @@ impl<T: IsResource + CanReadStorage> CanReadStorage for Read<T> {
 
     fn iter(&self) -> Self::Iter<'_> {
         self.deref().iter()
+    }
+
+    fn last(&self) -> Option<crate::storage::Entry<&Self::Component>> {
+        self.deref().last()
     }
 }
 

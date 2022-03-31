@@ -1,9 +1,15 @@
 //! Entity component storage traits.
 mod vec;
+use std::sync::{Arc, Mutex};
+
+use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 pub use vec::*;
 
 mod sparse;
 pub use sparse::*;
+
+mod btree;
+pub use btree::*;
 
 pub trait StorageComponent {
     type Component;
@@ -37,6 +43,7 @@ impl StorageComponent for usize {
     }
 }
 
+#[derive(Debug, PartialEq)]
 pub struct Entry<T> {
     pub(crate) key: usize,
     pub value: T,
@@ -70,6 +77,13 @@ impl<T> Entry<T> {
         Entry {
             key: self.key,
             value: &mut self.value,
+        }
+    }
+
+    pub fn map<X>(self, f: impl FnOnce(T) -> X) -> Entry<X> {
+        Entry {
+            key: self.key,
+            value: f(self.value),
         }
     }
 }
@@ -195,6 +209,9 @@ pub trait CanReadStorage {
     where
         Self: 'a;
 
+    /// Return the last (alive) entry.
+    fn last(&self) -> Option<Entry<&Self::Component>>;
+
     fn get(&self, id: usize) -> Option<&Self::Component>;
 
     /// Return an iterator over all entities and indices
@@ -204,6 +221,26 @@ pub trait CanReadStorage {
     /// of whether they reside in the storage.
     fn maybe(&self) -> MaybeIter<Self::Iter<'_>> {
         MaybeIter::new(self.iter())
+    }
+}
+
+impl<'a, S: CanReadStorage> CanReadStorage for &'a S {
+    type Component = S::Component;
+
+    type Iter<'b> = S::Iter<'b>
+    where
+        Self: 'b;
+
+    fn last(&self) -> Option<Entry<&Self::Component>> {
+        <S as CanReadStorage>::last(self)
+    }
+
+    fn get(&self, id: usize) -> Option<&Self::Component> {
+        <S as CanReadStorage>::get(self, id)
+    }
+
+    fn iter(&self) -> Self::Iter<'_> {
+        <S as CanReadStorage>::iter(self)
     }
 }
 
@@ -226,6 +263,144 @@ pub trait CanWriteStorage: CanReadStorage {
     /// of whether they reside in the storage. Uses mutable components.
     fn maybe_mut(&mut self) -> MaybeIter<Self::IterMut<'_>> {
         MaybeIter::new(self.iter_mut())
+    }
+}
+
+/// A helper for writing `IntoParallelIterator` implementations for references to storages.
+pub struct StorageIter<'a, S>(&'a S);
+
+impl<'a, S> IntoParallelIterator for StorageIter<'a, S>
+where
+    S: CanReadStorage + Send + Sync,
+    S::Component: Send + Sync,
+{
+    type Iter = rayon::iter::MapWith<
+        rayon::range::Iter<usize>,
+        &'a S,
+        fn(&mut &'a S, usize) -> Option<&'a S::Component>,
+    >;
+
+    type Item = Option<&'a S::Component>;
+
+    fn into_par_iter(self) -> Self::Iter {
+        fn get<'a, S: CanReadStorage>(s: &mut &'a S, n: usize) -> Option<&'a S::Component> {
+            s.get(n)
+        }
+
+        let len = self.0.last().map(|e| e.key()).unwrap_or(0);
+        let range = 0..len;
+        let iter: _ = range.into_par_iter().map_with(
+            self.0,
+            get as fn(&mut &'a S, usize) -> Option<&'a S::Component>,
+        );
+        iter
+    }
+}
+
+/// A helper for writing `IntoParallelIterator` implementations for references to storages.
+pub struct StorageIterMut<'a, S>(&'a mut S);
+
+impl<'a, S> IntoParallelIterator for StorageIterMut<'a, S>
+where
+    S: CanWriteStorage + Send + Sync,
+    S::Component: Send + Sync,
+{
+    type Iter = rayon::iter::MapWith<
+        rayon::range::Iter<usize>,
+        Arc<Mutex<&'a mut S>>,
+        fn(&mut Arc<Mutex<&'a mut S>>, usize) -> Option<&'a mut S::Component>,
+    >;
+
+    type Item = Option<&'a mut S::Component>;
+
+    fn into_par_iter(self) -> Self::Iter {
+        fn get_mut<'a, S: CanWriteStorage>(
+            s: &mut Arc<Mutex<&'a mut S>>,
+            n: usize,
+        ) -> Option<&'a mut S::Component> {
+            s.lock()
+                .unwrap()
+                .get_mut(n)
+                .map(|t: &mut S::Component| -> &'a mut S::Component {
+                    // we know that the index is monotonically increasing, so we will
+                    // never give out a reference to the same item twice, so this is
+                    // tolerably unsafe
+                    unsafe { &mut *(t as *mut S::Component) }
+                })
+        }
+
+        let len = self.0.last().map(|e| e.key()).unwrap_or(0);
+        let range = 0..len;
+        let a: Arc<Mutex<&'a mut S>> = Arc::new(Mutex::new(self.0));
+        let iter: _ = range.into_par_iter().map_with(
+            a,
+            get_mut as fn(&mut Arc<Mutex<&'a mut S>>, usize) -> Option<&'a mut S::Component>,
+        );
+        iter
+    }
+}
+
+pub trait WorldStorage: CanReadStorage + CanWriteStorage + Send + Sync + Default + 'static
+where
+    for<'a> &'a Self: IntoParallelIterator<Iter = Self::ParIter<'a>>,
+    for<'a> &'a mut Self: IntoParallelIterator<Iter = Self::ParIterMut<'a>>,
+{
+    type ParIter<'a>: IndexedParallelIterator<Item = Option<&'a Self::Component>>;
+    type ParIterMut<'a>: IndexedParallelIterator<Item = Option<&'a mut Self::Component>>;
+
+    /// Create a new storage with a pre-allocated capacity
+    fn new_with_capacity(cap: usize) -> Self;
+}
+
+impl<T: Send + Sync + 'static> WorldStorage for VecStorage<T> {
+    type ParIter<'a> = rayon::iter::Map<
+        rayon::slice::Iter<'a, Option<Entry<T>>>,
+        fn(&Option<Entry<T>>) -> Option<&T>,
+    >;
+
+    type ParIterMut<'a> = rayon::iter::Map<
+        rayon::slice::IterMut<'a, Option<Entry<T>>>,
+        fn(&mut Option<Entry<T>>) -> Option<&mut T>,
+    >;
+
+    fn new_with_capacity(cap: usize) -> Self {
+        VecStorage::new_with_capacity(cap)
+    }
+}
+
+impl<T: Send + Sync + 'static> WorldStorage for SparseStorage<T> {
+    type ParIter<'a> = rayon::iter::MapWith<
+        rayon::range::Iter<usize>,
+        &'a Self,
+        fn(&mut &'a Self, usize) -> Option<&'a T>,
+    >;
+
+    type ParIterMut<'a> = rayon::iter::MapWith<
+        rayon::range::Iter<usize>,
+        Arc<Mutex<&'a mut Self>>,
+        fn(&mut Arc<Mutex<&'a mut Self>>, usize) -> Option<&'a mut T>,
+    >;
+
+    fn new_with_capacity(cap: usize) -> Self {
+        SparseStorage::new_with_capacity(cap)
+    }
+}
+
+impl<T: Send + Sync + 'static> WorldStorage for BTreeStorage<T> {
+    type ParIter<'a> = rayon::iter::MapWith<
+        rayon::range::Iter<usize>,
+        &'a Self,
+        fn(&mut &'a Self, usize) -> Option<&'a T>,
+    >;
+
+    type ParIterMut<'a> = rayon::iter::MapWith<
+        rayon::range::Iter<usize>,
+        Arc<Mutex<&'a mut Self>>,
+        fn(&mut Arc<Mutex<&'a mut Self>>, usize) -> Option<&'a mut T>,
+    >;
+
+    fn new_with_capacity(_: usize) -> Self {
+        BTreeStorage::default()
     }
 }
 

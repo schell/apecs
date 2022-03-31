@@ -230,3 +230,50 @@ pub fn impl_join_tuple(input: proc_macro::TokenStream) -> proc_macro::TokenStrea
 
     output.into()
 }
+
+#[proc_macro]
+pub fn impl_parjoin_tuple(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    let tuple: TypeTuple = parse_macro_input!(input);
+    let tys = tuple.elems.iter().collect::<Vec<_>>();
+    let (iters_comps, maybes_vals):(Vec<(Ident, Ident)>, Vec<(Ident, Ident)>) = (0..tys.len()).map(|n| {
+        let iter = Ident::new(&format!("Iter{}", n), Span::call_site());
+        let comp = Ident::new(&format!("Comp{}", n), Span::call_site());
+        let maybe = Ident::new(&format!("m{}", n), Span::call_site());
+        let val = Ident::new(&format!("n{}", n), Span::call_site());
+        ((iter, comp), (maybe, val))
+    }).unzip();
+    let (iters, comps):(Vec<_>, Vec<_>) = iters_comps.into_iter().unzip();
+    let (maybes, vals):(Vec<_>, Vec<_>) = maybes_vals.into_iter().unzip();
+    let store_constraints = tys.iter().zip(iters.iter()).map(|(ty, iter)| quote!{
+        #ty: IntoParallelIterator<Iter = #iter>
+    }).collect::<Vec<_>>();
+    let iter_constraints:Vec<_> = iters.iter().zip(comps.iter()).map(|(iter, comp)| quote!{
+        #iter: IndexedParallelIterator<Item = Option<#comp>>
+    }).collect();
+    let unwraps:Vec<_> = vals.iter().zip(maybes.iter()).map(|(val, may)| quote! {
+        let #val = #may?;
+    }).collect();
+
+    let join_for_tuple = quote!{
+        impl <#(#tys,)* #(#iters,)* #(#comps,)*> ParJoin for #tuple
+        where
+            #(#store_constraints,)*
+            #(#iter_constraints,)*
+            #(#comps: Send,)*
+        {
+            type Iter = FilterMap<
+                    MultiZip<(#(#iters),*)>,
+                fn((#(Option<#comps>),*)) -> Option<(#(#comps),*)>,
+            >;
+
+            fn par_join(self) -> Self::Iter {
+                self.into_par_iter().filter_map(|(#(#maybes),*)| {
+                    #(#unwraps)*
+                    Some((#(#vals),*))
+                })
+            }
+        }
+    };
+
+    join_for_tuple.into()
+}

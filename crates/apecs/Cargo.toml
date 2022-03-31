@@ -36,7 +36,16 @@ tracing = "^0.1"
 tracing-subscriber = "^0.3"
 
 [dev-dependencies]
+bevy_ecs = "0.5.0"
+bevy_tasks = "0.5.0"
+cgmath = { version = "0.17", features = ["serde"] }
 criterion = "^0.3"
+hecs = { version = "0.5", features = ["column-serialize", "row-serialize"] }
+legion = "0.3"
+planck_ecs = { version = "1.1.0", features = ["parallel"] }
+shipyard = "0.5.0"
+specs = {version = "0.16.1", features = ["serde"] }
+specs-derive = "0.4.1"
 
 [[bench]]
 name = "benchmark"

@@ -171,6 +171,11 @@ impl<T> CanReadStorage for VecStorage<T> {
     fn iter(&self) -> Self::Iter<'_> {
         VecStorageIter(0, &self.store)
     }
+
+    fn last(&self) -> Option<Entry<&Self::Component>> {
+        let me = self.store.last()?;
+        me.as_ref().map(Entry::as_ref)
+    }
 }
 
 impl<T> CanWriteStorage for VecStorage<T> {
