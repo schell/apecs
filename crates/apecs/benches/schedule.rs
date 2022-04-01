@@ -1,52 +1,4 @@
-use std::time::{Duration, Instant};
-
-use apecs::{anyhow, entities::*, join::*, storage::*, world::*, CanFetch, Facade, Read, Write};
-use cgmath::*;
-
-#[derive(Copy, Clone)]
-struct Transform(Matrix4<f32>);
-
-#[derive(Copy, Clone)]
-struct Position(Vector3<f32>);
-
-#[derive(Copy, Clone)]
-struct Rotation(Vector3<f32>);
-
-#[derive(Copy, Clone)]
-struct Velocity(Vector3<f32>);
-
-#[derive(CanFetch)]
-struct Data {
-    es: Write<Entities>,
-    ts: Write<VecStorage<Transform>>,
-    ps: Write<VecStorage<Position>>,
-    rs: Write<VecStorage<Rotation>>,
-    vs: Write<VecStorage<Velocity>>,
-}
-
-#[derive(CanFetch)]
-struct SimpleIterData {
-    vs: Read<VecStorage<Velocity>>,
-    ps: Write<VecStorage<Position>>,
-}
-
-async fn async_run(mut facade: Facade) -> anyhow::Result<()> {
-    let SimpleIterData { vs, mut ps } = facade.fetch().await.unwrap();
-
-    for (_, velocity, position) in (&vs, &mut ps).join() {
-        position.0 += velocity.0;
-    }
-
-    Ok(())
-}
-
-fn _sync_run(SimpleIterData { vs, mut ps }: SimpleIterData) -> anyhow::Result<()> {
-    for (_, velocity, position) in (&vs, &mut ps).join() {
-        position.0 += velocity.0;
-    }
-
-    Ok(())
-}
+use apecs::{anyhow, entities::*, join::*, storage::*, world::*, CanFetch, Write};
 
 struct A(f32);
 struct B(f32);
@@ -96,7 +48,10 @@ fn ce_system(mut data: CESystemData) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn new() -> World {
+pub struct Benchmark(World);
+
+impl Benchmark {
+    pub fn new() -> Self {
         let mut entities = Entities::default();
         let mut a_store:VecStorage<A> = VecStorage::new_with_capacity(50000);
         let mut b_store:VecStorage<B> = VecStorage::new_with_capacity(40000);
@@ -151,25 +106,13 @@ pub fn new() -> World {
             .unwrap()
             .with_system("ab", ab_system)
             .with_system("cd", cd_system)
-            .with_system("ce", ce_system);
+            .with_system("ce", ce_system)
+            .with_sync_systems_run_in_parallel(true);
 
-        world
-}
-
-pub fn main() -> anyhow::Result<()> {
-    let start = Instant::now();
-    let mut world = new();
-    let mut ticks = 0;
-
-    let waker = world.get_waker();
-    let mut ctx = std::task::Context::from_waker(&waker);
-
-    while start.elapsed() < Duration::from_secs(5) {
-        world.tick_with_context(Some(&mut ctx))?;
-        ticks += 1;
+        Self(world)
     }
 
-    println!("{} ticks in 5secs", ticks);
-
-    Ok(())
+    pub fn run(&mut self) {
+        self.0.tick_with_context(None).unwrap()
+    }
 }

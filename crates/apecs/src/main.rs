@@ -1,5 +1,3 @@
-use std::time::Instant;
-
 use apecs::{entities::Entities, join::*, storage::*, CanFetch, Facade, Read, Write};
 use tracing::Level;
 

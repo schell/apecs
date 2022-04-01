@@ -1,9 +1,21 @@
 //! Entity component storage traits.
 mod vec;
+use std::{
+    ops::DerefMut,
+    sync::{Arc, Mutex},
+};
+
+use hibitset::BitSet;
+use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 pub use vec::*;
 
 mod sparse;
 pub use sparse::*;
+
+mod btree;
+pub use btree::*;
+
+use crate::{Read, Write};
 
 pub trait StorageComponent {
     type Component;
@@ -37,6 +49,7 @@ impl StorageComponent for usize {
     }
 }
 
+#[derive(Debug, PartialEq)]
 pub struct Entry<T> {
     pub(crate) key: usize,
     pub value: T,
@@ -70,6 +83,13 @@ impl<T> Entry<T> {
         Entry {
             key: self.key,
             value: &mut self.value,
+        }
+    }
+
+    pub fn map<X>(self, f: impl FnOnce(T) -> X) -> Entry<X> {
+        Entry {
+            key: self.key,
+            value: f(self.value),
         }
     }
 }
@@ -195,6 +215,9 @@ pub trait CanReadStorage {
     where
         Self: 'a;
 
+    /// Return the last (alive) entry.
+    fn last(&self) -> Option<Entry<&Self::Component>>;
+
     fn get(&self, id: usize) -> Option<&Self::Component>;
 
     /// Return an iterator over all entities and indices
@@ -204,6 +227,26 @@ pub trait CanReadStorage {
     /// of whether they reside in the storage.
     fn maybe(&self) -> MaybeIter<Self::Iter<'_>> {
         MaybeIter::new(self.iter())
+    }
+}
+
+impl<'a, S: CanReadStorage> CanReadStorage for &'a S {
+    type Component = S::Component;
+
+    type Iter<'b> = S::Iter<'b>
+    where
+        Self: 'b;
+
+    fn last(&self) -> Option<Entry<&Self::Component>> {
+        <S as CanReadStorage>::last(self)
+    }
+
+    fn get(&self, id: usize) -> Option<&Self::Component> {
+        <S as CanReadStorage>::get(self, id)
+    }
+
+    fn iter(&self) -> Self::Iter<'_> {
+        <S as CanReadStorage>::iter(self)
     }
 }
 
@@ -229,9 +272,147 @@ pub trait CanWriteStorage: CanReadStorage {
     }
 }
 
+/// A helper for writing `IntoParallelIterator` implementations for references to storages.
+pub struct StorageIter<'a, S>(&'a S);
+
+impl<'a, S> IntoParallelIterator for StorageIter<'a, S>
+where
+    S: CanReadStorage + Send + Sync,
+    S::Component: Send + Sync,
+{
+    type Iter = rayon::iter::MapWith<
+        rayon::range::Iter<usize>,
+        &'a S,
+        fn(&mut &'a S, usize) -> Option<&'a S::Component>,
+    >;
+
+    type Item = Option<&'a S::Component>;
+
+    fn into_par_iter(self) -> Self::Iter {
+        fn get<'a, S: CanReadStorage>(s: &mut &'a S, n: usize) -> Option<&'a S::Component> {
+            s.get(n)
+        }
+
+        let len = self.0.last().map(|e| e.key() + 1).unwrap_or(0);
+        let range = 0..len;
+        let iter: _ = range.into_par_iter().map_with(
+            self.0,
+            get as fn(&mut &'a S, usize) -> Option<&'a S::Component>,
+        );
+        iter
+    }
+}
+
+impl<'a, T> StorageIter<'a, T>
+where
+    T: CanReadStorage,
+{
+    pub fn new(s: &'a T) -> Self {
+        StorageIter(s)
+    }
+
+    pub fn get(&self, id: usize) -> Option<&'a T::Component> {
+        self.0.get(id)
+    }
+}
+
+/// A helper for writing `IntoParallelIterator` implementations for references to storages.
+pub struct StorageIterMut<'a, S>(&'a mut S);
+
+impl<'a, S> IntoParallelIterator for StorageIterMut<'a, S>
+where
+    S: CanWriteStorage + Send + Sync,
+    S::Component: Send + Sync,
+{
+    type Iter = rayon::iter::MapWith<
+        rayon::range::Iter<usize>,
+        Arc<Mutex<&'a mut S>>,
+        fn(&mut Arc<Mutex<&'a mut S>>, usize) -> Option<&'a mut S::Component>,
+    >;
+
+    type Item = Option<&'a mut S::Component>;
+
+    fn into_par_iter(self) -> Self::Iter {
+        fn get_mut<'a, S: CanWriteStorage>(
+            s: &mut Arc<Mutex<&'a mut S>>,
+            n: usize,
+        ) -> Option<&'a mut S::Component> {
+            s.lock()
+                .unwrap()
+                .get_mut(n)
+                .map(|t: &mut S::Component| -> &'a mut S::Component {
+                    // we know that the index is monotonically increasing, so we will
+                    // never give out a reference to the same item twice, so this is
+                    // tolerably unsafe
+                    unsafe { &mut *(t as *mut S::Component) }
+                })
+        }
+
+        let len = self.0.last().map(|e| e.key() + 1).unwrap_or(0);
+        let range = 0..len;
+        let a: Arc<Mutex<&'a mut S>> = Arc::new(Mutex::new(self.0));
+        let iter: _ = range.into_par_iter().map_with(
+            a,
+            get_mut as fn(&mut Arc<Mutex<&'a mut S>>, usize) -> Option<&'a mut S::Component>,
+        );
+        iter
+    }
+}
+
+pub trait WorldStorage: CanReadStorage + CanWriteStorage + Send + Sync + Default + 'static {
+    type ParIter<'a>: IndexedParallelIterator<Item = Option<&'a Self::Component>>;
+    type IntoParIter<'a>: IntoParallelIterator<Iter = Self::ParIter<'a>>;
+
+    type ParIterMut<'a>: IndexedParallelIterator<Item = Option<&'a mut Self::Component>>;
+    type IntoParIterMut<'a>: IntoParallelIterator<Iter = Self::ParIterMut<'a>>;
+
+    /// Create a new storage with a pre-allocated capacity
+    fn new_with_capacity(cap: usize) -> Self;
+
+    fn par_iter<'a>(&'a self) -> Self::IntoParIter<'a>;
+
+    fn par_iter_mut<'a>(&'a mut self) -> Self::IntoParIterMut<'a>;
+
+    fn inserted_bitset(&self) -> BitSet;
+    fn updated_bitset(&self) -> BitSet;
+    fn removed_bitset(&self) -> BitSet;
+}
+
+impl<'a, S: WorldStorage<Component = T>, T: Send + Sync + 'a> IntoParallelIterator for &'a Read<S> {
+    type Iter = <S as WorldStorage>::ParIter<'a>;
+
+    type Item = Option<&'a T>;
+
+    fn into_par_iter(self) -> Self::Iter {
+        self.par_iter().into_par_iter()
+    }
+}
+
+impl<'a, S: WorldStorage<Component = T>, T: Send + 'a> IntoParallelIterator for &'a mut Write<S> {
+    type Iter = <S as WorldStorage>::ParIterMut<'a>;
+
+    type Item = Option<&'a mut T>;
+
+    fn into_par_iter(self) -> Self::Iter {
+        self.par_iter_mut().into_par_iter()
+    }
+}
+
+impl<'a, S: WorldStorage<Component = T>, T: Send + Sync + 'a> IntoParallelIterator
+    for &'a Write<S>
+{
+    type Iter = <S as WorldStorage>::ParIter<'a>;
+
+    type Item = Option<&'a T>;
+
+    fn into_par_iter(self) -> Self::Iter {
+        self.par_iter().into_par_iter()
+    }
+}
+
 #[cfg(test)]
 pub mod test {
-    use crate::{entities::*, join::*, storage::*};
+    use crate::{self as apecs, entities::*, join::*, storage::*, world::World, CanFetch};
 
     pub fn make_abc_vecstorage() -> VecStorage<String> {
         let mut vs = VecStorage::default();
@@ -279,6 +460,93 @@ pub mod test {
         assert_eq!(strings.get(a.id()), Some(&"A01".to_string()));
         assert_eq!(strings.get(b.id()), Some(&"B12".to_string()));
         assert_eq!(strings.get(c.id()), Some(&"C".to_string()));
+    }
+
+    #[test]
+    fn can_par_join() {
+        #[derive(CanFetch)]
+        struct Data<A, B>
+        where
+            A: WorldStorage<Component = f32>,
+            B: WorldStorage<Component = &'static str>,
+        {
+            a: Write<A>,
+            b: Write<B>,
+        }
+
+        fn system<A, B, const IS_PAR: bool>(mut data: Data<A, B>) -> anyhow::Result<()>
+        where
+            A: WorldStorage<Component = f32>,
+            B: WorldStorage<Component = &'static str>,
+        {
+            if IS_PAR {
+                (&mut data.a, &mut data.b)
+                    .par_join()
+                    .for_each(|(number, string)| {
+                        *number *= -1.0;
+                    });
+            } else {
+                for (_, number, string) in (&mut data.a, &mut data.b).join() {
+                    *number *= -1.0;
+                }
+            }
+
+            Ok(())
+        }
+
+        fn run<A, B, const IS_PAR: bool>() -> anyhow::Result<()>
+        where
+            A: WorldStorage<Component = f32>,
+            B: WorldStorage<Component = &'static str>,
+        {
+            let desc = format!("{}-{}", std::any::type_name::<A>(), if IS_PAR {"parallel"} else {"seq"});
+
+            let mut world = World::default();
+            world
+                .with_default_resource::<Entities>()?
+                .with_resource(A::new_with_capacity(1000))?
+                .with_resource(B::new_with_capacity(1000))?
+                .with_system("ab", system::<A, B, IS_PAR>);
+
+            // build the world
+            {
+                let (mut entities, mut a, mut b): (Write<Entities>, Write<A>, Write<B>) =
+                    world.fetch()?;
+                for n in 0..1000 {
+                    let e = entities.create();
+                    a.insert(e.id(), 1.0);
+                    if n % 2 == 0 {
+                        b.insert(e.id(), "1.0");
+                    }
+                }
+                // affirm the state of the world
+                let sum: f32 = if IS_PAR {
+                    a.par_iter().into_par_iter().flatten_iter().sum()
+                } else {
+                    a.iter().map(|e| e.value).sum()
+                };
+
+                assert_eq!(sum, 1000.0, "{} sum fail", desc);
+            }
+
+            // run the world
+            world.tick_with_context(None)?;
+
+            // assert the state of the world
+            let a: Read<A> = world.fetch()?;
+            let sum: f32 = a.iter().map(|e| e.value).sum();
+            assert_eq!(sum, 0.0, "{} join failed", desc);
+
+            Ok(())
+        }
+
+        run::<VecStorage<f32>, VecStorage<&'static str>, false>().unwrap();
+        run::<SparseStorage<f32>, SparseStorage<&'static str>, false>().unwrap();
+        run::<BTreeStorage<f32>, BTreeStorage<&'static str>, false>().unwrap();
+
+        run::<VecStorage<f32>, VecStorage<&'static str>, true>().unwrap();
+        run::<SparseStorage<f32>, SparseStorage<&'static str>, true>().unwrap();
+        run::<BTreeStorage<f32>, BTreeStorage<&'static str>, true>().unwrap();
     }
 
     //#[test]

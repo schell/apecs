@@ -8,7 +8,7 @@ short-lived systems.
 * productivity
 * flexibility
 * don't be too magical / explicit API (within reason)
-* performance should be competitive with inspirational ECS libraries
+* well rounded performance, competitive with inspirational ECS libraries
   - like `specs`, `bevy_ecs`, `hecs`, `legion`, `shipyard`
 
 ## Features
