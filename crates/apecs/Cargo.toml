@@ -29,6 +29,7 @@ bench = false
 [dependencies]
 anyhow = "^1.0"
 apecs-derive = { version = "^0.1", path = "../apecs-derive" }
+async-broadcast = "^0.4"
 hibitset = "^0.6"
 rayon = "^1.5"
 smol = "^1.2"

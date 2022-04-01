@@ -1,21 +1,49 @@
 //! Entity component storage traits.
 mod vec;
-use std::{
-    ops::DerefMut,
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 
-use hibitset::BitSet;
 use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 pub use vec::*;
 
-mod sparse;
-pub use sparse::*;
+//mod sparse;
+//pub use sparse::*;
 
 mod btree;
 pub use btree::*;
 
-use crate::{Read, Write};
+use crate::{core::mpmc, Read, Write};
+
+/// Helper for maintaining flagged storage.
+pub struct StorageFlags {
+    pub inserted: mpmc::Channel<usize>,
+    pub modified: mpmc::Channel<usize>,
+    pub removed: mpmc::Channel<usize>,
+}
+
+impl StorageFlags {
+    pub fn new_with_capacity(cap: usize) -> Self {
+        StorageFlags {
+            inserted: mpmc::Channel::new_with_capacity(cap),
+            modified: mpmc::Channel::new_with_capacity(cap),
+            removed: mpmc::Channel::new_with_capacity(cap),
+        }
+    }
+
+    pub fn subscribe(&self) -> StorageUpdates {
+        StorageUpdates {
+            inserted: self.inserted.new_receiver(),
+            modified: self.modified.new_receiver(),
+            removed: self.removed.new_receiver(),
+        }
+    }
+}
+
+/// Subscriber for component updates.
+pub struct StorageUpdates {
+    pub inserted: mpmc::Receiver<usize>,
+    pub modified: mpmc::Receiver<usize>,
+    pub removed: mpmc::Receiver<usize>,
+}
 
 pub trait StorageComponent {
     type Component;
@@ -317,7 +345,12 @@ where
 }
 
 /// A helper for writing `IntoParallelIterator` implementations for references to storages.
-pub struct StorageIterMut<'a, S>(&'a mut S);
+pub struct StorageIterMut<'a, S>(mpmc::Channel<usize>, &'a mut S);
+
+pub type StorageIterGetFn<'a, S> = fn(
+    &mut (mpmc::Channel<usize>, Arc<Mutex<&'a mut S>>),
+    usize,
+) -> Option<&'a mut <S as CanReadStorage>::Component>;
 
 impl<'a, S> IntoParallelIterator for StorageIterMut<'a, S>
 where
@@ -326,21 +359,22 @@ where
 {
     type Iter = rayon::iter::MapWith<
         rayon::range::Iter<usize>,
-        Arc<Mutex<&'a mut S>>,
-        fn(&mut Arc<Mutex<&'a mut S>>, usize) -> Option<&'a mut S::Component>,
+        (mpmc::Channel<usize>, Arc<Mutex<&'a mut S>>),
+        StorageIterGetFn<'a, S>,
     >;
 
     type Item = Option<&'a mut S::Component>;
 
     fn into_par_iter(self) -> Self::Iter {
         fn get_mut<'a, S: CanWriteStorage>(
-            s: &mut Arc<Mutex<&'a mut S>>,
+            (modified, s): &mut (mpmc::Channel<usize>, Arc<Mutex<&'a mut S>>),
             n: usize,
         ) -> Option<&'a mut S::Component> {
             s.lock()
                 .unwrap()
                 .get_mut(n)
                 .map(|t: &mut S::Component| -> &'a mut S::Component {
+                    modified.try_send(n).unwrap();
                     // we know that the index is monotonically increasing, so we will
                     // never give out a reference to the same item twice, so this is
                     // tolerably unsafe
@@ -348,13 +382,12 @@ where
                 })
         }
 
-        let len = self.0.last().map(|e| e.key() + 1).unwrap_or(0);
+        let len = self.1.last().map(|e| e.key() + 1).unwrap_or(0);
         let range = 0..len;
-        let a: Arc<Mutex<&'a mut S>> = Arc::new(Mutex::new(self.0));
-        let iter: _ = range.into_par_iter().map_with(
-            a,
-            get_mut as fn(&mut Arc<Mutex<&'a mut S>>, usize) -> Option<&'a mut S::Component>,
-        );
+        let a: Arc<Mutex<&'a mut S>> = Arc::new(Mutex::new(self.1));
+        let iter: _ = range
+            .into_par_iter()
+            .map_with((self.0, a), get_mut as StorageIterGetFn<'a, S>);
         iter
     }
 }
@@ -373,9 +406,7 @@ pub trait WorldStorage: CanReadStorage + CanWriteStorage + Send + Sync + Default
 
     fn par_iter_mut<'a>(&'a mut self) -> Self::IntoParIterMut<'a>;
 
-    fn inserted_bitset(&self) -> BitSet;
-    fn updated_bitset(&self) -> BitSet;
-    fn removed_bitset(&self) -> BitSet;
+    fn subscribe_to_updates(&self) -> StorageUpdates;
 }
 
 impl<'a, S: WorldStorage<Component = T>, T: Send + Sync + 'a> IntoParallelIterator for &'a Read<S> {
@@ -499,7 +530,11 @@ pub mod test {
             A: WorldStorage<Component = f32>,
             B: WorldStorage<Component = &'static str>,
         {
-            let desc = format!("{}-{}", std::any::type_name::<A>(), if IS_PAR {"parallel"} else {"seq"});
+            let desc = format!(
+                "{}-{}",
+                std::any::type_name::<A>(),
+                if IS_PAR { "parallel" } else { "seq" }
+            );
 
             let mut world = World::default();
             world

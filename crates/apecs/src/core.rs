@@ -19,6 +19,46 @@ pub mod spsc {
     pub use smol::channel::*;
 }
 
+pub mod mpmc {
+    pub use async_broadcast::*;
+
+    #[derive(Clone)]
+    pub struct Channel<T> {
+        pub tx: Sender<T>,
+        pub rx: InactiveReceiver<T>,
+    }
+
+    impl<T: Clone> Channel<T> {
+        pub fn new_with_capacity(cap: usize) -> Self {
+            let (mut tx, rx) = broadcast(cap);
+            tx.set_overflow(true);
+            let rx = rx.deactivate();
+            Channel { tx, rx }
+        }
+
+        pub fn new_receiver(&self) -> Receiver<T> {
+            self.rx.activate_cloned()
+        }
+
+        pub fn try_send(&mut self, msg: T) -> anyhow::Result<()> {
+            match self.tx.try_broadcast(msg) {
+                Ok(me) => match me {
+                    Some(e) => {
+                        self.tx.set_capacity(self.tx.capacity() + 1);
+                        self.try_send(e)
+                    }
+                    None => Ok(()),
+                },
+                Err(e) => match e {
+                    // nobody is listening so it doesn't matter
+                    TrySendError::Inactive(_) => Ok(()),
+                    _ => Err(anyhow::anyhow!("{}", e)),
+                },
+            }
+        }
+    }
+}
+
 mod fetch;
 pub use fetch::*;
 

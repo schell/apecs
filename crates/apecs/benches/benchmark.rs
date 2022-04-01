@@ -52,7 +52,7 @@ impl std::fmt::Display for Syncronicity {
 
 /// Measures the difference of speed of iteration between a wrapper of other std iterators
 /// and a custom one.
-fn bench_iter_wrapper_vs_bignext(c: &mut Criterion) {
+fn _bench_iter_wrapper_vs_bignext(c: &mut Criterion) {
     struct WrapperIter<'a, T>(FilterMap<Iter<'a, Option<T>>, fn(&'a Option<T>) -> Option<T>>);
 
     impl<'a, T: Copy> WrapperIter<'a, T> {
@@ -135,7 +135,7 @@ fn bench_iter_wrapper_vs_bignext(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_mutex(c: &mut Criterion) {
+fn _bench_mutex(c: &mut Criterion) {
     let mut mutexes = vec![];
     let mut raws = vec![];
     for n in 0..1000u32 {
@@ -181,15 +181,15 @@ fn bench_simple_insert(c: &mut Criterion) {
         >::new();
         b.iter(move || bench.run());
     });
-    group.bench_function("apecs::SparseStorage", |b| {
-        let mut bench = simple_insert::Benchmark::<
-            SparseStorage<simple_insert::Transform>,
-            SparseStorage<simple_insert::Position>,
-            SparseStorage<simple_insert::Rotation>,
-            SparseStorage<simple_insert::Velocity>,
-        >::new();
-        b.iter(move || bench.run());
-    });
+    //group.bench_function("apecs::SparseStorage", |b| {
+    //    let mut bench = simple_insert::Benchmark::<
+    //        SparseStorage<simple_insert::Transform>,
+    //        SparseStorage<simple_insert::Position>,
+    //        SparseStorage<simple_insert::Rotation>,
+    //        SparseStorage<simple_insert::Velocity>,
+    //    >::new();
+    //    b.iter(move || bench.run());
+    //});
     group.bench_function("apecs::BTreeStorage", |b| {
         let mut bench = simple_insert::Benchmark::<
             BTreeStorage<simple_insert::Transform>,
@@ -238,13 +238,13 @@ fn bench_add_remove(c: &mut Criterion) {
         b.iter(move || bench.run());
     });
 
-    group.bench_function("apecs::SparseStorage", |b| {
-        let mut bench = add_remove::Benchmark::<
-            SparseStorage<add_remove::A>,
-            SparseStorage<add_remove::B>,
-        >::new();
-        b.iter(move || bench.run());
-    });
+    //group.bench_function("apecs::SparseStorage", |b| {
+    //    let mut bench = add_remove::Benchmark::<
+    //        SparseStorage<add_remove::A>,
+    //        SparseStorage<add_remove::B>,
+    //    >::new();
+    //    b.iter(move || bench.run());
+    //});
 
     group.bench_function("apecs::BTreeStorage", |b| {
         let mut bench =
@@ -295,16 +295,16 @@ fn bench_simple_iter(c: &mut Criterion) {
         b.iter(move || bench.run());
     });
 
-    group.bench_function("apecs::SparseStorage", |b| {
-        let mut bench = simple_iter::Benchmark::<
-            SparseStorage<simple_iter::Transform>,
-            SparseStorage<simple_iter::Position>,
-            SparseStorage<simple_iter::Rotation>,
-            SparseStorage<simple_iter::Velocity>,
-        >::new()
-        .unwrap();
-        b.iter(move || bench.run());
-    });
+    //group.bench_function("apecs::SparseStorage", |b| {
+    //    let mut bench = simple_iter::Benchmark::<
+    //        SparseStorage<simple_iter::Transform>,
+    //        SparseStorage<simple_iter::Position>,
+    //        SparseStorage<simple_iter::Rotation>,
+    //        SparseStorage<simple_iter::Velocity>,
+    //    >::new()
+    //    .unwrap();
+    //    b.iter(move || bench.run());
+    //});
 
     group.bench_function("apecs::BTreeStorage", |b| {
         let mut bench = simple_iter::Benchmark::<
@@ -426,16 +426,16 @@ fn bench_heavy_compute(c: &mut Criterion) {
         .unwrap();
         b.iter(move || bench.run());
     });
-    group.bench_function("apecs::SparseStorage", |b| {
-        let mut bench = heavy_compute::Benchmark::<
-            SparseStorage<heavy_compute::Transform>,
-            SparseStorage<heavy_compute::Position>,
-            SparseStorage<heavy_compute::Rotation>,
-            SparseStorage<heavy_compute::Velocity>,
-        >::new()
-        .unwrap();
-        b.iter(move || bench.run());
-    });
+    //group.bench_function("apecs::SparseStorage", |b| {
+    //    let mut bench = heavy_compute::Benchmark::<
+    //        SparseStorage<heavy_compute::Transform>,
+    //        SparseStorage<heavy_compute::Position>,
+    //        SparseStorage<heavy_compute::Rotation>,
+    //        SparseStorage<heavy_compute::Velocity>,
+    //    >::new()
+    //    .unwrap();
+    //    b.iter(move || bench.run());
+    //});
     group.bench_function("apecs::BTreeStorage", |b| {
         let mut bench = heavy_compute::Benchmark::<
             BTreeStorage<heavy_compute::Transform>,

@@ -2,7 +2,7 @@ use std::marker::PhantomData;
 
 use apecs::{
     entities::*,
-    storage::{CanWriteStorage, VecStorage, WorldStorage},
+    storage::{CanWriteStorage, WorldStorage},
     world::World,
     Write,
 };

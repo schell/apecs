@@ -4,11 +4,17 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use super::{CanReadStorage, CanWriteStorage, Entry, StorageIter, StorageIterMut, WorldStorage};
+use crate::mpmc::{self, Channel};
+
+use super::{
+    CanReadStorage, CanWriteStorage, Entry, StorageFlags, StorageIter, StorageIterGetFn,
+    StorageIterMut, WorldStorage,
+};
 
 pub struct BTreeStorage<T> {
     inner: BTreeMap<usize, T>,
     last_key: Option<usize>,
+    updates: StorageFlags,
 }
 
 impl<T> Default for BTreeStorage<T> {
@@ -16,6 +22,7 @@ impl<T> Default for BTreeStorage<T> {
         Self {
             inner: BTreeMap::new(),
             last_key: None,
+            updates: StorageFlags::new_with_capacity(32),
         }
     }
 }
@@ -53,13 +60,14 @@ impl<T> CanReadStorage for BTreeStorage<T> {
     }
 }
 
-pub struct BTreeIterMut<'a, T>(IterMut<'a, usize, T>);
+pub struct BTreeIterMut<'a, T>(Channel<usize>, IterMut<'a, usize, T>);
 
 impl<'a, T> Iterator for BTreeIterMut<'a, T> {
     type Item = Entry<&'a mut T>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let (k, v) = self.0.next()?;
+        let (k, v) = self.1.next()?;
+        self.0.try_send(*k).unwrap();
         Some(Entry { key: *k, value: v })
     }
 }
@@ -89,7 +97,7 @@ impl<T> CanWriteStorage for BTreeStorage<T> {
     }
 
     fn iter_mut(&mut self) -> Self::IterMut<'_> {
-        BTreeIterMut(self.inner.iter_mut())
+        BTreeIterMut(self.updates.modified.clone(), self.inner.iter_mut())
     }
 }
 
@@ -110,14 +118,14 @@ impl<'a, T: Send + Sync + 'static> IntoParallelIterator for &'a BTreeStorage<T> 
 impl<'a, T: Send + Sync + 'static> IntoParallelIterator for &'a mut BTreeStorage<T> {
     type Iter = rayon::iter::MapWith<
         rayon::range::Iter<usize>,
-        Arc<Mutex<Self>>,
-        fn(&mut Arc<Mutex<Self>>, usize) -> Option<&'a mut T>,
+        (mpmc::Channel<usize>, Arc<Mutex<Self>>),
+        fn(&mut (mpmc::Channel<usize>, Arc<Mutex<Self>>), usize) -> Option<&'a mut T>,
     >;
 
     type Item = Option<&'a mut T>;
 
     fn into_par_iter(self) -> Self::Iter {
-        StorageIterMut(self).into_par_iter()
+        StorageIterMut(self.updates.modified.clone(), self).into_par_iter()
     }
 }
 
@@ -132,8 +140,8 @@ impl<T: Send + Sync + 'static> WorldStorage for BTreeStorage<T> {
 
     type ParIterMut<'a> = rayon::iter::MapWith<
         rayon::range::Iter<usize>,
-        Arc<Mutex<&'a mut Self>>,
-        fn(&mut Arc<Mutex<&'a mut Self>>, usize) -> Option<&'a mut T>,
+        (mpmc::Channel<usize>, Arc<Mutex<&'a mut Self>>),
+        StorageIterGetFn<'a, Self>,
     >;
 
     type IntoParIterMut<'a> = StorageIterMut<'a, Self>;
@@ -147,6 +155,10 @@ impl<T: Send + Sync + 'static> WorldStorage for BTreeStorage<T> {
     }
 
     fn par_iter_mut<'a>(&'a mut self) -> Self::IntoParIterMut<'a> {
-        StorageIterMut(self)
+        StorageIterMut(self.updates.modified.clone(), self)
+    }
+
+    fn subscribe_to_updates(&self) -> super::StorageUpdates {
+        todo!()
     }
 }
