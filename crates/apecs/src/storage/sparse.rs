@@ -150,6 +150,34 @@ impl<T> SparseStorage<T> {
     }
 }
 
+impl<T: Send + Sync + 'static> WorldStorage for SparseStorage<T> {
+    type ParIter<'a> = rayon::iter::MapWith<
+            rayon::range::Iter<usize>,
+        &'a Self,
+        fn(&mut &'a Self, usize) -> Option<&'a T>,
+        >;
+    type IntoParIter<'a> = StorageIter<'a, Self>;
+
+    type ParIterMut<'a> = rayon::iter::MapWith<
+            rayon::range::Iter<usize>,
+        Arc<Mutex<&'a mut Self>>,
+        fn(&mut Arc<Mutex<&'a mut Self>>, usize) -> Option<&'a mut T>,
+        >;
+    type IntoParIterMut<'a> = StorageIterMut<'a, Self>;
+
+    fn new_with_capacity(cap: usize) -> Self {
+        SparseStorage::new_with_capacity(cap)
+    }
+
+    fn par_iter<'a>(&'a self) -> Self::IntoParIter<'a> {
+        StorageIter(self)
+    }
+
+    fn par_iter_mut<'a>(&'a mut self) -> Self::IntoParIterMut<'a> {
+        StorageIterMut(self)
+    }
+}
+
 #[cfg(test)]
 mod test {
     use crate::storage::*;

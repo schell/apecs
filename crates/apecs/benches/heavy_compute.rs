@@ -24,11 +24,7 @@ struct HeavyComputeData<P: IsResource, T: IsResource> {
 fn system<P, T>(mut data: HeavyComputeData<P, T>) -> anyhow::Result<()>
 where
     P: WorldStorage + CanReadStorage<Component = Position>,
-    for<'a> &'a P: IntoParallelIterator<Iter = P::ParIter<'a>>,
-    for<'a> &'a mut P: IntoParallelIterator<Iter = P::ParIterMut<'a>>,
     T: WorldStorage + CanReadStorage<Component = Transform>,
-    for<'a> &'a T: IntoParallelIterator<Iter = T::ParIter<'a>>,
-    for<'a> &'a mut T: IntoParallelIterator<Iter = T::ParIterMut<'a>>,
 {
     use cgmath::Transform;
     (&mut data.positions, &mut data.transforms)
@@ -56,22 +52,11 @@ where
 impl<T, P, R, V> Benchmark<T, P, R, V>
 where
     P: WorldStorage + CanReadStorage<Component = Position>,
-    for<'a> &'a P: IntoParallelIterator<Iter = P::ParIter<'a>>,
-    for<'a> &'a mut P: IntoParallelIterator<Iter = P::ParIterMut<'a>>,
-
     T: WorldStorage + CanReadStorage<Component = Transform>,
-    for<'a> &'a T: IntoParallelIterator<Iter = T::ParIter<'a>>,
-    for<'a> &'a mut T: IntoParallelIterator<Iter = T::ParIterMut<'a>>,
-
     R: WorldStorage + CanReadStorage<Component = Rotation>,
-    for<'a> &'a R: IntoParallelIterator<Iter = R::ParIter<'a>>,
-    for<'a> &'a mut R: IntoParallelIterator<Iter = R::ParIterMut<'a>>,
-
     V: WorldStorage + CanReadStorage<Component = Velocity>,
-    for<'a> &'a V: IntoParallelIterator<Iter = V::ParIter<'a>>,
-    for<'a> &'a mut V: IntoParallelIterator<Iter = V::ParIterMut<'a>>,
 {
-    pub fn new() -> Self {
+    pub fn new() -> anyhow::Result<Self> {
         let mut entities = Entities::default();
         let mut transforms: T = T::new_with_capacity(1000);
         let mut positions: P = P::new_with_capacity(1000);
@@ -86,25 +71,20 @@ where
         });
         let mut world = World::default();
         world
-            .with_resource(entities)
-            .unwrap()
-            .with_resource(transforms)
-            .unwrap()
-            .with_resource(positions)
-            .unwrap()
-            .with_resource(rotations)
-            .unwrap()
-            .with_resource(velocities)
-            .unwrap()
+            .with_resource(entities)?
+            .with_resource(transforms)?
+            .with_resource(positions)?
+            .with_resource(rotations)?
+            .with_resource(velocities)?
             .with_system("heavy_compute", system::<P, T>);
 
-        Self {
+        Ok(Self {
             world,
             _phantom: PhantomData,
-        }
+        })
     }
 
     pub fn run(&mut self) {
-        self.0.tick_with_context(None).unwrap();
+        self.world.tick_with_context(None).unwrap();
     }
 }

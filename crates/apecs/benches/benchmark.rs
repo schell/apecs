@@ -412,10 +412,41 @@ fn bench_schedule(c: &mut Criterion) {
 
 fn bench_heavy_compute(c: &mut Criterion) {
     let mut group = c.benchmark_group("heavy_compute");
-    group.bench_function("apecs", |b| {
-        let mut bench = heavy_compute::Benchmark::new();
+    //let plot_config =
+    //    criterion::PlotConfiguration::default().summary_scale(criterion::AxisScale::Logarithmic);
+    //group.plot_config(plot_config);
+
+    group.bench_function("apecs::VecStorage", |b| {
+        let mut bench = heavy_compute::Benchmark::<
+            VecStorage<heavy_compute::Transform>,
+            VecStorage<heavy_compute::Position>,
+            VecStorage<heavy_compute::Rotation>,
+            VecStorage<heavy_compute::Velocity>,
+        >::new()
+        .unwrap();
         b.iter(move || bench.run());
     });
+    group.bench_function("apecs::SparseStorage", |b| {
+        let mut bench = heavy_compute::Benchmark::<
+            SparseStorage<heavy_compute::Transform>,
+            SparseStorage<heavy_compute::Position>,
+            SparseStorage<heavy_compute::Rotation>,
+            SparseStorage<heavy_compute::Velocity>,
+        >::new()
+        .unwrap();
+        b.iter(move || bench.run());
+    });
+    group.bench_function("apecs::BTreeStorage", |b| {
+        let mut bench = heavy_compute::Benchmark::<
+            BTreeStorage<heavy_compute::Transform>,
+            BTreeStorage<heavy_compute::Position>,
+            BTreeStorage<heavy_compute::Rotation>,
+            BTreeStorage<heavy_compute::Velocity>,
+        >::new()
+        .unwrap();
+        b.iter(move || bench.run());
+    });
+
     group.bench_function("legion", |b| {
         let mut bench = legion::heavy_compute::Benchmark::new();
         b.iter(move || bench.run());
