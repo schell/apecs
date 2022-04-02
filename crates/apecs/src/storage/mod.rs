@@ -13,7 +13,12 @@ pub use btree::*;
 
 use crate::{core::mpmc, Read, Write};
 
+pub mod bitset {
+    pub use hibitset::*;
+}
+
 /// Helper for maintaining flagged storage.
+#[derive(Clone)]
 pub struct StorageFlags {
     pub inserted: mpmc::Channel<usize>,
     pub modified: mpmc::Channel<usize>,
@@ -406,7 +411,7 @@ pub trait WorldStorage: CanReadStorage + CanWriteStorage + Send + Sync + Default
 
     fn par_iter_mut<'a>(&'a mut self) -> Self::IntoParIterMut<'a>;
 
-    fn subscribe_to_updates(&self) -> StorageUpdates;
+    fn subscribe_to_updates(&mut self) -> StorageUpdates;
 }
 
 impl<'a, S: WorldStorage<Component = T>, T: Send + Sync + 'a> IntoParallelIterator for &'a Read<S> {

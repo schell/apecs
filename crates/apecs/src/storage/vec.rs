@@ -7,7 +7,7 @@ use super::Entry;
 
 pub struct VecStorage<T> {
     mask: BitSet,
-    updates: StorageFlags,
+    updates: Option<StorageFlags>,
     store: Vec<Option<Entry<T>>>,
 }
 
@@ -18,7 +18,7 @@ impl<T> VecStorage<T> {
 
         VecStorage {
             mask: BitSet::new(),
-            updates: StorageFlags::new_with_capacity(cap),
+            updates: None,
             store,
         }
     }
@@ -28,7 +28,7 @@ impl<T> Default for VecStorage<T> {
     fn default() -> Self {
         VecStorage {
             mask: BitSet::new(),
-            updates: StorageFlags::new_with_capacity(32),
+            updates: None,
             store: vec![],
         }
     }
@@ -85,7 +85,7 @@ impl<'a, T: Send + Sync> IntoParallelIterator for &'a VecStorage<T> {
     }
 }
 
-pub struct VecStorageIterMut<'a, T>(mpmc::Channel<usize>, &'a mut [Option<Entry<T>>]);
+pub struct VecStorageIterMut<'a, T>(Option<mpmc::Channel<usize>>, &'a mut [Option<Entry<T>>]);
 
 impl<'a, T> Iterator for VecStorageIterMut<'a, T> {
     type Item = Entry<&'a mut T>;
@@ -99,7 +99,9 @@ impl<'a, T> Iterator for VecStorageIterMut<'a, T> {
                     self.1 = rest;
                     match may_item {
                         Some(item) => {
-                            self.0.try_send(item.key()).unwrap();
+                            if let Some(chan) = self.0.as_mut() {
+                                chan.try_send(item.key()).unwrap()
+                            };
                             return Some(item.as_mut());
                         }
                         None => continue,
@@ -114,8 +116,8 @@ impl<'a, T> Iterator for VecStorageIterMut<'a, T> {
 impl<'a, T: Send> IntoParallelIterator for VecStorageIterMut<'a, T> {
     type Iter = rayon::iter::MapWith<
         rayon::slice::IterMut<'a, Option<Entry<T>>>,
-        Channel<usize>,
-        fn(&mut Channel<usize>, &'a mut Option<Entry<T>>) -> Option<&'a mut T>,
+        Option<Channel<usize>>,
+        fn(&mut Option<Channel<usize>>, &'a mut Option<Entry<T>>) -> Option<&'a mut T>,
     >;
 
     type Item = Option<&'a mut T>;
@@ -124,7 +126,9 @@ impl<'a, T: Send> IntoParallelIterator for VecStorageIterMut<'a, T> {
         let VecStorageIterMut(modified, slice) = self;
         slice.into_par_iter().map_with(modified, |changed, me| {
             me.as_mut().map(|e| {
-                changed.try_send(e.key()).unwrap();
+                if let Some(changed) = changed {
+                    changed.try_send(e.key()).unwrap();
+                }
                 &mut e.value
             })
         })
@@ -133,15 +137,18 @@ impl<'a, T: Send> IntoParallelIterator for VecStorageIterMut<'a, T> {
 
 impl<'a, T> VecStorageIterMut<'a, T> {
     pub fn new(vs: &'a mut VecStorage<T>) -> Self {
-        VecStorageIterMut(vs.updates.modified.clone(), &mut vs.store)
+        VecStorageIterMut(
+            vs.updates.as_ref().map(|u| u.modified.clone()),
+            &mut vs.store,
+        )
     }
 }
 
 impl<'a, T: Send> IntoParallelIterator for &'a mut VecStorage<T> {
     type Iter = rayon::iter::MapWith<
         rayon::slice::IterMut<'a, Option<Entry<T>>>,
-        Channel<usize>,
-        fn(&mut Channel<usize>, &'a mut Option<Entry<T>>) -> Option<&'a mut T>,
+        Option<Channel<usize>>,
+        fn(&mut Option<Channel<usize>>, &'a mut Option<Entry<T>>) -> Option<&'a mut T>,
     >;
 
     type Item = Option<&'a mut T>;
@@ -217,7 +224,10 @@ impl<T> CanWriteStorage for VecStorage<T> {
     }
 
     fn iter_mut(&mut self) -> Self::IterMut<'_> {
-        VecStorageIterMut(self.updates.modified.clone(), &mut self.store)
+        VecStorageIterMut(
+            self.updates.as_ref().map(|u| u.modified.clone()),
+            &mut self.store,
+        )
     }
 }
 
@@ -238,8 +248,8 @@ impl<T: Send + Sync + 'static> WorldStorage for VecStorage<T> {
 
     type ParIterMut<'a> = rayon::iter::MapWith<
         rayon::slice::IterMut<'a, Option<Entry<T>>>,
-        Channel<usize>,
-        fn(&mut Channel<usize>, &'a mut Option<Entry<T>>) -> Option<&'a mut T>,
+        Option<Channel<usize>>,
+        fn(&mut Option<Channel<usize>>, &'a mut Option<Entry<T>>) -> Option<&'a mut T>,
     >;
     type IntoParIterMut<'a> = VecStorageIterMut<'a, T>;
 
@@ -255,7 +265,11 @@ impl<T: Send + Sync + 'static> WorldStorage for VecStorage<T> {
         VecStorageIterMut::new(self)
     }
 
-    fn subscribe_to_updates(&self) -> StorageUpdates {
-        self.updates.subscribe()
+    fn subscribe_to_updates(&mut self) -> StorageUpdates {
+        if self.updates.is_none() {
+            self.updates = Some(StorageFlags::new_with_capacity(32));
+        }
+        let updates = self.updates.as_ref().unwrap();
+        updates.subscribe()
     }
 }

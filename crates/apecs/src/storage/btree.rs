@@ -158,7 +158,7 @@ impl<T: Send + Sync + 'static> WorldStorage for BTreeStorage<T> {
         StorageIterMut(self.updates.modified.clone(), self)
     }
 
-    fn subscribe_to_updates(&self) -> super::StorageUpdates {
+    fn subscribe_to_updates(&mut self) -> super::StorageUpdates {
         todo!()
     }
 }
