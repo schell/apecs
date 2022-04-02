@@ -350,10 +350,10 @@ where
 }
 
 /// A helper for writing `IntoParallelIterator` implementations for references to storages.
-pub struct StorageIterMut<'a, S>(mpmc::Channel<usize>, &'a mut S);
+pub struct StorageIterMut<'a, S>(&'a mut S);
 
 pub type StorageIterGetFn<'a, S> = fn(
-    &mut (mpmc::Channel<usize>, Arc<Mutex<&'a mut S>>),
+    &mut Arc<Mutex<&'a mut S>>,
     usize,
 ) -> Option<&'a mut <S as CanReadStorage>::Component>;
 
@@ -364,7 +364,7 @@ where
 {
     type Iter = rayon::iter::MapWith<
         rayon::range::Iter<usize>,
-        (mpmc::Channel<usize>, Arc<Mutex<&'a mut S>>),
+        Arc<Mutex<&'a mut S>>,
         StorageIterGetFn<'a, S>,
     >;
 
@@ -372,7 +372,7 @@ where
 
     fn into_par_iter(self) -> Self::Iter {
         fn get_mut<'a, S: CanWriteStorage>(
-            (modified, s): &mut (mpmc::Channel<usize>, Arc<Mutex<&'a mut S>>),
+            s: &mut Arc<Mutex<&'a mut S>>,
             n: usize,
         ) -> Option<&'a mut S::Component> {
             s.lock()
@@ -387,12 +387,12 @@ where
                 })
         }
 
-        let len = self.1.last().map(|e| e.key() + 1).unwrap_or(0);
+        let len = self.0.last().map(|e| e.key() + 1).unwrap_or(0);
         let range = 0..len;
-        let a: Arc<Mutex<&'a mut S>> = Arc::new(Mutex::new(self.1));
+        let a: Arc<Mutex<&'a mut S>> = Arc::new(Mutex::new(self.0));
         let iter: _ = range
             .into_par_iter()
-            .map_with((self.0, a), get_mut as StorageIterGetFn<'a, S>);
+            .map_with(a, get_mut as StorageIterGetFn<'a, S>);
         iter
     }
 }
@@ -410,8 +410,6 @@ pub trait WorldStorage: CanReadStorage + CanWriteStorage + Send + Sync + Default
     fn par_iter<'a>(&'a self) -> Self::IntoParIter<'a>;
 
     fn par_iter_mut<'a>(&'a mut self) -> Self::IntoParIterMut<'a>;
-
-    fn subscribe_to_updates(&mut self) -> StorageUpdates;
 }
 
 impl<'a, S: WorldStorage<Component = T>, T: Send + Sync + 'a> IntoParallelIterator for &'a Read<S> {
