@@ -379,7 +379,7 @@ where
                 .unwrap()
                 .get_mut(n)
                 .map(|t: &mut S::Component| -> &'a mut S::Component {
-                    modified.try_send(n).unwrap();
+                    //modified.try_send(n).unwrap();
                     // we know that the index is monotonically increasing, so we will
                     // never give out a reference to the same item twice, so this is
                     // tolerably unsafe

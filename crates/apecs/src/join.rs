@@ -44,7 +44,7 @@ apecs_derive::impl_parjoin_tuple!((A, B, C, D, E, F, G, H, I, J));
 apecs_derive::impl_parjoin_tuple!((A, B, C, D, E, F, G, H, I, J, K));
 apecs_derive::impl_parjoin_tuple!((A, B, C, D, E, F, G, H, I, J, K, L));
 
-fn sync<A, B>(
+pub fn sync<A, B>(
     a: &mut A,
     next_a: &mut (usize, <A::Item as StorageComponent>::Component),
     b: &mut B,
@@ -155,7 +155,44 @@ where
     }
 }
 
-apecs_derive::impl_join_tuple!((A, B));
+impl<A, B> Join for (A, B)
+where
+    A: Join,
+    B: Join,
+    A::Iter: Iterator,
+    B::Iter: Iterator,
+<A::Iter as Iterator>::Item: StorageComponent,
+<B::Iter as Iterator>::Item: StorageComponent,
+{
+    type Iter = JoinedIter<(A::Iter, B::Iter)>;
+    fn join(self) -> Self::Iter {
+        JoinedIter((self.0.join(), self.1.join()))
+    }
+}
+
+impl<A, B> Iterator for JoinedIter<(A, B)>
+where
+    A: Iterator,
+    B: Iterator,
+    <A as Iterator>::Item: StorageComponent,
+    <B as Iterator>::Item: StorageComponent,
+{
+    type Item = (
+        usize,
+        <<A as Iterator>::Item as StorageComponent>::Component,
+        <<B as Iterator>::Item as StorageComponent>::Component,
+    );
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut next_0 = self.0 .0.next()?.split();
+        let mut next_1 = self.0 .1.next()?.split();
+        while !(next_0.0 == next_1.0) {
+            sync(&mut self.0 .0, &mut next_0, &mut self.0 .1, &mut next_1)?;
+        }
+        Some((next_0.0, next_0.1, next_1.1))
+    }
+}
+
+// apecs_derive::impl_join_tuple!((A, B));
 apecs_derive::impl_join_tuple!((A, B, C));
 apecs_derive::impl_join_tuple!((A, B, C, D));
 apecs_derive::impl_join_tuple!((A, B, C, D, E));

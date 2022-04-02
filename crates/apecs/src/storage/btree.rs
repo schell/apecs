@@ -67,7 +67,7 @@ impl<'a, T> Iterator for BTreeIterMut<'a, T> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let (k, v) = self.1.next()?;
-        self.0.try_send(*k).unwrap();
+        //self.0.try_send(*k).unwrap();
         Some(Entry { key: *k, value: v })
     }
 }
