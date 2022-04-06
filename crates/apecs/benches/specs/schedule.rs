@@ -62,9 +62,6 @@ impl Benchmark<'_> {
         world.register::<D>();
         world.register::<E>();
         (0..10000).for_each(|_| {
-            world.create_entity().with(A(0.0)).build();
-        });
-        (0..10000).for_each(|_| {
             world.create_entity().with(A(0.0)).with(B(0.0)).build();
         });
         (0..10000).for_each(|_| {

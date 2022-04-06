@@ -40,10 +40,6 @@ impl Benchmark {
         (0..10000).for_each(|_| {
             let e = world.get_mut::<Entities>().unwrap().create();
             world.get_mut::<Components<_>>().unwrap().insert(e, A(0.0));
-        });
-        (0..10000).for_each(|_| {
-            let e = world.get_mut::<Entities>().unwrap().create();
-            world.get_mut::<Components<_>>().unwrap().insert(e, A(0.0));
             world.get_mut::<Components<_>>().unwrap().insert(e, B(0.0));
         });
         (0..10000).for_each(|_| {

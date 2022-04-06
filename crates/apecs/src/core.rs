@@ -1,13 +1,13 @@
 //! Core types and processes
 use std::{
     any::{Any, TypeId},
-    collections::HashMap,
     marker::PhantomData,
     ops::{Deref, DerefMut},
     sync::Arc,
 };
 
 use anyhow::Context;
+use rustc_hash::FxHashMap;
 
 pub use apecs_derive::CanFetch;
 
@@ -158,7 +158,7 @@ impl<'a, T: IsResource> Deref for Fetched<T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        &self.inner.as_ref().unwrap()
+        self.inner.as_ref().unwrap()
     }
 }
 
@@ -281,13 +281,13 @@ pub struct Facade {
     // Unbounded. Sending from the system should not yield the async
     pub(crate) resource_request_tx: spsc::Sender<Request>,
     // Bounded(1). Awaiting in the system should yield the async
-    pub(crate) resources_to_system_rx: spsc::Receiver<HashMap<ResourceId, FetchReadyResource>>,
+    pub(crate) resources_to_system_rx: spsc::Receiver<FxHashMap<ResourceId, FetchReadyResource>>,
     // Unbounded. Sending from the system should not yield the async
     pub(crate) resources_from_system_tx: mpsc::Sender<(ResourceId, Resource)>,
 }
 
 impl Facade {
-    pub async fn fetch<'a, T: CanFetch>(&'a mut self) -> anyhow::Result<T> {
+    pub async fn fetch<T: CanFetch>(&mut self) -> anyhow::Result<T> {
         let reads = T::reads().into_iter().map(|id| Borrow {
             id,
             is_exclusive: false,
@@ -315,9 +315,9 @@ impl Facade {
 pub trait CanFetch: Sized {
     fn reads() -> Vec<ResourceId>;
     fn writes() -> Vec<ResourceId>;
-    fn construct<'a>(
+    fn construct(
         resource_return_tx: mpsc::Sender<(ResourceId, Resource)>,
-        fields: &mut HashMap<ResourceId, FetchReadyResource>,
+        fields: &mut FxHashMap<ResourceId, FetchReadyResource>,
     ) -> anyhow::Result<Self>;
 }
 
@@ -332,7 +332,7 @@ impl<'a, T: IsResource> CanFetch for Write<T> {
 
     fn construct(
         resource_return_tx: mpsc::Sender<(ResourceId, Resource)>,
-        fields: &mut HashMap<ResourceId, FetchReadyResource>,
+        fields: &mut FxHashMap<ResourceId, FetchReadyResource>,
     ) -> anyhow::Result<Self> {
         let id = ResourceId::new::<T>();
         let t: FetchReadyResource = fields.remove(&id).with_context(|| {
@@ -343,7 +343,7 @@ impl<'a, T: IsResource> CanFetch for Write<T> {
         })?;
         let t = t
             .into_owned()
-            .with_context(|| format!("resource is not owned"))?;
+            .context("resource is not owned")?;
         let inner: Option<Box<T>> = Some(t.downcast::<T>().map_err(|_| {
             anyhow::anyhow!(
                 "could not cast resource as '{}'",
@@ -369,7 +369,7 @@ impl<'a, T: IsResource> CanFetch for Read<T> {
 
     fn construct(
         _: mpsc::Sender<(ResourceId, Resource)>,
-        fields: &mut HashMap<ResourceId, FetchReadyResource>,
+        fields: &mut FxHashMap<ResourceId, FetchReadyResource>,
     ) -> anyhow::Result<Self> {
         let id = ResourceId::new::<T>();
         let t: FetchReadyResource = fields.remove(&id).with_context(|| {
@@ -405,7 +405,7 @@ mod tests {
         assert!(executor.try_tick());
 
         let mut msgs = vec![];
-        while let Some(msg) = rx.try_recv().ok() {
+        while let Ok(msg) = rx.try_recv() {
             msgs.push(msg);
         }
 
@@ -426,7 +426,7 @@ mod tests {
             }
         });
 
-        let tx_s = tx.clone();
+        let tx_s = tx;
         let _s = executor.spawn(async move {
             let mut n = 0;
             loop {

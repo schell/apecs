@@ -2,7 +2,8 @@
 //!
 //! This module contains trait definitions. Implementations can be found in other modeluse.
 use rayon::prelude::*;
-use std::{collections::HashMap, iter::FlatMap, slice::Iter, sync::Arc};
+use rustc_hash::FxHashMap;
+use std::{iter::FlatMap, slice::Iter, sync::Arc};
 
 use crate::{
     mpsc,
@@ -30,14 +31,14 @@ pub(crate) trait IsSystem: std::fmt::Debug {
     fn run(
         &mut self,
         resource_return: mpsc::Sender<(ResourceId, Resource)>,
-        resources: HashMap<ResourceId, FetchReadyResource>,
+        resources: FxHashMap<ResourceId, FetchReadyResource>,
     ) -> anyhow::Result<()>;
 }
 
 #[derive(Default)]
 pub(crate) struct BatchData {
-    pub resources: Vec<HashMap<ResourceId, FetchReadyResource>>,
-    pub loaned_resources: HashMap<ResourceId, Arc<Resource>>,
+    pub resources: Vec<FxHashMap<ResourceId, FetchReadyResource>>,
+    pub loaned_resources: FxHashMap<ResourceId, Arc<Resource>>,
 }
 
 /// A batch of systems that can run in parallel (because their borrows
@@ -66,7 +67,7 @@ pub(crate) trait IsBatch: std::fmt::Debug + Default {
     /// current world resources and previously loaned resources.
     fn prepare_batch_data(
         &self,
-        resources: &mut HashMap<ResourceId, Resource>,
+        resources: &mut FxHashMap<ResourceId, Resource>,
     ) -> anyhow::Result<BatchData> {
         let mut data = BatchData::default();
         for system in self.systems() {
@@ -84,7 +85,7 @@ pub(crate) trait IsBatch: std::fmt::Debug + Default {
         &mut self,
         parallelize: bool,
         mut data: BatchData,
-        resources: &mut HashMap<ResourceId, Resource>,
+        resources: &mut FxHashMap<ResourceId, Resource>,
         resources_from_system: &(
             mpsc::Sender<(ResourceId, Resource)>,
             mpsc::Receiver<(ResourceId, Resource)>,
@@ -171,7 +172,7 @@ pub(crate) trait IsSchedule: std::fmt::Debug {
 
     fn run(
         &mut self,
-        resources: &mut HashMap<ResourceId, Resource>,
+        resources: &mut FxHashMap<ResourceId, Resource>,
         resources_from_system: &(
             mpsc::Sender<(ResourceId, Resource)>,
             mpsc::Receiver<(ResourceId, Resource)>,

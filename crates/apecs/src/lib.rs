@@ -2,6 +2,7 @@
 //!
 #![feature(generic_associated_types)]
 #![feature(vec_retain_mut)]
+#![allow(clippy::type_complexity)]
 mod core;
 mod system;
 

@@ -1,6 +1,7 @@
-use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
+use std::{future::Future, pin::Pin, sync::Arc};
 
 use anyhow::Context;
+use rustc_hash::FxHashMap;
 use smol::future::FutureExt;
 
 use crate::{
@@ -22,7 +23,7 @@ pub(crate) struct AsyncSystem {
     // Unbounded. Used to send resource requests from the system to the world.
     pub resource_request_rx: spsc::Receiver<Request>,
     // Bounded (1). Used to send resources from the world to the system.
-    pub resources_to_system_tx: spsc::Sender<HashMap<ResourceId, FetchReadyResource>>,
+    pub resources_to_system_tx: spsc::Sender<FxHashMap<ResourceId, FetchReadyResource>>,
 }
 
 impl AsyncSystem {
@@ -30,13 +31,12 @@ impl AsyncSystem {
     pub fn tick_async_system(
         &mut self,
         cx: &mut std::task::Context,
-        resources: &mut HashMap<ResourceId, Resource>,
+        resources: &mut FxHashMap<ResourceId, Resource>,
     ) -> anyhow::Result<bool> {
         let mut sent_resources = None;
 
         // receive any system resource requests
-        let borrowed_resources = if let Some(mut request) = self.resource_request_rx.try_recv().ok()
-        {
+        let borrowed_resources = if let Ok(mut request) = self.resource_request_rx.try_recv() {
             // get the outgoing resources (owned and refs) and a clone of the
             // refs
             let (resources, staying_refs) = crate::world::try_take_resources(
@@ -56,7 +56,7 @@ impl AsyncSystem {
             sent_resources = Some(request);
             staying_refs
         } else {
-            HashMap::default()
+            FxHashMap::default()
         };
 
         // run the system, bailing if it errs
@@ -129,7 +129,7 @@ impl IsBorrow for Borrow {
 pub type SystemFunction = Box<
     dyn FnMut(
             mpsc::Sender<(ResourceId, Resource)>,
-            HashMap<ResourceId, FetchReadyResource>,
+            FxHashMap<ResourceId, FetchReadyResource>,
         ) -> anyhow::Result<()>
         + Send
         + Sync
@@ -173,13 +173,13 @@ impl IsSystem for SyncSystem {
                 }
             }
         }
-        return false;
+        false
     }
 
     fn run(
         &mut self,
         tx: mpsc::Sender<(ResourceId, Resource)>,
-        resources: HashMap<ResourceId, FetchReadyResource>,
+        resources: FxHashMap<ResourceId, FetchReadyResource>,
     ) -> anyhow::Result<()> {
         (self.function)(tx, resources)
     }
@@ -207,7 +207,7 @@ impl IsBatch for SyncBatch {
 #[derive(Debug, Default)]
 pub struct SyncSchedule {
     batches: Vec<SyncBatch>,
-    should_run_parallel: bool
+    should_run_parallel: bool,
 }
 
 impl IsSchedule for SyncSchedule {
@@ -234,5 +234,4 @@ impl IsSchedule for SyncSchedule {
     fn get_should_parallelize(&self) -> bool {
         self.should_run_parallel
     }
-
 }

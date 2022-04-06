@@ -9,16 +9,16 @@ pub struct A(f32);
 #[derive(Clone)]
 pub struct B(f32);
 
-pub struct Benchmark<Store1: WorldStorage, Store2: WorldStorage> {
+pub struct Benchmark<Store1, Store2> {
     world: World,
     entities: Vec<Entity>,
     _phantom: PhantomData<(Store1, Store2)>,
 }
 
-impl<S1: WorldStorage, S2: WorldStorage> Benchmark<S1, S2>
+impl<S1, S2> Benchmark<S1, S2>
 where
-    S1: CanReadStorage<Component = A>,
-    S2: CanReadStorage<Component = B>,
+    S1: WorldStorage<Component = A>,
+    S2: WorldStorage<Component = B>,
 {
     pub fn new() -> Self {
         let mut world = World::default();

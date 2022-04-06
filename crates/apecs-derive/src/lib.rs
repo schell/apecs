@@ -72,7 +72,7 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
 
     let name = input.ident;
     let (construct_return, tys) = gen_from_body(&input.data, &name);
-    let mut generics = input.generics.clone();
+    let mut generics = input.generics;
     {
         let where_clause = generics.make_where_clause();
         constrain_system_data_types(where_clause, &tys)
@@ -100,7 +100,7 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
 
             fn construct(
                 tx: apecs::mpsc::Sender<(apecs::ResourceId, apecs::Resource)>,
-                fields: &mut std::collections::HashMap<apecs::ResourceId, apecs::FetchReadyResource>,
+                fields: &mut rustc_hash::FxHashMap<apecs::ResourceId, apecs::FetchReadyResource>,
             ) -> anyhow::Result<Self> {
                 Ok(#construct_return)
             }
@@ -130,7 +130,7 @@ pub fn impl_canfetch_tuple(input: proc_macro::TokenStream) -> proc_macro::TokenS
 
             fn construct(
                 tx: mpsc::Sender<(ResourceId, Resource)>,
-                fields: &mut std::collections::HashMap<ResourceId, FetchReadyResource>,
+                fields: &mut rustc_hash::FxHashMap<ResourceId, FetchReadyResource>,
             ) -> anyhow::Result<Self> {
                 Ok((
                     #(#tys::construct(tx.clone(), fields)?),*
@@ -146,39 +146,43 @@ pub fn impl_canfetch_tuple(input: proc_macro::TokenStream) -> proc_macro::TokenS
 pub fn impl_join_tuple(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let tuple: TypeTuple = parse_macro_input!(input);
     let tys = tuple.elems.iter().collect::<Vec<_>>();
-    let next_names = (0..tys.len()).map(|n| {
-        let name = Ident::new(&format!("next_{}", n), Span::call_site());
-        let n = syn::Member::Unnamed(n.into());
-        (name, n)
-    }).collect::<VecDeque<_>>();
-    let nexts = next_names.iter().map(|(name, n)| quote! {
-        let mut #name = self.0.#n.next()?.split();
-    }).collect::<VecDeque<_>>();
+    let next_names = (0..tys.len())
+        .map(|n| {
+            let name = Ident::new(&format!("next_{}", n), Span::call_site());
+            let n = syn::Member::Unnamed(n.into());
+            (name, n)
+        })
+        .collect::<VecDeque<_>>();
+    let nexts = next_names.iter().map(|(name, n)| {
+        quote! {
+            let mut #name = self.0.#n.next()?;
+        }
+    });
     let while_check = {
         let mut nexts = next_names.clone();
         let first = nexts.pop_front().unwrap();
         let next_a = first.0;
         let checks = nexts
             .iter()
-            .map(|(name, _)| quote!{ #next_a.0 == #name.0 })
+            .map(|(name, _)| quote! { #next_a.id() == #name.id() })
             .fold(None, |acc, check| match acc {
-                Some(prev) => Some(quote!{ #prev && #check }),
-                None => Some(quote!{ #check }),
+                Some(prev) => Some(quote! { #prev && #check }),
+                None => Some(quote! { #check }),
             })
             .unwrap();
         let syncs = nexts
             .iter()
-            .map(|(name, n)| quote!{
-                sync(&mut self.0.0, &mut #next_a, &mut self.0.#n, &mut #name)?;
+            .map(|(name, n)| {
+                quote! {
+                    sync(&mut self.0.0, &mut #next_a, &mut self.0.#n, &mut #name)?;
+                }
             })
             .collect::<Vec<_>>();
-        let result = nexts
-            .iter()
-            .fold(
-                quote!{#next_a.0, #next_a.1},
-                |acc, (name, _)| quote!{#acc, #name.1}
-            );
-        quote!{
+        let result = nexts.iter().fold(
+            quote! {#next_a.id(), #next_a.value()},
+            |acc, (name, _)| quote! {#acc, #name.value()},
+        );
+        quote! {
             while!(#checks) {
                 #(#syncs)*
             }
@@ -186,7 +190,10 @@ pub fn impl_join_tuple(input: proc_macro::TokenStream) -> proc_macro::TokenStrea
         }
     };
 
-    let self_ns = next_names.iter().map(|(_, n)| quote!{ self.#n.join() }).collect::<Vec<_>>();
+    let self_ns = next_names
+        .iter()
+        .map(|(_, n)| quote! { self.#n.join() })
+        .collect::<Vec<_>>();
     let nexts = nexts.into_iter().collect::<Vec<_>>();
 
     let iterator_for_joined_iter = quote! {
@@ -207,7 +214,7 @@ pub fn impl_join_tuple(input: proc_macro::TokenStream) -> proc_macro::TokenStrea
         }
     };
 
-    let join_for_tuple = quote!{
+    let join_for_tuple = quote! {
         impl <#(#tys),*> Join for #tuple
         where
             #(#tys: Join,)*
@@ -235,26 +242,47 @@ pub fn impl_join_tuple(input: proc_macro::TokenStream) -> proc_macro::TokenStrea
 pub fn impl_parjoin_tuple(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let tuple: TypeTuple = parse_macro_input!(input);
     let tys = tuple.elems.iter().collect::<Vec<_>>();
-    let (iters_comps, maybes_vals):(Vec<(Ident, Ident)>, Vec<(Ident, Ident)>) = (0..tys.len()).map(|n| {
-        let iter = Ident::new(&format!("Iter{}", n), Span::call_site());
-        let comp = Ident::new(&format!("Comp{}", n), Span::call_site());
-        let maybe = Ident::new(&format!("m{}", n), Span::call_site());
-        let val = Ident::new(&format!("n{}", n), Span::call_site());
-        ((iter, comp), (maybe, val))
-    }).unzip();
-    let (iters, comps):(Vec<_>, Vec<_>) = iters_comps.into_iter().unzip();
-    let (maybes, vals):(Vec<_>, Vec<_>) = maybes_vals.into_iter().unzip();
-    let store_constraints = tys.iter().zip(iters.iter()).map(|(ty, iter)| quote!{
-        #ty: IntoParallelIterator<Iter = #iter>
-    }).collect::<Vec<_>>();
-    let iter_constraints:Vec<_> = iters.iter().zip(comps.iter()).map(|(iter, comp)| quote!{
-        #iter: IndexedParallelIterator<Item = Option<#comp>>
-    }).collect();
-    let unwraps:Vec<_> = vals.iter().zip(maybes.iter()).map(|(val, may)| quote! {
-        let #val = #may?;
-    }).collect();
+    #[allow(clippy::type_complexity)]
+    let (iters_comps, maybes_vals): (Vec<(Ident, Ident)>, Vec<(Ident, Ident)>) = (0..tys.len())
+        .map(|n| {
+            let iter = Ident::new(&format!("Iter{}", n), Span::call_site());
+            let comp = Ident::new(&format!("Comp{}", n), Span::call_site());
+            let maybe = Ident::new(&format!("m{}", n), Span::call_site());
+            let val = Ident::new(&format!("n{}", n), Span::call_site());
+            ((iter, comp), (maybe, val))
+        })
+        .unzip();
+    let (iters, comps): (Vec<_>, Vec<_>) = iters_comps.into_iter().unzip();
+    let (maybes, vals): (Vec<_>, Vec<_>) = maybes_vals.into_iter().unzip();
+    let store_constraints = tys
+        .iter()
+        .zip(iters.iter())
+        .map(|(ty, iter)| {
+            quote! {
+                #ty: IntoParallelIterator<Iter = #iter>
+            }
+        })
+        .collect::<Vec<_>>();
+    let iter_constraints: Vec<_> = iters
+        .iter()
+        .zip(comps.iter())
+        .map(|(iter, comp)| {
+            quote! {
+                #iter: IndexedParallelIterator<Item = Option<#comp>>
+            }
+        })
+        .collect();
+    let unwraps: Vec<_> = vals
+        .iter()
+        .zip(maybes.iter())
+        .map(|(val, may)| {
+            quote! {
+                let #val = #may?;
+            }
+        })
+        .collect();
 
-    let join_for_tuple = quote!{
+    let join_for_tuple = quote! {
         impl <#(#tys,)* #(#iters,)* #(#comps,)*> ParJoin for #tuple
         where
             #(#store_constraints,)*

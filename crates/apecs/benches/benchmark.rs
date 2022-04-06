@@ -57,7 +57,7 @@ fn _bench_iter_wrapper_vs_bignext(c: &mut Criterion) {
 
     impl<'a, T: Copy> WrapperIter<'a, T> {
         fn new(s: &'a [Option<T>]) -> Self {
-            WrapperIter(s.iter().filter_map(|may| may.as_ref().map(|i| *i)))
+            WrapperIter(s.iter().filter_map(|may| may.as_ref().copied()))
         }
     }
 
@@ -228,9 +228,9 @@ fn bench_simple_insert(c: &mut Criterion) {
 
 fn bench_add_remove(c: &mut Criterion) {
     let mut group = c.benchmark_group("add_remove_component");
-    let plot_config =
-        criterion::PlotConfiguration::default().summary_scale(criterion::AxisScale::Logarithmic);
-    group.plot_config(plot_config);
+    //let plot_config =
+    //    criterion::PlotConfiguration::default().summary_scale(criterion::AxisScale::Logarithmic);
+    //group.plot_config(plot_config);
 
     group.bench_function("apecs::VecStorage", |b| {
         let mut bench =
@@ -284,42 +284,28 @@ fn bench_add_remove(c: &mut Criterion) {
 fn bench_simple_iter(c: &mut Criterion) {
     let mut group = c.benchmark_group("simple_iter");
 
-    group.bench_function("apecs::VecStorage", |b| {
-        let mut bench = simple_iter::Benchmark::<
-            VecStorage<simple_iter::Transform>,
-            VecStorage<simple_iter::Position>,
-            VecStorage<simple_iter::Rotation>,
-            VecStorage<simple_iter::Velocity>,
-        >::new()
-        .unwrap();
-        b.iter(move || bench.run());
-    });
-
-    //group.bench_function("apecs::SparseStorage", |b| {
-    //    let mut bench = simple_iter::Benchmark::<
-    //        SparseStorage<simple_iter::Transform>,
-    //        SparseStorage<simple_iter::Position>,
-    //        SparseStorage<simple_iter::Rotation>,
-    //        SparseStorage<simple_iter::Velocity>,
-    //    >::new()
-    //    .unwrap();
-    //    b.iter(move || bench.run());
-    //});
-
-    group.bench_function("apecs::BTreeStorage", |b| {
-        let mut bench = simple_iter::Benchmark::<
-            BTreeStorage<simple_iter::Transform>,
-            BTreeStorage<simple_iter::Position>,
-            BTreeStorage<simple_iter::Rotation>,
-            BTreeStorage<simple_iter::Velocity>,
-        >::new()
-        .unwrap();
-        b.iter(move || bench.run());
-    });
     group.bench_function("legion", |b| {
         let mut bench = legion::simple_iter::Benchmark::new();
         b.iter(move || bench.run());
     });
+    group.bench_function("apecs::VecStorage", |b| {
+        let mut bench = simple_iter::Benchmark::<
+                VecStorage<simple_iter::Position>,
+            VecStorage<simple_iter::Velocity>,
+            >::new()
+            .unwrap();
+        b.iter(move || bench.run());
+    });
+
+    group.bench_function("apecs::BTreeStorage", |b| {
+        let mut bench = simple_iter::Benchmark::<
+                BTreeStorage<simple_iter::Position>,
+            BTreeStorage<simple_iter::Velocity>,
+            >::new()
+            .unwrap();
+        b.iter(move || bench.run());
+    });
+
     group.bench_function("bevy", |b| {
         let mut bench = bevy::simple_iter::Benchmark::new();
         b.iter(move || bench.run());

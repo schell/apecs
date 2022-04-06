@@ -23,8 +23,8 @@ struct HeavyComputeData<P: IsResource, T: IsResource> {
 
 fn system<P, T>(mut data: HeavyComputeData<P, T>) -> anyhow::Result<()>
 where
-    P: WorldStorage + CanReadStorage<Component = Position>,
-    T: WorldStorage + CanReadStorage<Component = Transform>,
+    P: WorldStorage<Component = Position>,
+    T: WorldStorage<Component = Transform>,
 {
     use cgmath::Transform;
     (&mut data.positions, &mut data.transforms)
@@ -51,10 +51,10 @@ where
 
 impl<T, P, R, V> Benchmark<T, P, R, V>
 where
-    P: WorldStorage + CanReadStorage<Component = Position>,
-    T: WorldStorage + CanReadStorage<Component = Transform>,
-    R: WorldStorage + CanReadStorage<Component = Rotation>,
-    V: WorldStorage + CanReadStorage<Component = Velocity>,
+    P: WorldStorage<Component = Position>,
+    T: WorldStorage<Component = Transform>,
+    R: WorldStorage<Component = Rotation>,
+    V: WorldStorage<Component = Velocity>,
 {
     pub fn new() -> anyhow::Result<Self> {
         let mut entities = Entities::default();

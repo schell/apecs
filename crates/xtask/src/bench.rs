@@ -70,7 +70,7 @@ impl Bench {
 
         for benchmark in results.into_iter() {
             let historical_benchmark = HistoricalBenchmark {
-                date: date.clone(),
+                date,
                 benchmark,
                 tags: vec![],
             };
@@ -202,7 +202,7 @@ impl HistoricalBenchmarks {
 mod test {
     use super::*;
 
-    const BENCH_LINE: &'static str =
+    const BENCH_LINE: &str =
         "test presize_cubic_cpu/400 ... bench:    17041704 ns/iter (+/- 349284)";
 
     #[test]

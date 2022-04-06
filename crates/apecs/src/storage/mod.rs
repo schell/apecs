@@ -1,53 +1,19 @@
 //! Entity component storage traits.
-mod vec;
+use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 use std::sync::{Arc, Mutex};
 
-use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
+mod vec;
 pub use vec::*;
-
-//mod sparse;
-//pub use sparse::*;
 
 mod btree;
 pub use btree::*;
 
-use crate::{core::mpmc, Read, Write};
+pub mod tracking;
+
+use crate::{Read, Write};
 
 pub mod bitset {
     pub use hibitset::*;
-}
-
-/// Helper for maintaining flagged storage.
-#[derive(Clone)]
-pub struct StorageFlags {
-    pub inserted: mpmc::Channel<usize>,
-    pub modified: mpmc::Channel<usize>,
-    pub removed: mpmc::Channel<usize>,
-}
-
-impl StorageFlags {
-    pub fn new_with_capacity(cap: usize) -> Self {
-        StorageFlags {
-            inserted: mpmc::Channel::new_with_capacity(cap),
-            modified: mpmc::Channel::new_with_capacity(cap),
-            removed: mpmc::Channel::new_with_capacity(cap),
-        }
-    }
-
-    pub fn subscribe(&self) -> StorageUpdates {
-        StorageUpdates {
-            inserted: self.inserted.new_receiver(),
-            modified: self.modified.new_receiver(),
-            removed: self.removed.new_receiver(),
-        }
-    }
-}
-
-/// Subscriber for component updates.
-pub struct StorageUpdates {
-    pub inserted: mpmc::Receiver<usize>,
-    pub modified: mpmc::Receiver<usize>,
-    pub removed: mpmc::Receiver<usize>,
 }
 
 pub trait StorageComponent {
@@ -56,6 +22,8 @@ pub trait StorageComponent {
     fn split(self) -> (usize, Self::Component);
 
     fn id(&self) -> usize;
+
+    fn value(self) -> Self::Component;
 }
 
 impl<A> StorageComponent for (usize, A) {
@@ -68,6 +36,10 @@ impl<A> StorageComponent for (usize, A) {
     fn id(&self) -> usize {
         self.0
     }
+
+    fn value(self) -> Self::Component {
+        self.1
+    }
 }
 
 impl StorageComponent for usize {
@@ -79,6 +51,10 @@ impl StorageComponent for usize {
 
     fn id(&self) -> usize {
         *self
+    }
+
+    fn value(self) -> Self::Component {
+        self
     }
 }
 
@@ -97,6 +73,10 @@ impl<T> StorageComponent for Entry<T> {
 
     fn id(&self) -> usize {
         self.key()
+    }
+
+    fn value(self) -> Self::Component {
+        self.value
     }
 }
 
@@ -251,6 +231,17 @@ pub trait CanReadStorage {
     /// Return the last (alive) entry.
     fn last(&self) -> Option<Entry<&Self::Component>>;
 
+    /// Returns the length of the storage, which is really how many
+    /// indices might be stored (based on the last stored entry),
+    /// *not the number of actual entries*.
+    fn len(&self) -> usize {
+        self.last().map(|e| e.key() + 1).unwrap_or(0)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     fn get(&self, id: usize) -> Option<&Self::Component>;
 
     /// Return an iterator over all entities and indices
@@ -326,8 +317,7 @@ where
             s.get(n)
         }
 
-        let len = self.0.last().map(|e| e.key() + 1).unwrap_or(0);
-        let range = 0..len;
+        let range = 0..self.0.len();
         let iter: _ = range.into_par_iter().map_with(
             self.0,
             get as fn(&mut &'a S, usize) -> Option<&'a S::Component>,
@@ -352,10 +342,8 @@ where
 /// A helper for writing `IntoParallelIterator` implementations for references to storages.
 pub struct StorageIterMut<'a, S>(&'a mut S);
 
-pub type StorageIterGetFn<'a, S> = fn(
-    &mut Arc<Mutex<&'a mut S>>,
-    usize,
-) -> Option<&'a mut <S as CanReadStorage>::Component>;
+pub type StorageIterGetFn<'a, S> =
+    fn(&mut Arc<Mutex<&'a mut S>>, usize) -> Option<&'a mut <S as CanReadStorage>::Component>;
 
 impl<'a, S> IntoParallelIterator for StorageIterMut<'a, S>
 where
@@ -387,8 +375,7 @@ where
                 })
         }
 
-        let len = self.0.last().map(|e| e.key() + 1).unwrap_or(0);
-        let range = 0..len;
+        let range = 0..self.0.len();
         let a: Arc<Mutex<&'a mut S>> = Arc::new(Mutex::new(self.0));
         let iter: _ = range
             .into_par_iter()
@@ -397,23 +384,34 @@ where
     }
 }
 
-pub trait WorldStorage: CanReadStorage + CanWriteStorage + Send + Sync + Default + 'static {
-    type ParIter<'a>: IndexedParallelIterator<Item = Option<&'a Self::Component>>;
-    type IntoParIter<'a>: IntoParallelIterator<Iter = Self::ParIter<'a>>;
+pub trait ParallelStorage: CanReadStorage + CanWriteStorage + Send + Sync {
+    /// The indexed parallel iterator
+    type ParIter<'a>: IndexedParallelIterator<Item = Option<&'a Self::Component>>
+    where
+        Self: 'a;
+    /// A helper type that can be turned into `Self::ParIter<'a>` above.
+    type IntoParIter<'a>: IntoParallelIterator<Iter = Self::ParIter<'a>>
+    where
+        Self: 'a;
 
-    type ParIterMut<'a>: IndexedParallelIterator<Item = Option<&'a mut Self::Component>>;
-    type IntoParIterMut<'a>: IntoParallelIterator<Iter = Self::ParIterMut<'a>>;
+    /// The mutable indexed parallel iterator
+    type ParIterMut<'a>: IndexedParallelIterator<Item = Option<&'a mut Self::Component>>
+    where
+        Self: 'a;
+    /// A helper type that can be turned into `Self::ParIterMut<'a>` above.
+    type IntoParIterMut<'a>: IntoParallelIterator<Iter = Self::ParIterMut<'a>>
+    where
+        Self: 'a;
 
-    /// Create a new storage with a pre-allocated capacity
-    fn new_with_capacity(cap: usize) -> Self;
+    fn par_iter(&self) -> Self::IntoParIter<'_>;
 
-    fn par_iter<'a>(&'a self) -> Self::IntoParIter<'a>;
-
-    fn par_iter_mut<'a>(&'a mut self) -> Self::IntoParIterMut<'a>;
+    fn par_iter_mut(&mut self) -> Self::IntoParIterMut<'_>;
 }
 
-impl<'a, S: WorldStorage<Component = T>, T: Send + Sync + 'a> IntoParallelIterator for &'a Read<S> {
-    type Iter = <S as WorldStorage>::ParIter<'a>;
+impl<'a, S: ParallelStorage<Component = T> + 'static, T: Send + Sync + 'a> IntoParallelIterator
+    for &'a Read<S>
+{
+    type Iter = <S as ParallelStorage>::ParIter<'a>;
 
     type Item = Option<&'a T>;
 
@@ -422,8 +420,10 @@ impl<'a, S: WorldStorage<Component = T>, T: Send + Sync + 'a> IntoParallelIterat
     }
 }
 
-impl<'a, S: WorldStorage<Component = T>, T: Send + 'a> IntoParallelIterator for &'a mut Write<S> {
-    type Iter = <S as WorldStorage>::ParIterMut<'a>;
+impl<'a, S: ParallelStorage<Component = T> + 'static, T: Send + 'a> IntoParallelIterator
+    for &'a mut Write<S>
+{
+    type Iter = <S as ParallelStorage>::ParIterMut<'a>;
 
     type Item = Option<&'a mut T>;
 
@@ -432,16 +432,23 @@ impl<'a, S: WorldStorage<Component = T>, T: Send + 'a> IntoParallelIterator for 
     }
 }
 
-impl<'a, S: WorldStorage<Component = T>, T: Send + Sync + 'a> IntoParallelIterator
+impl<'a, S: ParallelStorage<Component = T> + 'static, T: Send + Sync + 'a> IntoParallelIterator
     for &'a Write<S>
 {
-    type Iter = <S as WorldStorage>::ParIter<'a>;
+    type Iter = <S as ParallelStorage>::ParIter<'a>;
 
     type Item = Option<&'a T>;
 
     fn into_par_iter(self) -> Self::Iter {
         self.par_iter().into_par_iter()
     }
+}
+
+/// Storages that can be read from, written to, joined in parallel, created by default
+/// and stored as a resource in the world.
+pub trait WorldStorage: CanReadStorage + CanWriteStorage + ParallelStorage + Default + 'static {
+    /// Create a new storage with a pre-allocated capacity
+    fn new_with_capacity(cap: usize) -> Self;
 }
 
 #[cfg(test)]
@@ -516,11 +523,11 @@ pub mod test {
             if IS_PAR {
                 (&mut data.a, &mut data.b)
                     .par_join()
-                    .for_each(|(number, string)| {
+                    .for_each(|(number, _string)| {
                         *number *= -1.0;
                     });
             } else {
-                for (_, number, string) in (&mut data.a, &mut data.b).join() {
+                for (_, number, _string) in (&mut data.a, &mut data.b).join() {
                     *number *= -1.0;
                 }
             }
@@ -579,11 +586,11 @@ pub mod test {
         }
 
         run::<VecStorage<f32>, VecStorage<&'static str>, false>().unwrap();
-        run::<SparseStorage<f32>, SparseStorage<&'static str>, false>().unwrap();
+        //run::<SparseStorage<f32>, SparseStorage<&'static str>, false>().unwrap();
         run::<BTreeStorage<f32>, BTreeStorage<&'static str>, false>().unwrap();
 
         run::<VecStorage<f32>, VecStorage<&'static str>, true>().unwrap();
-        run::<SparseStorage<f32>, SparseStorage<&'static str>, true>().unwrap();
+        //run::<SparseStorage<f32>, SparseStorage<&'static str>, true>().unwrap();
         run::<BTreeStorage<f32>, BTreeStorage<&'static str>, true>().unwrap();
     }
 

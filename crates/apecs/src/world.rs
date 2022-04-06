@@ -1,14 +1,13 @@
 //! The [`World`] contains resources and is responsible for ticking
 //! systems.
 use std::{
-    collections::HashMap,
     future::Future,
     sync::Arc,
     task::{Context as Ctx, RawWaker, Wake, Waker},
 };
 
 use anyhow::Context;
-
+use rustc_hash::FxHashMap;
 use smol::future::FutureExt;
 
 use crate::{
@@ -27,10 +26,10 @@ impl Wake for DummyWaker {
 pub struct World {
     waker: Option<Waker>,
     // world resources
-    resources: HashMap<ResourceId, Resource>,
+    resources: FxHashMap<ResourceId, Resource>,
     // resources loaned out to the owner of
     // this world
-    loaned_resources: HashMap<ResourceId, Arc<Resource>>,
+    loaned_resources: FxHashMap<ResourceId, Arc<Resource>>,
     // outer resource channel (unbounded)
     resources_from_system: (
         mpsc::Sender<(ResourceId, Resource)>,
@@ -49,7 +48,7 @@ impl Default for World {
         Self {
             waker: None,
             resources: Default::default(),
-            loaned_resources: HashMap::new(),
+            loaned_resources: FxHashMap::default(),
             resources_from_system: mpsc::unbounded(),
             sync_schedule: SyncSchedule::default(),
             async_systems: vec![],
@@ -62,16 +61,16 @@ impl Default for World {
 pub(crate) fn clear_returned_resources(
     system_name: Option<&str>,
     resources_from_system_rx: &mpsc::Receiver<(ResourceId, Resource)>,
-    resources: &mut HashMap<ResourceId, Resource>,
-    loaned_resources: &mut HashMap<ResourceId, Arc<Resource>>,
+    resources: &mut FxHashMap<ResourceId, Resource>,
+    loaned_resources: &mut FxHashMap<ResourceId, Arc<Resource>>,
 ) -> anyhow::Result<()> {
-    while let Some((rez_id, resource)) = resources_from_system_rx.try_recv().ok() {
+    while let Ok((rez_id, resource)) = resources_from_system_rx.try_recv() {
         // put the resources back, there should be nothing stored there currently
         let prev = resources.insert(rez_id, resource);
         if cfg!(feature = "debug_async") && prev.is_some() {
             anyhow::bail!(
                 "system '{}' sent back duplicate resources",
-                system_name.unwrap_or_else(|| "world")
+                system_name.unwrap_or("world")
             );
         }
     }
@@ -89,21 +88,21 @@ pub(crate) fn clear_returned_resources(
 }
 
 pub(crate) fn try_take_resources<'a>(
-    resources: &mut HashMap<ResourceId, Resource>,
+    resources: &mut FxHashMap<ResourceId, Resource>,
     borrows: impl Iterator<Item = &'a (impl IsBorrow + 'a)>,
     system_name: Option<&str>,
 ) -> anyhow::Result<(
-    HashMap<ResourceId, FetchReadyResource>,
-    HashMap<ResourceId, Arc<Resource>>,
+    FxHashMap<ResourceId, FetchReadyResource>,
+    FxHashMap<ResourceId, Arc<Resource>>,
 )> {
     // get only the requested resources
-    let mut ready_resources: HashMap<ResourceId, FetchReadyResource> = HashMap::default();
-    let mut stay_resources: HashMap<ResourceId, Arc<Resource>> = HashMap::default();
+    let mut ready_resources: FxHashMap<ResourceId, FetchReadyResource> = FxHashMap::default();
+    let mut stay_resources: FxHashMap<ResourceId, Arc<Resource>> = FxHashMap::default();
     for borrow in borrows {
         let rez: Resource = resources.remove(&borrow.rez_id()).with_context(|| {
             format!(
                 r#"system '{}' requested missing resource "{}" encountered while building request for {:?}"#,
-                system_name.unwrap_or_else(|| "world"),
+                system_name.unwrap_or("world"),
                 borrow.rez_id().name,
                 resources
                     .keys()
@@ -146,6 +145,17 @@ impl World {
             anyhow::bail!("resource {} already exists", std::any::type_name::<T>());
         }
 
+        Ok(self)
+    }
+
+    pub fn set_resource<T: IsResource>(&mut self, resource: T) -> anyhow::Result<&mut Self> {
+        let _prev = self
+            .resources
+            .insert(ResourceId::new::<T>(), Box::new(resource));
+        //if let Some(prev) = prev {
+        //    let t: Box<T> = prev.downcast()?;
+        //    let t: T = t.into_inner();
+        //}
         Ok(self)
     }
 
@@ -193,7 +203,7 @@ impl World {
     {
         let (resource_request_tx, resource_request_rx) = spsc::unbounded();
         let (resources_to_system_tx, resources_to_system_rx) =
-            spsc::bounded::<HashMap<ResourceId, FetchReadyResource>>(1);
+            spsc::bounded::<FxHashMap<ResourceId, FetchReadyResource>>(1);
 
         let facade = Facade {
             resource_request_tx,
@@ -238,7 +248,7 @@ impl World {
 
     /// Conduct a world tick but use an explicit context.
     /// If no context is given, async systems and futures will not be ticked.
-    pub fn tick_with_context<'a>(&mut self, mut cx: Option<&mut Ctx>) -> anyhow::Result<()> {
+    pub fn tick_with_context(&mut self, mut cx: Option<&mut Ctx>) -> anyhow::Result<()> {
         tracing::trace!("tick");
 
         if let Some(cx) = cx.as_mut() {
@@ -263,7 +273,7 @@ impl World {
                 }
 
                 for mut task in std::mem::take(&mut self.tasks) {
-                    if let std::task::Poll::Pending = task.poll(cx) {
+                    if task.poll(cx).is_pending() {
                         self.tasks.push(task);
                     }
                 }
@@ -314,7 +324,7 @@ impl World {
     }
 
     pub fn get_waker(&mut self) -> Waker {
-        self.waker.take().unwrap_or_else(|| Self::new_waker())
+        self.waker.take().unwrap_or_else(Self::new_waker)
     }
 
     /// Run all system and non-system futures until they have all finished or one
@@ -413,7 +423,7 @@ mod test {
             mut data: (
                 Read<VecStorage<String>>,
                 Read<VecStorage<u32>>,
-                Write<HashMap<String, u32>>,
+                Write<FxHashMap<String, u32>>,
             ),
         ) -> anyhow::Result<()> {
             for (_, name, number) in (&data.0, &data.1).join() {
@@ -430,7 +440,7 @@ mod test {
             .with_default_resource::<Entities>()?
             .with_default_resource::<VecStorage<String>>()?
             .with_default_resource::<VecStorage<u32>>()?
-            .with_default_resource::<HashMap<String, u32>>()?
+            .with_default_resource::<FxHashMap<String, u32>>()?
             .with_async_system("create", create)
             .with_system("maintain", maintain_map);
 
@@ -440,7 +450,7 @@ mod test {
         // maintain system updates the book
         world.tick()?;
 
-        let book = world.fetch::<Read<HashMap<String, u32>>>()?;
+        let book = world.fetch::<Read<FxHashMap<String, u32>>>()?;
         for n in 0..100 {
             assert_eq!(book.get(&format!("entity_{}", n)), Some(&n));
         }

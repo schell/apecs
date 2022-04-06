@@ -77,10 +77,7 @@ async fn print_system(mut facade: Facade) -> anyhow::Result<()> {
 }
 
 fn main() -> anyhow::Result<()> {
-    // a builder for `FmtSubscriber`.
     let subscriber = tracing_subscriber::FmtSubscriber::builder()
-        // `ng` will TRACE, so if you don't want to see all the engine output
-        // set something higher than `Level::TRACE`.
         .with_max_level(Level::DEBUG)
         .finish();
 
