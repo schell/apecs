@@ -31,8 +31,8 @@ where
     S4: WorldStorage<Component = Velocity>,
 {
     pub fn new() -> anyhow::Result<Self> {
-            let mut ps = S2::new_with_capacity(10000);
-            let mut vs = S4::new_with_capacity(10000);
+            let mut ps = S2::new_with_capacity(10001);
+            let mut vs = S4::new_with_capacity(10001);
 
         {
             (0..10000).for_each(|id| {

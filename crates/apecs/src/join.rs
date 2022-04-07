@@ -44,7 +44,7 @@ apecs_derive::impl_parjoin_tuple!((A, B, C, D, E, F, G, H, I, J));
 apecs_derive::impl_parjoin_tuple!((A, B, C, D, E, F, G, H, I, J, K));
 apecs_derive::impl_parjoin_tuple!((A, B, C, D, E, F, G, H, I, J, K, L));
 
-#[inline]
+#[inline(always)]
 pub fn sync<A, B>(
     a: &mut A,
     next_a: &mut A::Item,

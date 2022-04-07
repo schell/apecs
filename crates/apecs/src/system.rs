@@ -7,7 +7,7 @@ use smol::future::FutureExt;
 use crate::{
     mpsc,
     schedule::{IsBatch, IsBorrow, IsSchedule, IsSystem},
-    spsc, FetchReadyResource, Request, Resource, ResourceId,
+    spsc, FetchReadyResource, Request, Resource, ResourceId, CanFetch,
 };
 
 pub type AsyncSystemFuture =
@@ -182,6 +182,33 @@ impl IsSystem for SyncSystem {
         resources: FxHashMap<ResourceId, FetchReadyResource>,
     ) -> anyhow::Result<()> {
         (self.function)(tx, resources)
+    }
+}
+
+impl SyncSystem {
+    pub fn new<T, F>(name: impl AsRef<str>, mut sys_fn: F) -> Self
+    where
+        F: FnMut(T) -> anyhow::Result<()> + Send + Sync + 'static,
+        T: CanFetch,
+    {
+        SyncSystem {
+            name: name.as_ref().to_string(),
+            borrows: T::reads()
+                .into_iter()
+                .map(|id| Borrow {
+                    id,
+                    is_exclusive: false,
+                })
+                .chain(T::writes().into_iter().map(|id| Borrow {
+                    id,
+                    is_exclusive: true,
+                }))
+                .collect(),
+            function: Box::new(move |tx, mut resources| {
+                let data = T::construct(tx, &mut resources)?;
+                sys_fn(data)
+            }),
+        }
     }
 }
 

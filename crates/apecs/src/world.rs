@@ -12,9 +12,11 @@ use smol::future::FutureExt;
 
 use crate::{
     mpsc,
+    plugins::IsPlugin,
     schedule::{IsBorrow, IsSchedule},
-    spsc, AsyncSystem, Borrow, CanFetch, Facade, FetchReadyResource, IsResource, Resource,
-    ResourceId, SyncSchedule, SyncSystem,
+    spsc,
+    system::{AsyncSystem, Borrow, SyncSchedule, SyncSystem},
+    CanFetch, Facade, FetchReadyResource, IsResource, Resource, ResourceId,
 };
 
 struct DummyWaker;
@@ -159,29 +161,32 @@ impl World {
         Ok(self)
     }
 
+    pub fn with_plugin<Plugin: IsPlugin>(&mut self, plugin: Plugin) -> &mut Self {
+        for lazy_rez in plugin.resources().into_iter() {
+            if !self.resources.contains_key(lazy_rez.id()) {
+                let (id, resource) = lazy_rez.into();
+                let _ = self
+                    .resources
+                    .insert(id, resource);
+            }
+        }
+
+        for system in plugin.sync_systems().into_iter() {
+            if !self.sync_schedule.contains_system(&system.name) {
+                self.sync_schedule.add_system(system);
+            }
+        }
+
+        // TODO: Add async systems to plugins
+        self
+    }
+
     pub fn with_system<T, F>(&mut self, name: impl AsRef<str>, mut sys_fn: F) -> &mut Self
     where
         F: FnMut(T) -> anyhow::Result<()> + Send + Sync + 'static,
         T: CanFetch,
     {
-        let system = SyncSystem {
-            name: name.as_ref().to_string(),
-            borrows: T::reads()
-                .into_iter()
-                .map(|id| Borrow {
-                    id,
-                    is_exclusive: false,
-                })
-                .chain(T::writes().into_iter().map(|id| Borrow {
-                    id,
-                    is_exclusive: true,
-                }))
-                .collect(),
-            function: Box::new(move |tx, mut resources| {
-                let data = T::construct(tx, &mut resources)?;
-                sys_fn(data)
-            }),
-        };
+        let system = SyncSystem::new(name, sys_fn);
 
         self.sync_schedule.add_system(system);
         self

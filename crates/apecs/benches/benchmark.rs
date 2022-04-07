@@ -166,6 +166,38 @@ fn _bench_mutex(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_heap_vs_stack(c: &mut Criterion) {
+    let mut heap = vec![0.0f32; 10_000];
+    let mut stack = [0.0f32; 10_000];
+    let mut heapstack = vec![[0.0f32; 10_000]];
+    let mut group = c.benchmark_group("iteration_heap_vs_stack");
+    group.throughput(Throughput::Elements(10_000));
+    group.bench_function("heap", |b| {
+        b.iter(|| {
+            for n in heap.iter_mut() {
+                *n = 1.0;
+            }
+        })
+    });
+    group.throughput(Throughput::Elements(10_000));
+    group.bench_function("stack", |b| {
+        b.iter(|| {
+            for n in stack.iter_mut() {
+                *n = 1.0;
+            }
+        })
+    });
+    group.throughput(Throughput::Elements(10_000));
+    group.bench_function("heapstack", |b| {
+        b.iter(|| {
+            for n in &mut heapstack[0].iter_mut() {
+                *n = 1.0;
+            }
+        })
+    });
+    group.finish();
+}
+
 fn bench_simple_insert(c: &mut Criterion) {
     let mut group = c.benchmark_group("simple_insert");
     //let plot_config =
@@ -457,6 +489,7 @@ fn bench_heavy_compute(c: &mut Criterion) {
 
 criterion_group!(
     benches,
+    bench_heap_vs_stack,
     bench_add_remove,
     bench_simple_iter,
     bench_simple_insert,

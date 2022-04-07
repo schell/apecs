@@ -46,6 +46,15 @@ pub(crate) struct BatchData {
 pub(crate) trait IsBatch: std::fmt::Debug + Default {
     type System: IsSystem + Send + Sync;
 
+    fn contains_system(&self, name: &str) -> bool {
+        for system in self.systems() {
+            if system.name() == name {
+                return true;
+            }
+        }
+        return false;
+    }
+
     fn systems(&self) -> &[Self::System];
 
     fn systems_mut(&mut self) -> &mut [Self::System];
@@ -126,6 +135,15 @@ pub(crate) trait IsBatch: std::fmt::Debug + Default {
 pub(crate) trait IsSchedule: std::fmt::Debug {
     type System: IsSystem;
     type Batch: IsBatch<System = Self::System>;
+
+    fn contains_system(&self, name: &str) -> bool {
+        for batch in self.batches() {
+            if batch.contains_system(name) {
+                return true;
+            }
+        }
+        false
+    }
 
     fn batches_mut(&mut self) -> &mut [Self::Batch];
 

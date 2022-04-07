@@ -64,7 +64,7 @@ pub use fetch::*;
 
 use crate::{
     storage::{CanReadStorage, CanWriteStorage},
-    Borrow,
+    system::Borrow,
 };
 
 pub trait IsResource: Any + Send + Sync + 'static {}
@@ -203,7 +203,6 @@ impl<T: IsResource + CanReadStorage> CanReadStorage for Write<T> {
     where
         Self: 'a;
 
-
     fn get(&self, id: usize) -> Option<&Self::Component> {
         self.fetched.get(id)
     }
@@ -341,9 +340,7 @@ impl<'a, T: IsResource> CanFetch for Write<T> {
                 std::any::type_name::<T>(),
             )
         })?;
-        let t = t
-            .into_owned()
-            .context("resource is not owned")?;
+        let t = t.into_owned().context("resource is not owned")?;
         let inner: Option<Box<T>> = Some(t.downcast::<T>().map_err(|_| {
             anyhow::anyhow!(
                 "could not cast resource as '{}'",

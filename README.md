@@ -20,6 +20,6 @@ short-lived systems.
 [x] efficient (in space or iteration) component storages
 [x] joins / queries
 [x] parallel joins / queries (inner parallelism)
-[ ] parallel system scheduling (outer parallelism)
+[x] parallel system scheduling (outer parallelism)
+[x] flagged storage (components created, updated, modified)
 [ ] plugins/bundles
-[ ] flagged storage (components created, updated, modified)
