@@ -13,6 +13,19 @@ pub trait ParJoin {
     fn par_join(self) -> Self::Iter;
 }
 
+impl<StoreA, IterA, A> ParJoin for (StoreA,)
+where
+    StoreA: IntoParallelIterator<Iter = IterA>,
+    IterA: IndexedParallelIterator<Item = Option<A>>,
+    A: Send,
+{
+    type Iter = rayon::iter::Flatten<StoreA::Iter>;
+
+    fn par_join(self) -> Self::Iter {
+        self.0.into_par_iter().flatten()
+    }
+}
+
 impl<StoreA, StoreB, IterA, IterB, A, B> ParJoin for (StoreA, StoreB)
 where
     StoreA: IntoParallelIterator<Iter = IterA>,
@@ -112,15 +125,14 @@ impl<'a> Join for &'a Entities {
     }
 }
 
-impl<T> Join for WithoutIter<T>
+impl<T: Join> Join for Without<T>
 where
-    T: Iterator,
-    T::Item: StorageComponent,
+    <<T as Join>::Iter as Iterator>::Item: StorageComponent
 {
-    type Iter = Self;
+    type Iter = WithoutIter<T::Iter>;
 
     fn join(self) -> Self::Iter {
-        self
+        WithoutIter::new(self.0.join())
     }
 }
 

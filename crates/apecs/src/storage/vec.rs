@@ -152,10 +152,18 @@ impl<T> CanWriteStorage for VecStorage<T> {
 }
 
 impl<'a, T> std::ops::Not for &'a VecStorage<T> {
-    type Output = WithoutIter<VecStorageIter<'a, T>>;
+    type Output = Without<&'a VecStorage<T>>;
 
     fn not(self) -> Self::Output {
-        WithoutIter::new(self.iter())
+        Without(self)
+    }
+}
+
+impl<'a, T> std::ops::Not for &'a mut VecStorage<T> {
+    type Output = Without<&'a mut VecStorage<T>>;
+
+    fn not(self) -> Self::Output {
+        Without(self)
     }
 }
 

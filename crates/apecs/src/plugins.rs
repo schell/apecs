@@ -53,7 +53,7 @@ mod test {
         }
 
         fn my_system(mut data: MyData) -> anyhow::Result<()> {
-            for (_, s, n) in (&data.strings, &mut data.numbers).join() {
+            for (_, _, n) in (&data.strings, &mut data.numbers).join() {
                 *n += 1;
             }
 

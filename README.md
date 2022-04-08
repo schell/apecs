@@ -8,6 +8,7 @@ short-lived systems.
 * productivity
 * flexibility
 * don't be too magical / explicit API (within reason)
+* only pay for what you use
 * well rounded performance, competitive with inspirational ECS libraries
   - like `specs`, `bevy_ecs`, `hecs`, `legion`, `shipyard`
 
@@ -21,5 +22,5 @@ short-lived systems.
 [x] joins / queries
 [x] parallel joins / queries (inner parallelism)
 [x] parallel system scheduling (outer parallelism)
-[x] flagged storage (components created, updated, modified)
-[ ] plugins/bundles
+[x] tracked storage (components created, updated, modified)
+[x] insert plugins/bundles (groups of systems and resources)

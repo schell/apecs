@@ -324,14 +324,7 @@ impl World {
                 .iter()
                 .fold(AsyncSchedule::default(), |mut schedule, system| {
                     let async_request = match system.resource_request_rx.try_recv() {
-                        Ok(request) => {
-                            tracing::trace!(
-                                "got system resource request from '{}': {:?}",
-                                system.name,
-                                request
-                            );
-                            AsyncSystemRequest(&system, request)
-                        }
+                        Ok(request) => AsyncSystemRequest(&system, request),
                         Err(err) => match err {
                             // return an async system that requests nothing
                             smol::channel::TryRecvError::Empty => {

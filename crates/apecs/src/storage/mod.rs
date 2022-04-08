@@ -107,6 +107,25 @@ impl<T> Entry<T> {
     }
 }
 
+pub struct Without<T>(pub T);
+
+impl<'a, T> IntoParallelIterator for Without<&'a T>
+where
+    T: ParallelStorage,
+    T::ParIter<'a>: Send + Sync,
+{
+    type Iter = rayon::iter::Map<T::ParIter<'a>, fn(Option<&'a T::Component>) -> Option<()>>;
+
+    type Item = Option<()>;
+
+    fn into_par_iter(self) -> Self::Iter {
+        self.0
+            .par_iter()
+            .into_par_iter()
+            .map(|mitem| if mitem.is_none() { Some(()) } else { None })
+    }
+}
+
 /// An iterator that wraps a storage iterator, producing values
 /// for indicies that **are not** contained within the storage.
 pub struct WithoutIter<T: Iterator> {
@@ -217,6 +236,18 @@ where
         };
         self.id += 1;
         Some(entry)
+    }
+}
+
+pub struct MaybeParIter<T>(T);
+
+impl<T: IntoParallelIterator> IntoParallelIterator for MaybeParIter<T> {
+    type Iter = rayon::iter::Map<T::Iter, fn(T::Item) -> Option<T::Item>>;
+
+    type Item = Option<T::Item>;
+
+    fn into_par_iter(self) -> Self::Iter {
+        self.0.into_par_iter().map(Option::Some)
     }
 }
 
@@ -406,6 +437,14 @@ pub trait ParallelStorage: CanReadStorage + CanWriteStorage + Send + Sync {
     fn par_iter(&self) -> Self::IntoParIter<'_>;
 
     fn par_iter_mut(&mut self) -> Self::IntoParIterMut<'_>;
+
+    fn maybe_par_iter(&self) -> MaybeParIter<Self::IntoParIter<'_>> {
+        MaybeParIter(self.par_iter())
+    }
+
+    fn maybe_par_iter_mut(&mut self) -> MaybeParIter<Self::IntoParIterMut<'_>> {
+        MaybeParIter(self.par_iter_mut())
+    }
 }
 
 impl<'a, S: ParallelStorage<Component = T> + 'static, T: Send + Sync + 'a> IntoParallelIterator
@@ -446,7 +485,9 @@ impl<'a, S: ParallelStorage<Component = T> + 'static, T: Send + Sync + 'a> IntoP
 
 /// Storages that can be read from, written to, joined in parallel, created by default
 /// and stored as a resource in the world.
-pub trait WorldStorage: CanReadStorage + CanWriteStorage + ParallelStorage + Default + 'static {
+pub trait WorldStorage:
+    CanReadStorage + CanWriteStorage + ParallelStorage + Default + 'static
+{
     /// Create a new storage with a pre-allocated capacity
     fn new_with_capacity(cap: usize) -> Self;
 }
@@ -594,90 +635,85 @@ pub mod test {
         run::<BTreeStorage<f32>, BTreeStorage<&'static str>, true>().unwrap();
     }
 
-    //#[test]
-    //fn can_join_maybe() {
-    //    let vs_abc = make_abc_vecstorage();
-    //    let vs_246 = make_2468_vecstorage();
+    #[test]
+    fn can_join_not() {
+        let vs_abc = make_abc_vecstorage();
+        let vs_246 = make_2468_vecstorage();
+        let joined = (&vs_abc, !&vs_246).join().collect::<Vec<_>>();
+        assert_eq!(joined, vec![(1, &"def".to_string(), ()),]);
 
-    //    let mut joined = (&vs_abc, vs_246.maybe()).join();
-    //    assert_eq!(joined.next().unwrap(), (&"abc".to_string(), Some(&0)));
-    //    assert_eq!(joined.next().unwrap(), (&"def".to_string(), None));
-    //    assert_eq!(joined.next().unwrap(), (&"hij".to_string(), Some(&2)));
-    //    assert_eq!(joined.next().unwrap(), (&"666".to_string(), None));
-    //    assert_eq!(joined.next(), None);
-    //}
+        let joined = (&vs_abc, !&vs_246).par_join().collect::<Vec<_>>();
+        assert_eq!(joined, vec![(&"def".to_string(), ()),]);
+    }
 
-    //#[test]
-    //fn can_join_a_b() {
-    //    let vs_abc = make_abc_vecstorage();
-    //    let vs_246 = make_2468_vecstorage();
+    #[test]
+    fn can_join_maybe() {
+        let vs_abc = make_abc_vecstorage();
+        let vs_246 = make_2468_vecstorage();
 
-    //    let mut iter = (&vs_abc, &vs_246).join();
-    //    assert_eq!(iter.next(), Some((&"abc".to_string(), &0)));
-    //    assert_eq!(iter.next(), Some((&"hij".to_string(), &2)));
-    //    assert_eq!(iter.next(), Some((&"666".to_string(), &10)));
-    //}
+        let mut joined = (&vs_abc, vs_246.maybe()).join();
+        assert_eq!(joined.next().unwrap(), (0, &"abc".to_string(), Some(&0)));
+        assert_eq!(joined.next().unwrap(), (1, &"def".to_string(), None));
+        assert_eq!(joined.next().unwrap(), (2, &"hij".to_string(), Some(&2)));
+        assert_eq!(joined.next().unwrap(), (10, &"666".to_string(), Some(&10)));
+        assert_eq!(joined.next(), None);
 
-    //#[test]
-    //fn can_masked_iterate() {
-    //    let mut vs = make_abc_vecstorage();
-    //    let mut mask = BitSet::new();
-    //    mask.add(0);
-    //    mask.add(10);
-    //    mask.add(2);
+        let joined = (&vs_abc, vs_246.maybe_par_iter())
+            .par_join()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            joined,
+            vec![
+                (&"abc".to_string(), Some(&0)),
+                (&"def".to_string(), None),
+                (&"hij".to_string(), Some(&2)),
+                (&"666".to_string(), Some(&10))
+            ]
+        );
 
-    //    fn run_test<T: AsRef<str>>(iter: &mut impl Iterator<Item = Option<T>>) {
-    //        let abc = iter.next().unwrap().unwrap();
-    //        assert_eq!(abc.as_ref(), "abc");
+        let mut btree = BTreeStorage::<usize>::default();
+        btree.insert(0, 0);
+        let joined = (&btree,).par_join().collect::<Vec<_>>();
+        assert_eq!(joined, vec![&0]);
+        let joined = (&mut btree,).par_join().collect::<Vec<_>>();
+        assert_eq!(joined, vec![&0]);
+    }
 
-    //        assert!(iter.next().unwrap().is_none());
+    #[test]
+    fn can_join_a_b() {
+        let vs_abc = make_abc_vecstorage();
+        let vs_246 = make_2468_vecstorage();
 
-    //        let hij = iter.next().unwrap().unwrap();
-    //        assert_eq!(hij.as_ref(), "hij");
+        let mut iter = (&vs_abc, &vs_246).join();
+        assert_eq!(iter.next(), Some((0, &"abc".to_string(), &0)));
+        assert_eq!(iter.next(), Some((2, &"hij".to_string(), &2)));
+        assert_eq!(iter.next(), Some((10, &"666".to_string(), &10)));
+    }
 
-    //        for _ in 3..10 {
-    //            assert!(iter.next().unwrap().is_none());
-    //        }
+    #[test]
+    fn entities_create() {
+        let mut entities = Entities::default();
+        let a = entities.create();
+        let b = entities.create();
+        let c = entities.create();
 
-    //        let beast = iter.next().unwrap().unwrap();
-    //        assert_eq!(beast.as_ref(), "666");
+        assert_eq!(a.id(), 0);
+        assert_eq!(b.id(), 1);
+        assert_eq!(c.id(), 2);
+    }
 
-    //        assert!(iter.next().is_none());
-    //    }
+    #[test]
+    fn entity_create_storage_insert() {
+        struct A(f32);
 
-    //    let mut iter = vs.masked_iter_mut(mask.clone());
-    //    run_test(&mut iter);
-    //    drop(iter);
-
-    //    let mut iter = vs.masked_iter(mask);
-    //    run_test(&mut iter);
-    //}
-
-    //#[test]
-    //fn entities_create() {
-    //    let mut entities = Entities::default();
-    //    let a = entities.create();
-    //    let b = entities.create();
-    //    let c = entities.create();
-
-    //    assert_eq!(a.id(), 0);
-    //    assert_eq!(b.id(), 1);
-    //    assert_eq!(c.id(), 2);
-    //}
-
-    //#[test]
-    //fn entity_create_storage_insert() {
-    //    #[derive(Clone)]
-    //    struct A(f32);
-
-    //    let mut entities = Entities::default();
-    //    let mut a_storage: VecStorage<A> = VecStorage::default();
-    //    let _ = (0..10000)
-    //        .map(|_| {
-    //            let e = entities.create();
-    //            let _ = a_storage.insert(e.id(), A(0.0));
-    //            e
-    //        })
-    //        .collect::<Vec<_>>();
-    //}
+        let mut entities = Entities::default();
+        let mut a_storage: VecStorage<A> = VecStorage::default();
+        let _ = (0..10000)
+            .map(|_| {
+                let e = entities.create();
+                let _ = a_storage.insert(e.id(), A(0.0));
+                e
+            })
+            .collect::<Vec<_>>();
+    }
 }
