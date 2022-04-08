@@ -1,0 +1,414 @@
+<?xml version="1.0" standalone="no"?><!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd"><svg version="1.1" width="1200" height="614" onload="init(evt)" viewBox="0 0 1200 614" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:fg="http://github.com/jonhoo/inferno"><!--Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples.--><!--NOTES: --><defs><linearGradient id="background" y1="0" y2="1" x1="0" x2="0"><stop stop-color="#eeeeee" offset="5%"/><stop stop-color="#eeeeb0" offset="95%"/></linearGradient></defs><style type="text/css">
+text { font-family:"Verdana"; font-size:12px; fill:rgb(0,0,0); }
+#title { text-anchor:middle; font-size:17px; }
+#search { opacity:0.1; cursor:pointer; }
+#search:hover, #search.show { opacity:1; }
+#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+#unzoom { cursor:pointer; }
+#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+.hide { display:none; }
+.parent { opacity:0.5; }
+</style><script type="text/ecmascript"><![CDATA[
+        var nametype = 'Function:';
+        var fontsize = 12;
+        var fontwidth = 0.59;
+        var xpad = 10;
+        var inverted = false;
+        var searchcolor = 'rgb(230,0,230)';
+        var fluiddrawing = true;
+        var truncate_text_right = false;
+    ]]><![CDATA["use strict";
+var details, searchbtn, unzoombtn, matchedtxt, svg, searching, frames;
+function init(evt) {
+    details = document.getElementById("details").firstChild;
+    searchbtn = document.getElementById("search");
+    unzoombtn = document.getElementById("unzoom");
+    matchedtxt = document.getElementById("matched");
+    svg = document.getElementsByTagName("svg")[0];
+    frames = document.getElementById("frames");
+    total_samples = parseInt(frames.attributes.total_samples.value);
+    searching = 0;
+
+    // Use GET parameters to restore a flamegraph's state.
+    var restore_state = function() {
+        var params = get_params();
+        if (params.x && params.y)
+            zoom(find_group(document.querySelector('[*|x="' + params.x + '"][y="' + params.y + '"]')));
+        if (params.s)
+            search(params.s);
+    };
+
+    if (fluiddrawing) {
+        // Make width dynamic so the SVG fits its parent's width.
+        svg.removeAttribute("width");
+        // Edge requires us to have a viewBox that gets updated with size changes.
+        var isEdge = /Edge\/\d./i.test(navigator.userAgent);
+        if (!isEdge) {
+          svg.removeAttribute("viewBox");
+        }
+        var update_for_width_change = function() {
+            if (isEdge) {
+                svg.attributes.viewBox.value = "0 0 " + svg.width.baseVal.value + " " + svg.height.baseVal.value;
+            }
+
+            // Keep consistent padding on left and right of frames container.
+            frames.attributes.width.value = svg.width.baseVal.value - xpad * 2;
+
+            // Text truncation needs to be adjusted for the current width.
+            var el = frames.children;
+            for(var i = 0; i < el.length; i++) {
+                update_text(el[i]);
+            }
+
+            // Keep search elements at a fixed distance from right edge.
+            var svgWidth = svg.width.baseVal.value;
+            searchbtn.attributes.x.value = svgWidth - xpad - 100;
+            matchedtxt.attributes.x.value = svgWidth - xpad - 100;
+        };
+        window.addEventListener('resize', function() {
+            update_for_width_change();
+        });
+        // This needs to be done asynchronously for Safari to work.
+        setTimeout(function() {
+            unzoom();
+            update_for_width_change();
+            restore_state();
+        }, 0);
+    } else {
+        restore_state();
+    }
+}
+// event listeners
+window.addEventListener("click", function(e) {
+    var target = find_group(e.target);
+    if (target) {
+        if (target.nodeName == "a") {
+            if (e.ctrlKey === false) return;
+            e.preventDefault();
+        }
+        if (target.classList.contains("parent")) unzoom();
+        zoom(target);
+
+        // set parameters for zoom state
+        var el = target.querySelector("rect");
+        if (el && el.attributes && el.attributes.y && el.attributes["fg:x"]) {
+            var params = get_params()
+            params.x = el.attributes["fg:x"].value;
+            params.y = el.attributes.y.value;
+            history.replaceState(null, null, parse_params(params));
+        }
+    }
+    else if (e.target.id == "unzoom") {
+        unzoom();
+
+        // remove zoom state
+        var params = get_params();
+        if (params.x) delete params.x;
+        if (params.y) delete params.y;
+        history.replaceState(null, null, parse_params(params));
+    }
+    else if (e.target.id == "search") search_prompt();
+}, false)
+// mouse-over for info
+// show
+window.addEventListener("mouseover", function(e) {
+    var target = find_group(e.target);
+    if (target) details.nodeValue = nametype + " " + g_to_text(target);
+}, false)
+// clear
+window.addEventListener("mouseout", function(e) {
+    var target = find_group(e.target);
+    if (target) details.nodeValue = ' ';
+}, false)
+// ctrl-F for search
+window.addEventListener("keydown",function (e) {
+    if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+        e.preventDefault();
+        search_prompt();
+    }
+}, false)
+// functions
+function get_params() {
+    var params = {};
+    var paramsarr = window.location.search.substr(1).split('&');
+    for (var i = 0; i < paramsarr.length; ++i) {
+        var tmp = paramsarr[i].split("=");
+        if (!tmp[0] || !tmp[1]) continue;
+        params[tmp[0]]  = decodeURIComponent(tmp[1]);
+    }
+    return params;
+}
+function parse_params(params) {
+    var uri = "?";
+    for (var key in params) {
+        uri += key + '=' + encodeURIComponent(params[key]) + '&';
+    }
+    if (uri.slice(-1) == "&")
+        uri = uri.substring(0, uri.length - 1);
+    if (uri == '?')
+        uri = window.location.href.split('?')[0];
+    return uri;
+}
+function find_child(node, selector) {
+    var children = node.querySelectorAll(selector);
+    if (children.length) return children[0];
+    return;
+}
+function find_group(node) {
+    var parent = node.parentElement;
+    if (!parent) return;
+    if (parent.id == "frames") return node;
+    return find_group(parent);
+}
+function orig_save(e, attr, val) {
+    if (e.attributes["fg:orig_" + attr] != undefined) return;
+    if (e.attributes[attr] == undefined) return;
+    if (val == undefined) val = e.attributes[attr].value;
+    e.setAttribute("fg:orig_" + attr, val);
+}
+function orig_load(e, attr) {
+    if (e.attributes["fg:orig_"+attr] == undefined) return;
+    e.attributes[attr].value = e.attributes["fg:orig_" + attr].value;
+    e.removeAttribute("fg:orig_" + attr);
+}
+function g_to_text(e) {
+    var text = find_child(e, "title").firstChild.nodeValue;
+    return (text)
+}
+function g_to_func(e) {
+    var func = g_to_text(e);
+    // if there's any manipulation we want to do to the function
+    // name before it's searched, do it here before returning.
+    return (func);
+}
+function update_text(e) {
+    var r = find_child(e, "rect");
+    var t = find_child(e, "text");
+    var w = parseFloat(r.attributes.width.value) * frames.attributes.width.value / 100 - 3;
+    var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+    t.attributes.x.value = format_percent((parseFloat(r.attributes.x.value) + (100 * 3 / frames.attributes.width.value)));
+    // Smaller than this size won't fit anything
+    if (w < 2 * fontsize * fontwidth) {
+        t.textContent = "";
+        return;
+    }
+    t.textContent = txt;
+    // Fit in full text width
+    if (/^ *\$/.test(txt) || t.getComputedTextLength() < w)
+        return;
+    if (truncate_text_right) {
+        // Truncate the right side of the text.
+        for (var x = txt.length - 2; x > 0; x--) {
+            if (t.getSubStringLength(0, x + 2) <= w) {
+                t.textContent = txt.substring(0, x) + "..";
+                return;
+            }
+        }
+    } else {
+        // Truncate the left side of the text.
+        for (var x = 2; x < txt.length; x++) {
+            if (t.getSubStringLength(x - 2, txt.length) <= w) {
+                t.textContent = ".." + txt.substring(x, txt.length);
+                return;
+            }
+        }
+    }
+    t.textContent = "";
+}
+// zoom
+function zoom_reset(e) {
+    if (e.tagName == "rect") {
+        e.attributes.x.value = format_percent(100 * parseInt(e.attributes["fg:x"].value) / total_samples);
+        e.attributes.width.value = format_percent(100 * parseInt(e.attributes["fg:w"].value) / total_samples);
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_reset(c[i]);
+    }
+}
+function zoom_child(e, x, zoomed_width_samples) {
+    if (e.tagName == "text") {
+        var parent_x = parseFloat(find_child(e.parentNode, "rect[x]").attributes.x.value);
+        e.attributes.x.value = format_percent(parent_x + (100 * 3 / frames.attributes.width.value));
+    } else if (e.tagName == "rect") {
+        e.attributes.x.value = format_percent(100 * (parseInt(e.attributes["fg:x"].value) - x) / zoomed_width_samples);
+        e.attributes.width.value = format_percent(100 * parseInt(e.attributes["fg:w"].value) / zoomed_width_samples);
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_child(c[i], x, zoomed_width_samples);
+    }
+}
+function zoom_parent(e) {
+    if (e.attributes) {
+        if (e.attributes.x != undefined) {
+            e.attributes.x.value = "0.0%";
+        }
+        if (e.attributes.width != undefined) {
+            e.attributes.width.value = "100.0%";
+        }
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_parent(c[i]);
+    }
+}
+function zoom(node) {
+    var attr = find_child(node, "rect").attributes;
+    var width = parseInt(attr["fg:w"].value);
+    var xmin = parseInt(attr["fg:x"].value);
+    var xmax = xmin + width;
+    var ymin = parseFloat(attr.y.value);
+    unzoombtn.classList.remove("hide");
+    var el = frames.children;
+    for (var i = 0; i < el.length; i++) {
+        var e = el[i];
+        var a = find_child(e, "rect").attributes;
+        var ex = parseInt(a["fg:x"].value);
+        var ew = parseInt(a["fg:w"].value);
+        // Is it an ancestor
+        if (!inverted) {
+            var upstack = parseFloat(a.y.value) > ymin;
+        } else {
+            var upstack = parseFloat(a.y.value) < ymin;
+        }
+        if (upstack) {
+            // Direct ancestor
+            if (ex <= xmin && (ex+ew) >= xmax) {
+                e.classList.add("parent");
+                zoom_parent(e);
+                update_text(e);
+            }
+            // not in current path
+            else
+                e.classList.add("hide");
+        }
+        // Children maybe
+        else {
+            // no common path
+            if (ex < xmin || ex >= xmax) {
+                e.classList.add("hide");
+            }
+            else {
+                zoom_child(e, xmin, width);
+                update_text(e);
+            }
+        }
+    }
+}
+function unzoom() {
+    unzoombtn.classList.add("hide");
+    var el = frames.children;
+    for(var i = 0; i < el.length; i++) {
+        el[i].classList.remove("parent");
+        el[i].classList.remove("hide");
+        zoom_reset(el[i]);
+        update_text(el[i]);
+    }
+}
+// search
+function reset_search() {
+    var el = document.querySelectorAll("#frames rect");
+    for (var i = 0; i < el.length; i++) {
+        orig_load(el[i], "fill")
+    }
+    var params = get_params();
+    delete params.s;
+    history.replaceState(null, null, parse_params(params));
+}
+function search_prompt() {
+    if (!searching) {
+        var term = prompt("Enter a search term (regexp " +
+            "allowed, eg: ^ext4_)", "");
+        if (term != null) {
+            search(term)
+        }
+    } else {
+        reset_search();
+        searching = 0;
+        searchbtn.classList.remove("show");
+        searchbtn.firstChild.nodeValue = "Search"
+        matchedtxt.classList.add("hide");
+        matchedtxt.firstChild.nodeValue = ""
+    }
+}
+function search(term) {
+    var re = new RegExp(term);
+    var el = frames.children;
+    var matches = new Object();
+    var maxwidth = 0;
+    for (var i = 0; i < el.length; i++) {
+        var e = el[i];
+        // Skip over frames which are either not visible, or below the zoomed-to frame
+        if (e.classList.contains("hide") || e.classList.contains("parent")) {
+            continue;
+        }
+        var func = g_to_func(e);
+        var rect = find_child(e, "rect");
+        if (func == null || rect == null)
+            continue;
+        // Save max width. Only works as we have a root frame
+        var w = parseInt(rect.attributes["fg:w"].value);
+        if (w > maxwidth)
+            maxwidth = w;
+        if (func.match(re)) {
+            // highlight
+            var x = parseInt(rect.attributes["fg:x"].value);
+            orig_save(rect, "fill");
+            rect.attributes.fill.value = searchcolor;
+            // remember matches
+            if (matches[x] == undefined) {
+                matches[x] = w;
+            } else {
+                if (w > matches[x]) {
+                    // overwrite with parent
+                    matches[x] = w;
+                }
+            }
+            searching = 1;
+        }
+    }
+    if (!searching)
+        return;
+    var params = get_params();
+    params.s = term;
+    history.replaceState(null, null, parse_params(params));
+
+    searchbtn.classList.add("show");
+    searchbtn.firstChild.nodeValue = "Reset Search";
+    // calculate percent matched, excluding vertical overlap
+    var count = 0;
+    var lastx = -1;
+    var lastw = 0;
+    var keys = Array();
+    for (k in matches) {
+        if (matches.hasOwnProperty(k))
+            keys.push(k);
+    }
+    // sort the matched frames by their x location
+    // ascending, then width descending
+    keys.sort(function(a, b){
+        return a - b;
+    });
+    // Step through frames saving only the biggest bottom-up frames
+    // thanks to the sort order. This relies on the tree property
+    // where children are always smaller than their parents.
+    for (var k in keys) {
+        var x = parseInt(keys[k]);
+        var w = matches[keys[k]];
+        if (x >= lastx + lastw) {
+            count += w;
+            lastx = x;
+            lastw = w;
+        }
+    }
+    // display matched percent
+    matchedtxt.classList.remove("hide");
+    var pct = 100 * count / maxwidth;
+    if (pct != 100) pct = pct.toFixed(1);
+    matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+}
+function format_percent(n) {
+    return n.toFixed(4) + "%";
+}
+]]></script><rect x="0" y="0" width="100%" height="614" fill="url(#background)"/><text id="title" x="50.0000%" y="24.00">Flame Graph</text><text id="details" x="10" y="597.00"> </text><text id="unzoom" class="hide" x="10" y="24.00">Reset Zoom</text><text id="search" x="1090" y="24.00">Search</text><text id="matched" x="1090" y="597.00"> </text><svg id="frames" x="10" width="1180" total_samples="15100"><g><title>benchmark-766df231c38e0391`&lt;criterion::Criterion as core::default::Default&gt;::default (2 samples, 0.01%)</title><rect x="0.0000%" y="421" width="0.0132%" height="15" fill="rgb(227,0,7)" fg:x="0" fg:w="2"/><text x="0.2500%" y="431.50"></text></g><g><title>benchmark-766df231c38e0391`criterion::html::Html::new (2 samples, 0.01%)</title><rect x="0.0000%" y="405" width="0.0132%" height="15" fill="rgb(217,0,24)" fg:x="0" fg:w="2"/><text x="0.2500%" y="415.50"></text></g><g><title>benchmark-766df231c38e0391`tinytemplate::TinyTemplate::add_template (2 samples, 0.01%)</title><rect x="0.0000%" y="389" width="0.0132%" height="15" fill="rgb(221,193,54)" fg:x="0" fg:w="2"/><text x="0.2500%" y="399.50"></text></g><g><title>benchmark-766df231c38e0391`tinytemplate::template::Template::compile (2 samples, 0.01%)</title><rect x="0.0000%" y="373" width="0.0132%" height="15" fill="rgb(248,212,6)" fg:x="0" fg:w="2"/><text x="0.2500%" y="383.50"></text></g><g><title>benchmark-766df231c38e0391`tinytemplate::compiler::TemplateCompiler::compile (2 samples, 0.01%)</title><rect x="0.0000%" y="357" width="0.0132%" height="15" fill="rgb(208,68,35)" fg:x="0" fg:w="2"/><text x="0.2500%" y="367.50"></text></g><g><title>benchmark-766df231c38e0391`&lt;criterion::DEFAULT_PLOTTING_BACKEND as core::ops::deref::Deref&gt;::deref (2 samples, 0.01%)</title><rect x="0.0199%" y="389" width="0.0132%" height="15" fill="rgb(232,128,0)" fg:x="3" fg:w="2"/><text x="0.2699%" y="399.50"></text></g><g><title>benchmark-766df231c38e0391`std::sync::once::Once::call_once (2 samples, 0.01%)</title><rect x="0.0199%" y="373" width="0.0132%" height="15" fill="rgb(207,160,47)" fg:x="3" fg:w="2"/><text x="0.2699%" y="383.50"></text></g><g><title>benchmark-766df231c38e0391`std::sync::once::Once::call_inner (2 samples, 0.01%)</title><rect x="0.0199%" y="357" width="0.0132%" height="15" fill="rgb(228,23,34)" fg:x="3" fg:w="2"/><text x="0.2699%" y="367.50"></text></g><g><title>benchmark-766df231c38e0391`std::sync::once::Once::call_once::_{{closure}} (2 samples, 0.01%)</title><rect x="0.0199%" y="341" width="0.0132%" height="15" fill="rgb(218,30,26)" fg:x="3" fg:w="2"/><text x="0.2699%" y="351.50"></text></g><g><title>benchmark-766df231c38e0391`lazy_static::lazy::Lazy&lt;T&gt;::get::_{{closure}} (2 samples, 0.01%)</title><rect x="0.0199%" y="325" width="0.0132%" height="15" fill="rgb(220,122,19)" fg:x="3" fg:w="2"/><text x="0.2699%" y="335.50"></text></g><g><title>benchmark-766df231c38e0391`core::ops::function::FnOnce::call_once (2 samples, 0.01%)</title><rect x="0.0199%" y="309" width="0.0132%" height="15" fill="rgb(250,228,42)" fg:x="3" fg:w="2"/><text x="0.2699%" y="319.50"></text></g><g><title>benchmark-766df231c38e0391`&lt;criterion::GNUPLOT_VERSION as core::ops::deref::Deref&gt;::deref (2 samples, 0.01%)</title><rect x="0.0199%" y="293" width="0.0132%" height="15" fill="rgb(240,193,28)" fg:x="3" fg:w="2"/><text x="0.2699%" y="303.50"></text></g><g><title>benchmark-766df231c38e0391`std::sync::once::Once::call_once (2 samples, 0.01%)</title><rect x="0.0199%" y="277" width="0.0132%" height="15" fill="rgb(216,20,37)" fg:x="3" fg:w="2"/><text x="0.2699%" y="287.50"></text></g><g><title>benchmark-766df231c38e0391`std::sync::once::Once::call_inner (2 samples, 0.01%)</title><rect x="0.0199%" y="261" width="0.0132%" height="15" fill="rgb(206,188,39)" fg:x="3" fg:w="2"/><text x="0.2699%" y="271.50"></text></g><g><title>benchmark-766df231c38e0391`std::sync::once::Once::call_once::_{{closure}} (2 samples, 0.01%)</title><rect x="0.0199%" y="245" width="0.0132%" height="15" fill="rgb(217,207,13)" fg:x="3" fg:w="2"/><text x="0.2699%" y="255.50"></text></g><g><title>benchmark-766df231c38e0391`lazy_static::lazy::Lazy&lt;T&gt;::get::_{{closure}} (2 samples, 0.01%)</title><rect x="0.0199%" y="229" width="0.0132%" height="15" fill="rgb(231,73,38)" fg:x="3" fg:w="2"/><text x="0.2699%" y="239.50"></text></g><g><title>benchmark-766df231c38e0391`core::ops::function::FnOnce::call_once (2 samples, 0.01%)</title><rect x="0.0199%" y="213" width="0.0132%" height="15" fill="rgb(225,20,46)" fg:x="3" fg:w="2"/><text x="0.2699%" y="223.50"></text></g><g><title>benchmark-766df231c38e0391`criterion_plot::version (2 samples, 0.01%)</title><rect x="0.0199%" y="197" width="0.0132%" height="15" fill="rgb(210,31,41)" fg:x="3" fg:w="2"/><text x="0.2699%" y="207.50"></text></g><g><title>benchmark-766df231c38e0391`std::process::Command::output (2 samples, 0.01%)</title><rect x="0.0199%" y="181" width="0.0132%" height="15" fill="rgb(221,200,47)" fg:x="3" fg:w="2"/><text x="0.2699%" y="191.50"></text></g><g><title>benchmark-766df231c38e0391`std::sys::unix::process::process_inner::_&lt;impl std::sys::unix::process::process_common::Command&gt;::spawn (2 samples, 0.01%)</title><rect x="0.0199%" y="165" width="0.0132%" height="15" fill="rgb(226,26,5)" fg:x="3" fg:w="2"/><text x="0.2699%" y="175.50"></text></g><g><title>libsystem_c.dylib`posix_spawnp (2 samples, 0.01%)</title><rect x="0.0199%" y="149" width="0.0132%" height="15" fill="rgb(249,33,26)" fg:x="3" fg:w="2"/><text x="0.2699%" y="159.50"></text></g><g><title>libsystem_kernel.dylib`__posix_spawn (2 samples, 0.01%)</title><rect x="0.0199%" y="133" width="0.0132%" height="15" fill="rgb(235,183,28)" fg:x="3" fg:w="2"/><text x="0.2699%" y="143.50"></text></g><g><title>benchmark-766df231c38e0391`criterion::html::Html::new (2 samples, 0.01%)</title><rect x="0.0331%" y="389" width="0.0132%" height="15" fill="rgb(221,5,38)" fg:x="5" fg:w="2"/><text x="0.2831%" y="399.50"></text></g><g><title>benchmark-766df231c38e0391`tinytemplate::TinyTemplate::add_template (2 samples, 0.01%)</title><rect x="0.0331%" y="373" width="0.0132%" height="15" fill="rgb(247,18,42)" fg:x="5" fg:w="2"/><text x="0.2831%" y="383.50"></text></g><g><title>benchmark-766df231c38e0391`tinytemplate::template::Template::compile (2 samples, 0.01%)</title><rect x="0.0331%" y="357" width="0.0132%" height="15" fill="rgb(241,131,45)" fg:x="5" fg:w="2"/><text x="0.2831%" y="367.50"></text></g><g><title>benchmark-766df231c38e0391`tinytemplate::compiler::TemplateCompiler::compile (2 samples, 0.01%)</title><rect x="0.0331%" y="341" width="0.0132%" height="15" fill="rgb(249,31,29)" fg:x="5" fg:w="2"/><text x="0.2831%" y="351.50"></text></g><g><title>benchmark-766df231c38e0391`&lt;criterion::Criterion as core::default::Default&gt;::default (6 samples, 0.04%)</title><rect x="0.0132%" y="405" width="0.0397%" height="15" fill="rgb(225,111,53)" fg:x="2" fg:w="6"/><text x="0.2632%" y="415.50"></text></g><g><title>benchmark-766df231c38e0391`benchmark::bench_create_move_print (2 samples, 0.01%)</title><rect x="0.0596%" y="405" width="0.0132%" height="15" fill="rgb(238,160,17)" fg:x="9" fg:w="2"/><text x="0.3096%" y="415.50"></text></g><g><title>benchmark-766df231c38e0391`criterion::benchmark_group::BenchmarkGroup&lt;M&gt;::bench_with_input (2 samples, 0.01%)</title><rect x="0.0596%" y="389" width="0.0132%" height="15" fill="rgb(214,148,48)" fg:x="9" fg:w="2"/><text x="0.3096%" y="399.50"></text></g><g><title>benchmark-766df231c38e0391`criterion::benchmark_group::BenchmarkGroup&lt;M&gt;::run_bench (2 samples, 0.01%)</title><rect x="0.0596%" y="373" width="0.0132%" height="15" fill="rgb(232,36,49)" fg:x="9" fg:w="2"/><text x="0.3096%" y="383.50"></text></g><g><title>benchmark-766df231c38e0391`benchmark::bench_heap_vs_stack (2 samples, 0.01%)</title><rect x="0.0795%" y="405" width="0.0132%" height="15" fill="rgb(209,103,24)" fg:x="12" fg:w="2"/><text x="0.3295%" y="415.50"></text></g><g><title>benchmark-766df231c38e0391`benchmark::simple_iter::Benchmark&lt;S2,S4&gt;::new (4 samples, 0.03%)</title><rect x="0.1126%" y="133" width="0.0265%" height="15" fill="rgb(229,88,8)" fg:x="17" fg:w="4"/><text x="0.3626%" y="143.50"></text></g><g><title>benchmark-766df231c38e0391`core::iter::traits::iterator::Iterator::for_each (3 samples, 0.02%)</title><rect x="0.1192%" y="117" width="0.0199%" height="15" fill="rgb(213,181,19)" fg:x="18" fg:w="3"/><text x="0.3692%" y="127.50"></text></g><g><title>benchmark-766df231c38e0391`core::iter::traits::iterator::Iterator::fold (3 samples, 0.02%)</title><rect x="0.1192%" y="101" width="0.0199%" height="15" fill="rgb(254,191,54)" fg:x="18" fg:w="3"/><text x="0.3692%" y="111.50"></text></g><g><title>benchmark-766df231c38e0391`core::iter::traits::iterator::Iterator::for_each::call::_{{closure}} (3 samples, 0.02%)</title><rect x="0.1192%" y="85" width="0.0199%" height="15" fill="rgb(241,83,37)" fg:x="18" fg:w="3"/><text x="0.3692%" y="95.50"></text></g><g><title>benchmark-766df231c38e0391`benchmark::simple_iter::Benchmark&lt;S2,S4&gt;::new::_{{closure}} (3 samples, 0.02%)</title><rect x="0.1192%" y="69" width="0.0199%" height="15" fill="rgb(233,36,39)" fg:x="18" fg:w="3"/><text x="0.3692%" y="79.50"></text></g><g><title>benchmark-766df231c38e0391`&lt;apecs::storage::vec::VecStorage&lt;T&gt; as apecs::storage::CanWriteStorage&gt;::insert (3 samples, 0.02%)</title><rect x="0.1192%" y="53" width="0.0199%" height="15" fill="rgb(226,3,54)" fg:x="18" fg:w="3"/><text x="0.3692%" y="63.50"></text></g><g><title>benchmark-766df231c38e0391`&lt;apecs::join::JoinedIter&lt;(A,B)&gt; as core::iter::traits::iterator::Iterator&gt;::next (167 samples, 1.11%)</title><rect x="0.1391%" y="101" width="1.1060%" height="15" fill="rgb(245,192,40)" fg:x="21" fg:w="167"/><text x="0.3891%" y="111.50"></text></g><g><title>benchmark-766df231c38e0391`&lt;apecs::storage::Entry&lt;T&gt; as apecs::storage::StorageComponent&gt;::id (192 samples, 1.27%)</title><rect x="15.3245%" y="69" width="1.2715%" height="15" fill="rgb(238,167,29)" fg:x="2314" fg:w="192"/><text x="15.5745%" y="79.50"></text></g><g><title>benchmark-766df231c38e0391`core::ptr::const_ptr::_&lt;impl *const T&gt;::guaranteed_eq (122 samples, 0.81%)</title><rect x="27.8609%" y="37" width="0.8079%" height="15" fill="rgb(232,182,51)" fg:x="4207" fg:w="122"/><text x="28.1109%" y="47.50"></text></g><g><title>benchmark-766df231c38e0391`core::ptr::const_ptr::_&lt;impl *const T&gt;::is_null (249 samples, 1.65%)</title><rect x="28.6689%" y="37" width="1.6490%" height="15" fill="rgb(231,60,39)" fg:x="4329" fg:w="249"/><text x="28.9189%" y="47.50"></text></g><g><title>benchmark-766df231c38e0391`core::ptr::mut_ptr::_&lt;impl *mut T&gt;::guaranteed_eq (115 samples, 0.76%)</title><rect x="30.3179%" y="37" width="0.7616%" height="15" fill="rgb(208,69,12)" fg:x="4578" fg:w="115"/><text x="30.5679%" y="47.50"></text></g><g><title>benchmark-766df231c38e0391`&lt;core::slice::iter::Iter&lt;T&gt; as core::iter::traits::iterator::Iterator&gt;::next (1,884 samples, 12.48%)</title><rect x="20.1523%" y="53" width="12.4768%" height="15" fill="rgb(235,93,37)" fg:x="3043" fg:w="1884"/><text x="20.4023%" y="63.50">benchmark-766df231c..</text></g><g><title>benchmark-766df231c38e0391`core::ptr::mut_ptr::_&lt;impl *mut T&gt;::is_null (234 samples, 1.55%)</title><rect x="31.0795%" y="37" width="1.5497%" height="15" fill="rgb(213,116,39)" fg:x="4693" fg:w="234"/><text x="31.3295%" y="47.50"></text></g><g><title>benchmark-766df231c38e0391`core::ptr::non_null::NonNull&lt;T&gt;::as_ptr (252 samples, 1.67%)</title><rect x="32.6291%" y="53" width="1.6689%" height="15" fill="rgb(222,207,29)" fg:x="4927" fg:w="252"/><text x="32.8791%" y="63.50"></text></g><g><title>benchmark-766df231c38e0391`&lt;apecs::storage::vec::VecStorageIter&lt;T&gt; as core::iter::traits::iterator::Iterator&gt;::next (2,743 samples, 18.17%)</title><rect x="16.5960%" y="69" width="18.1656%" height="15" fill="rgb(206,96,30)" fg:x="2506" fg:w="2743"/><text x="16.8460%" y="79.50">benchmark-766df231c38e0391`&lt;..</text></g><g><title>benchmark-766df231c38e0391`core::ptr::non_null::NonNull&lt;T&gt;::new_unchecked (70 samples, 0.46%)</title><rect x="34.2980%" y="53" width="0.4636%" height="15" fill="rgb(218,138,4)" fg:x="5179" fg:w="70"/><text x="34.5480%" y="63.50"></text></g><g><title>benchmark-766df231c38e0391`core::ptr::mut_ptr::_&lt;impl *mut T&gt;::guaranteed_eq (245 samples, 1.62%)</title><rect x="47.3576%" y="37" width="1.6225%" height="15" fill="rgb(250,191,14)" fg:x="7151" fg:w="245"/><text x="47.6076%" y="47.50"></text></g><g><title>benchmark-766df231c38e0391`&lt;core::slice::iter::IterMut&lt;T&gt; as core::iter::traits::iterator::Iterator&gt;::next (2,049 samples, 13.57%)</title><rect x="38.7417%" y="53" width="13.5695%" height="15" fill="rgb(239,60,40)" fg:x="5850" fg:w="2049"/><text x="38.9917%" y="63.50">benchmark-766df231c3..</text></g><g><title>benchmark-766df231c38e0391`core::ptr::mut_ptr::_&lt;impl *mut T&gt;::is_null (503 samples, 3.33%)</title><rect x="48.9801%" y="37" width="3.3311%" height="15" fill="rgb(206,27,48)" fg:x="7396" fg:w="503"/><text x="49.2301%" y="47.50">ben..</text></g><g><title>benchmark-766df231c38e0391`core::ptr::non_null::NonNull&lt;T&gt;::as_ptr (247 samples, 1.64%)</title><rect x="52.3113%" y="53" width="1.6358%" height="15" fill="rgb(225,35,8)" fg:x="7899" fg:w="247"/><text x="52.5613%" y="63.50"></text></g><g><title>benchmark-766df231c38e0391`&lt;apecs::storage::vec::VecStorageIterMut&lt;T&gt; as core::iter::traits::iterator::Iterator&gt;::next (2,953 samples, 19.56%)</title><rect x="34.7616%" y="69" width="19.5563%" height="15" fill="rgb(250,213,24)" fg:x="5249" fg:w="2953"/><text x="35.0116%" y="79.50">benchmark-766df231c38e0391`&lt;ape..</text></g><g><title>benchmark-766df231c38e0391`core::ptr::non_null::NonNull&lt;T&gt;::new_unchecked (56 samples, 0.37%)</title><rect x="53.9470%" y="53" width="0.3709%" height="15" fill="rgb(247,123,22)" fg:x="8146" fg:w="56"/><text x="54.1970%" y="63.50"></text></g><g><title>benchmark-766df231c38e0391`&lt;core::option::Option&lt;T&gt; as core::ops::try_trait::Try&gt;::branch (498 samples, 3.30%)</title><rect x="54.3179%" y="69" width="3.2980%" height="15" fill="rgb(231,138,38)" fg:x="8202" fg:w="498"/><text x="54.5679%" y="79.50">ben..</text></g><g><title>benchmark-766df231c38e0391`&lt;apecs::storage::Entry&lt;T&gt; as apecs::storage::StorageComponent&gt;::id (284 samples, 1.88%)</title><rect x="60.2119%" y="53" width="1.8808%" height="15" fill="rgb(231,145,46)" fg:x="9092" fg:w="284"/><text x="60.4619%" y="63.50">b..</text></g><g><title>benchmark-766df231c38e0391`apecs::join::sync (805 samples, 5.33%)</title><rect x="57.6159%" y="69" width="5.3311%" height="15" fill="rgb(251,118,11)" fg:x="8700" fg:w="805"/><text x="57.8659%" y="79.50">benchma..</text></g><g><title>benchmark-766df231c38e0391`apecs::storage::Entry&lt;T&gt;::key (129 samples, 0.85%)</title><rect x="62.0927%" y="53" width="0.8543%" height="15" fill="rgb(217,147,25)" fg:x="9376" fg:w="129"/><text x="62.3427%" y="63.50"></text></g><g><title>benchmark-766df231c38e0391`apecs::storage::Entry&lt;T&gt;::as_mut (106 samples, 0.70%)</title><rect x="62.9470%" y="69" width="0.7020%" height="15" fill="rgb(247,81,37)" fg:x="9505" fg:w="106"/><text x="63.1970%" y="79.50"></text></g><g><title>benchmark-766df231c38e0391`apecs::storage::Entry&lt;T&gt;::as_ref (106 samples, 0.70%)</title><rect x="63.6490%" y="69" width="0.7020%" height="15" fill="rgb(209,12,38)" fg:x="9611" fg:w="106"/><text x="63.8990%" y="79.50"></text></g><g><title>benchmark-766df231c38e0391`&lt;apecs::join::JoinedIter&lt;(A,B)&gt; as core::iter::traits::iterator::Iterator&gt;::next (9,143 samples, 60.55%)</title><rect x="4.1258%" y="85" width="60.5497%" height="15" fill="rgb(227,1,9)" fg:x="623" fg:w="9143"/><text x="4.3758%" y="95.50">benchmark-766df231c38e0391`&lt;apecs::join::JoinedIter&lt;(A,B)&gt; as core::iter::traits::iterator::Iterator..</text></g><g><title>benchmark-766df231c38e0391`apecs::storage::Entry&lt;T&gt;::key (49 samples, 0.32%)</title><rect x="64.3510%" y="69" width="0.3245%" height="15" fill="rgb(248,47,43)" fg:x="9717" fg:w="49"/><text x="64.6010%" y="79.50"></text></g><g><title>benchmark-766df231c38e0391`&lt;apecs::storage::Entry&lt;T&gt; as apecs::storage::StorageComponent&gt;::value (131 samples, 0.87%)</title><rect x="64.6755%" y="85" width="0.8675%" height="15" fill="rgb(221,10,30)" fg:x="9766" fg:w="131"/><text x="64.9255%" y="95.50"></text></g><g><title>benchmark-766df231c38e0391`&lt;cgmath::vector::Vector3&lt;S&gt; as core::ops::arith::AddAssign&gt;::add_assign (271 samples, 1.79%)</title><rect x="65.5430%" y="85" width="1.7947%" height="15" fill="rgb(210,229,1)" fg:x="9897" fg:w="271"/><text x="65.7930%" y="95.50">b..</text></g><g><title>benchmark-766df231c38e0391`&lt;core::option::Option&lt;T&gt; as core::ops::try_trait::Try&gt;::branch (735 samples, 4.87%)</title><rect x="67.3377%" y="85" width="4.8675%" height="15" fill="rgb(222,148,37)" fg:x="10168" fg:w="735"/><text x="67.5877%" y="95.50">benchm..</text></g><g><title>benchmark-766df231c38e0391`&lt;f32 as core::ops::arith::AddAssign&gt;::add_assign (294 samples, 1.95%)</title><rect x="72.2053%" y="85" width="1.9470%" height="15" fill="rgb(234,67,33)" fg:x="10903" fg:w="294"/><text x="72.4553%" y="95.50">b..</text></g><g><title>benchmark-766df231c38e0391`&lt;criterion::routine::Function&lt;M,F,T&gt; as criterion::routine::Routine&lt;M,T&gt;&gt;::bench (11,292 samples, 74.78%)</title><rect x="0.1126%" y="341" width="74.7815%" height="15" fill="rgb(247,98,35)" fg:x="17" fg:w="11292"/><text x="0.3626%" y="351.50">benchmark-766df231c38e0391`&lt;criterion::routine::Function&lt;M,F,T&gt; as criterion::routine::Routine&lt;M,T&gt;&gt;::bench</text></g><g><title>benchmark-766df231c38e0391`core::iter::traits::iterator::Iterator::collect (11,292 samples, 74.78%)</title><rect x="0.1126%" y="325" width="74.7815%" height="15" fill="rgb(247,138,52)" fg:x="17" fg:w="11292"/><text x="0.3626%" y="335.50">benchmark-766df231c38e0391`core::iter::traits::iterator::Iterator::collect</text></g><g><title>benchmark-766df231c38e0391`&lt;alloc::vec::Vec&lt;T&gt; as core::iter::traits::collect::FromIterator&lt;T&gt;&gt;::from_iter (11,292 samples, 74.78%)</title><rect x="0.1126%" y="309" width="74.7815%" height="15" fill="rgb(213,79,30)" fg:x="17" fg:w="11292"/><text x="0.3626%" y="319.50">benchmark-766df231c38e0391`&lt;alloc::vec::Vec&lt;T&gt; as core::iter::traits::collect::FromIterator&lt;T&gt;&gt;::from_iter</text></g><g><title>benchmark-766df231c38e0391`&lt;alloc::vec::Vec&lt;T&gt; as alloc::vec::spec_from_iter::SpecFromIter&lt;T,I&gt;&gt;::from_iter (11,292 samples, 74.78%)</title><rect x="0.1126%" y="293" width="74.7815%" height="15" fill="rgb(246,177,23)" fg:x="17" fg:w="11292"/><text x="0.3626%" y="303.50">benchmark-766df231c38e0391`&lt;alloc::vec::Vec&lt;T&gt; as alloc::vec::spec_from_iter::SpecFromIter&lt;T,I&gt;&gt;::from_iter</text></g><g><title>benchmark-766df231c38e0391`&lt;alloc::vec::Vec&lt;T&gt; as alloc::vec::spec_from_iter_nested::SpecFromIterNested&lt;T,I&gt;&gt;::from_iter (11,292 samples, 74.78%)</title><rect x="0.1126%" y="277" width="74.7815%" height="15" fill="rgb(230,62,27)" fg:x="17" fg:w="11292"/><text x="0.3626%" y="287.50">benchmark-766df231c38e0391`&lt;alloc::vec::Vec&lt;T&gt; as alloc::vec::spec_from_iter_nested::SpecFromIterNested&lt;T,I&gt;&gt;::from_iter</text></g><g><title>benchmark-766df231c38e0391`&lt;alloc::vec::Vec&lt;T,A&gt; as alloc::vec::spec_extend::SpecExtend&lt;T,I&gt;&gt;::spec_extend (11,292 samples, 74.78%)</title><rect x="0.1126%" y="261" width="74.7815%" height="15" fill="rgb(216,154,8)" fg:x="17" fg:w="11292"/><text x="0.3626%" y="271.50">benchmark-766df231c38e0391`&lt;alloc::vec::Vec&lt;T,A&gt; as alloc::vec::spec_extend::SpecExtend&lt;T,I&gt;&gt;::spec_extend</text></g><g><title>benchmark-766df231c38e0391`core::iter::traits::iterator::Iterator::for_each (11,292 samples, 74.78%)</title><rect x="0.1126%" y="245" width="74.7815%" height="15" fill="rgb(244,35,45)" fg:x="17" fg:w="11292"/><text x="0.3626%" y="255.50">benchmark-766df231c38e0391`core::iter::traits::iterator::Iterator::for_each</text></g><g><title>benchmark-766df231c38e0391`&lt;core::iter::adapters::map::Map&lt;I,F&gt; as core::iter::traits::iterator::Iterator&gt;::fold (11,292 samples, 74.78%)</title><rect x="0.1126%" y="229" width="74.7815%" height="15" fill="rgb(251,115,12)" fg:x="17" fg:w="11292"/><text x="0.3626%" y="239.50">benchmark-766df231c38e0391`&lt;core::iter::adapters::map::Map&lt;I,F&gt; as core::iter::traits::iterator::Iterator&gt;::fold</text></g><g><title>benchmark-766df231c38e0391`core::iter::traits::iterator::Iterator::fold (11,292 samples, 74.78%)</title><rect x="0.1126%" y="213" width="74.7815%" height="15" fill="rgb(240,54,50)" fg:x="17" fg:w="11292"/><text x="0.3626%" y="223.50">benchmark-766df231c38e0391`core::iter::traits::iterator::Iterator::fold</text></g><g><title>benchmark-766df231c38e0391`core::iter::adapters::map::map_fold::_{{closure}} (11,292 samples, 74.78%)</title><rect x="0.1126%" y="197" width="74.7815%" height="15" fill="rgb(233,84,52)" fg:x="17" fg:w="11292"/><text x="0.3626%" y="207.50">benchmark-766df231c38e0391`core::iter::adapters::map::map_fold::_{{closure}}</text></g><g><title>benchmark-766df231c38e0391`&lt;criterion::routine::Function&lt;M,F,T&gt; as criterion::routine::Routine&lt;M,T&gt;&gt;::bench::_{{closure}} (11,292 samples, 74.78%)</title><rect x="0.1126%" y="181" width="74.7815%" height="15" fill="rgb(207,117,47)" fg:x="17" fg:w="11292"/><text x="0.3626%" y="191.50">benchmark-766df231c38e0391`&lt;criterion::routine::Function&lt;M,F,T&gt; as criterion::routine::Routine&lt;M,T&gt;&gt;::bench::_{{closure}}</text></g><g><title>benchmark-766df231c38e0391`criterion::benchmark_group::BenchmarkGroup&lt;M&gt;::bench_function::_{{closure}} (11,292 samples, 74.78%)</title><rect x="0.1126%" y="165" width="74.7815%" height="15" fill="rgb(249,43,39)" fg:x="17" fg:w="11292"/><text x="0.3626%" y="175.50">benchmark-766df231c38e0391`criterion::benchmark_group::BenchmarkGroup&lt;M&gt;::bench_function::_{{closure}}</text></g><g><title>benchmark-766df231c38e0391`benchmark::bench_simple_iter::_{{closure}} (11,292 samples, 74.78%)</title><rect x="0.1126%" y="149" width="74.7815%" height="15" fill="rgb(209,38,44)" fg:x="17" fg:w="11292"/><text x="0.3626%" y="159.50">benchmark-766df231c38e0391`benchmark::bench_simple_iter::_{{closure}}</text></g><g><title>benchmark-766df231c38e0391`criterion::bencher::Bencher&lt;M&gt;::iter (11,288 samples, 74.75%)</title><rect x="0.1391%" y="133" width="74.7550%" height="15" fill="rgb(236,212,23)" fg:x="21" fg:w="11288"/><text x="0.3891%" y="143.50">benchmark-766df231c38e0391`criterion::bencher::Bencher&lt;M&gt;::iter</text></g><g><title>benchmark-766df231c38e0391`benchmark::bench_simple_iter::_{{closure}}::_{{closure}} (11,288 samples, 74.75%)</title><rect x="0.1391%" y="117" width="74.7550%" height="15" fill="rgb(242,79,21)" fg:x="21" fg:w="11288"/><text x="0.3891%" y="127.50">benchmark-766df231c38e0391`benchmark::bench_simple_iter::_{{closure}}::_{{closure}}</text></g><g><title>benchmark-766df231c38e0391`benchmark::simple_iter::Benchmark&lt;S2,S4&gt;::run (11,121 samples, 73.65%)</title><rect x="1.2450%" y="101" width="73.6490%" height="15" fill="rgb(211,96,35)" fg:x="188" fg:w="11121"/><text x="1.4950%" y="111.50">benchmark-766df231c38e0391`benchmark::simple_iter::Benchmark&lt;S2,S4&gt;::run</text></g><g><title>benchmark-766df231c38e0391`apecs::join::sync (112 samples, 0.74%)</title><rect x="74.1523%" y="85" width="0.7417%" height="15" fill="rgb(253,215,40)" fg:x="11197" fg:w="112"/><text x="74.4023%" y="95.50"></text></g><g><title>benchmark-766df231c38e0391`core::ptr::read (2 samples, 0.01%)</title><rect x="74.9536%" y="181" width="0.0132%" height="15" fill="rgb(211,81,21)" fg:x="11318" fg:w="2"/><text x="75.2036%" y="191.50"></text></g><g><title>benchmark-766df231c38e0391`&lt;core::ops::range::Range&lt;T&gt; as core::iter::range::RangeIteratorImpl&gt;::spec_next (7 samples, 0.05%)</title><rect x="74.9272%" y="197" width="0.0464%" height="15" fill="rgb(208,190,38)" fg:x="11314" fg:w="7"/><text x="75.1772%" y="207.50"></text></g><g><title>benchmark-766df231c38e0391`&lt;apecs::storage::vec::VecStorage&lt;T&gt; as apecs::storage::WorldStorage&gt;::new_with_capacity (13 samples, 0.09%)</title><rect x="74.8940%" y="277" width="0.0861%" height="15" fill="rgb(235,213,38)" fg:x="11309" fg:w="13"/><text x="75.1440%" y="287.50"></text></g><g><title>benchmark-766df231c38e0391`apecs::storage::vec::VecStorage&lt;T&gt;::new_with_capacity (13 samples, 0.09%)</title><rect x="74.8940%" y="261" width="0.0861%" height="15" fill="rgb(237,122,38)" fg:x="11309" fg:w="13"/><text x="75.1440%" y="271.50"></text></g><g><title>benchmark-766df231c38e0391`alloc::vec::Vec&lt;T,A&gt;::resize_with (13 samples, 0.09%)</title><rect x="74.8940%" y="245" width="0.0861%" height="15" fill="rgb(244,218,35)" fg:x="11309" fg:w="13"/><text x="75.1440%" y="255.50"></text></g><g><title>benchmark-766df231c38e0391`alloc::vec::Vec&lt;T,A&gt;::extend_with (13 samples, 0.09%)</title><rect x="74.8940%" y="229" width="0.0861%" height="15" fill="rgb(240,68,47)" fg:x="11309" fg:w="13"/><text x="75.1440%" y="239.50"></text></g><g><title>benchmark-766df231c38e0391`core::iter::range::_&lt;impl core::iter::traits::iterator::Iterator for core::ops::range::Range&lt;A&gt;&gt;::next (10 samples, 0.07%)</title><rect x="74.9139%" y="213" width="0.0662%" height="15" fill="rgb(210,16,53)" fg:x="11312" fg:w="10"/><text x="75.1639%" y="223.50"></text></g><g><title>benchmark-766df231c38e0391`core::iter::range::_&lt;impl core::iter::traits::iterator::Iterator for core::ops::range::Range&lt;A&gt;&gt;::next (3 samples, 0.02%)</title><rect x="75.0066%" y="245" width="0.0199%" height="15" fill="rgb(235,124,12)" fg:x="11326" fg:w="3"/><text x="75.2566%" y="255.50"></text></g><g><title>benchmark-766df231c38e0391`&lt;core::ops::range::Range&lt;T&gt; as core::iter::range::RangeIteratorImpl&gt;::spec_next (2 samples, 0.01%)</title><rect x="75.0132%" y="229" width="0.0132%" height="15" fill="rgb(224,169,11)" fg:x="11327" fg:w="2"/><text x="75.2632%" y="239.50"></text></g><g><title>benchmark-766df231c38e0391`core::mem::replace (2 samples, 0.01%)</title><rect x="75.0132%" y="213" width="0.0132%" height="15" fill="rgb(250,166,2)" fg:x="11327" fg:w="2"/><text x="75.2632%" y="223.50"></text></g><g><title>benchmark-766df231c38e0391`alloc::raw_vec::RawVec&lt;T,A&gt;::ptr (2 samples, 0.01%)</title><rect x="75.0861%" y="149" width="0.0132%" height="15" fill="rgb(242,216,29)" fg:x="11338" fg:w="2"/><text x="75.3361%" y="159.50"></text></g><g><title>benchmark-766df231c38e0391`alloc::vec::Vec&lt;T,A&gt;::as_mut_ptr (4 samples, 0.03%)</title><rect x="75.0861%" y="165" width="0.0265%" height="15" fill="rgb(230,116,27)" fg:x="11338" fg:w="4"/><text x="75.3361%" y="175.50"></text></g><g><title>benchmark-766df231c38e0391`&lt;alloc::vec::Vec&lt;T,A&gt; as core::ops::deref::DerefMut&gt;::deref_mut (8 samples, 0.05%)</title><rect x="75.0795%" y="181" width="0.0530%" height="15" fill="rgb(228,99,48)" fg:x="11337" fg:w="8"/><text x="75.3295%" y="191.50"></text></g><g><title>benchmark-766df231c38e0391`core::slice::raw::from_raw_parts_mut (3 samples, 0.02%)</title><rect x="75.1126%" y="165" width="0.0199%" height="15" fill="rgb(253,11,6)" fg:x="11342" fg:w="3"/><text x="75.3626%" y="175.50"></text></g><g><title>benchmark-766df231c38e0391`&lt;alloc::vec::Vec&lt;T,A&gt; as core::ops::index::IndexMut&lt;I&gt;&gt;::index_mut (12 samples, 0.08%)</title><rect x="75.0662%" y="197" width="0.0795%" height="15" fill="rgb(247,143,39)" fg:x="11335" fg:w="12"/><text x="75.3162%" y="207.50"></text></g><g><title>benchmark-766df231c38e0391`core::slice::index::_&lt;impl core::ops::index::IndexMut&lt;I&gt; for [T]&gt;::index_mut (2 samples, 0.01%)</title><rect x="75.1325%" y="181" width="0.0132%" height="15" fill="rgb(236,97,10)" fg:x="11345" fg:w="2"/><text x="75.3825%" y="191.50"></text></g><g><title>benchmark-766df231c38e0391`&lt;usize as core::slice::index::SliceIndex&lt;[T]&gt;&gt;::index_mut (2 samples, 0.01%)</title><rect x="75.1325%" y="165" width="0.0132%" height="15" fill="rgb(233,208,19)" fg:x="11345" fg:w="2"/><text x="75.3825%" y="175.50"></text></g><g><title>benchmark-766df231c38e0391`&lt;apecs::storage::vec::VecStorage&lt;T&gt; as apecs::storage::CanWriteStorage&gt;::insert (19 samples, 0.13%)</title><rect x="75.0397%" y="213" width="0.1258%" height="15" fill="rgb(216,164,2)" fg:x="11331" fg:w="19"/><text x="75.2897%" y="223.50"></text></g><g><title>benchmark-766df231c38e0391`core::ptr::read (2 samples, 0.01%)</title><rect x="75.1523%" y="197" width="0.0132%" height="15" fill="rgb(220,129,5)" fg:x="11348" fg:w="2"/><text x="75.4023%" y="207.50"></text></g><g><title>benchmark-766df231c38e0391`&lt;f32 as num_traits::identities::Zero&gt;::zero (2 samples, 0.01%)</title><rect x="75.1656%" y="213" width="0.0132%" height="15" fill="rgb(242,17,10)" fg:x="11350" fg:w="2"/><text x="75.4156%" y="223.50"></text></g><g><title>benchmark-766df231c38e0391`benchmark::simple_iter::Benchmark&lt;S2,S4&gt;::new (45 samples, 0.30%)</title><rect x="74.8940%" y="293" width="0.2980%" height="15" fill="rgb(242,107,0)" fg:x="11309" fg:w="45"/><text x="75.1440%" y="303.50"></text></g><g><title>benchmark-766df231c38e0391`core::iter::traits::iterator::Iterator::for_each (32 samples, 0.21%)</title><rect x="74.9801%" y="277" width="0.2119%" height="15" fill="rgb(251,28,31)" fg:x="11322" fg:w="32"/><text x="75.2301%" y="287.50"></text></g><g><title>benchmark-766df231c38e0391`core::iter::traits::iterator::Iterator::fold (32 samples, 0.21%)</title><rect x="74.9801%" y="261" width="0.2119%" height="15" fill="rgb(233,223,10)" fg:x="11322" fg:w="32"/><text x="75.2301%" y="271.50"></text></g><g><title>benchmark-766df231c38e0391`core::iter::traits::iterator::Iterator::for_each::call::_{{closure}} (25 samples, 0.17%)</title><rect x="75.0265%" y="245" width="0.1656%" height="15" fill="rgb(215,21,27)" fg:x="11329" fg:w="25"/><text x="75.2765%" y="255.50"></text></g><g><title>benchmark-766df231c38e0391`benchmark::simple_iter::Benchmark&lt;S2,S4&gt;::new::_{{closure}} (24 samples, 0.16%)</title><rect x="75.0331%" y="229" width="0.1589%" height="15" fill="rgb(232,23,21)" fg:x="11330" fg:w="24"/><text x="75.2831%" y="239.50"></text></g><g><title>benchmark-766df231c38e0391`&lt;apecs::join::JoinedIter&lt;(A,B)&gt; as core::iter::traits::iterator::Iterator&gt;::next (59 samples, 0.39%)</title><rect x="75.1921%" y="261" width="0.3907%" height="15" fill="rgb(244,5,23)" fg:x="11354" fg:w="59"/><text x="75.4421%" y="271.50"></text></g><g><title>benchmark-766df231c38e0391`&lt;(A,B) as apecs::join::Join&gt;::join (2 samples, 0.01%)</title><rect x="76.5430%" y="245" width="0.0132%" height="15" fill="rgb(226,81,46)" fg:x="11558" fg:w="2"/><text x="76.7930%" y="255.50"></text></g><g><title>benchmark-766df231c38e0391`&lt;&amp;mut T as apecs::join::Join&gt;::join (2 samples, 0.01%)</title><rect x="76.5430%" y="229" width="0.0132%" height="15" fill="rgb(247,70,30)" fg:x="11558" fg:w="2"/><text x="76.7930%" y="239.50"></text></g><g><title>benchmark-766df231c38e0391`&lt;apecs::storage::vec::VecStorage&lt;T&gt; as apecs::storage::CanWriteStorage&gt;::iter_mut (2 samples, 0.01%)</title><rect x="76.5430%" y="213" width="0.0132%" height="15" fill="rgb(212,68,19)" fg:x="11558" fg:w="2"/><text x="76.7930%" y="223.50"></text></g><g><title>benchmark-766df231c38e0391`&lt;apecs::storage::Entry&lt;T&gt; as apecs::storage::StorageComponent&gt;::id (82 samples, 0.54%)</title><rect x="80.3113%" y="229" width="0.5430%" height="15" fill="rgb(240,187,13)" fg:x="12127" fg:w="82"/><text x="80.5613%" y="239.50"></text></g><g><title>benchmark-766df231c38e0391`core::ptr::const_ptr::_&lt;impl *const T&gt;::guaranteed_eq (43 samples, 0.28%)</title><rect x="84.6556%" y="197" width="0.2848%" height="15" fill="rgb(223,113,26)" fg:x="12783" fg:w="43"/><text x="84.9056%" y="207.50"></text></g><g><title>benchmark-766df231c38e0391`core::ptr::const_ptr::_&lt;impl *const T&gt;::is_null (74 samples, 0.49%)</title><rect x="84.9404%" y="197" width="0.4901%" height="15" fill="rgb(206,192,2)" fg:x="12826" fg:w="74"/><text x="85.1904%" y="207.50"></text></g><g><title>benchmark-766df231c38e0391`core::ptr::mut_ptr::_&lt;impl *mut T&gt;::guaranteed_eq (31 samples, 0.21%)</title><rect x="85.4305%" y="197" width="0.2053%" height="15" fill="rgb(241,108,4)" fg:x="12900" fg:w="31"/><text x="85.6805%" y="207.50"></text></g><g><title>benchmark-766df231c38e0391`&lt;core::slice::iter::Iter&lt;T&gt; as core::iter::traits::iterator::Iterator&gt;::next (621 samples, 4.11%)</title><rect x="82.0331%" y="213" width="4.1126%" height="15" fill="rgb(247,173,49)" fg:x="12387" fg:w="621"/><text x="82.2831%" y="223.50">benc..</text></g><g><title>benchmark-766df231c38e0391`core::ptr::mut_ptr::_&lt;impl *mut T&gt;::is_null (77 samples, 0.51%)</title><rect x="85.6358%" y="197" width="0.5099%" height="15" fill="rgb(224,114,35)" fg:x="12931" fg:w="77"/><text x="85.8858%" y="207.50"></text></g><g><title>benchmark-766df231c38e0391`core::ptr::non_null::NonNull&lt;T&gt;::as_ptr (80 samples, 0.53%)</title><rect x="86.1457%" y="213" width="0.5298%" height="15" fill="rgb(245,159,27)" fg:x="13008" fg:w="80"/><text x="86.3957%" y="223.50"></text></g><g><title>benchmark-766df231c38e0391`&lt;apecs::storage::vec::VecStorageIter&lt;T&gt; as core::iter::traits::iterator::Iterator&gt;::next (899 samples, 5.95%)</title><rect x="80.8543%" y="229" width="5.9536%" height="15" fill="rgb(245,172,44)" fg:x="12209" fg:w="899"/><text x="81.1043%" y="239.50">benchmar..</text></g><g><title>benchmark-766df231c38e0391`core::ptr::non_null::NonNull&lt;T&gt;::new_unchecked (20 samples, 0.13%)</title><rect x="86.6755%" y="213" width="0.1325%" height="15" fill="rgb(236,23,11)" fg:x="13088" fg:w="20"/><text x="86.9255%" y="223.50"></text></g><g><title>benchmark-766df231c38e0391`core::ptr::mut_ptr::_&lt;impl *mut T&gt;::guaranteed_eq (72 samples, 0.48%)</title><rect x="90.8079%" y="197" width="0.4768%" height="15" fill="rgb(205,117,38)" fg:x="13712" fg:w="72"/><text x="91.0579%" y="207.50"></text></g><g><title>benchmark-766df231c38e0391`&lt;core::slice::iter::IterMut&lt;T&gt; as core::iter::traits::iterator::Iterator&gt;::next (607 samples, 4.02%)</title><rect x="88.2384%" y="213" width="4.0199%" height="15" fill="rgb(237,72,25)" fg:x="13324" fg:w="607"/><text x="88.4884%" y="223.50">benc..</text></g><g><title>benchmark-766df231c38e0391`core::ptr::mut_ptr::_&lt;impl *mut T&gt;::is_null (147 samples, 0.97%)</title><rect x="91.2848%" y="197" width="0.9735%" height="15" fill="rgb(244,70,9)" fg:x="13784" fg:w="147"/><text x="91.5348%" y="207.50"></text></g><g><title>benchmark-766df231c38e0391`core::ptr::non_null::NonNull&lt;T&gt;::as_ptr (101 samples, 0.67%)</title><rect x="92.2583%" y="213" width="0.6689%" height="15" fill="rgb(217,125,39)" fg:x="13931" fg:w="101"/><text x="92.5083%" y="223.50"></text></g><g><title>benchmark-766df231c38e0391`&lt;apecs::storage::vec::VecStorageIterMut&lt;T&gt; as core::iter::traits::iterator::Iterator&gt;::next (940 samples, 6.23%)</title><rect x="86.8079%" y="229" width="6.2252%" height="15" fill="rgb(235,36,10)" fg:x="13108" fg:w="940"/><text x="87.0579%" y="239.50">benchmar..</text></g><g><title>benchmark-766df231c38e0391`core::ptr::non_null::NonNull&lt;T&gt;::new_unchecked (16 samples, 0.11%)</title><rect x="92.9272%" y="213" width="0.1060%" height="15" fill="rgb(251,123,47)" fg:x="14032" fg:w="16"/><text x="93.1772%" y="223.50"></text></g><g><title>benchmark-766df231c38e0391`&lt;core::option::Option&lt;T&gt; as core::ops::try_trait::Try&gt;::branch (165 samples, 1.09%)</title><rect x="93.0331%" y="229" width="1.0927%" height="15" fill="rgb(221,13,13)" fg:x="14048" fg:w="165"/><text x="93.2831%" y="239.50"></text></g><g><title>benchmark-766df231c38e0391`&lt;apecs::storage::Entry&lt;T&gt; as apecs::storage::StorageComponent&gt;::id (74 samples, 0.49%)</title><rect x="94.8808%" y="213" width="0.4901%" height="15" fill="rgb(238,131,9)" fg:x="14327" fg:w="74"/><text x="95.1308%" y="223.50"></text></g><g><title>benchmark-766df231c38e0391`apecs::join::sync (231 samples, 1.53%)</title><rect x="94.1258%" y="229" width="1.5298%" height="15" fill="rgb(211,50,8)" fg:x="14213" fg:w="231"/><text x="94.3758%" y="239.50"></text></g><g><title>benchmark-766df231c38e0391`apecs::storage::Entry&lt;T&gt;::key (43 samples, 0.28%)</title><rect x="95.3709%" y="213" width="0.2848%" height="15" fill="rgb(245,182,24)" fg:x="14401" fg:w="43"/><text x="95.6209%" y="223.50"></text></g><g><title>benchmark-766df231c38e0391`apecs::storage::Entry&lt;T&gt;::as_mut (37 samples, 0.25%)</title><rect x="95.6556%" y="229" width="0.2450%" height="15" fill="rgb(242,14,37)" fg:x="14444" fg:w="37"/><text x="95.9056%" y="239.50"></text></g><g><title>benchmark-766df231c38e0391`apecs::storage::Entry&lt;T&gt;::as_ref (46 samples, 0.30%)</title><rect x="95.9007%" y="229" width="0.3046%" height="15" fill="rgb(246,228,12)" fg:x="14481" fg:w="46"/><text x="96.1507%" y="239.50"></text></g><g><title>benchmark-766df231c38e0391`&lt;apecs::join::JoinedIter&lt;(A,B)&gt; as core::iter::traits::iterator::Iterator&gt;::next (2,992 samples, 19.81%)</title><rect x="76.5563%" y="245" width="19.8146%" height="15" fill="rgb(213,55,15)" fg:x="11560" fg:w="2992"/><text x="76.8063%" y="255.50">benchmark-766df231c38e0391`&lt;ape..</text></g><g><title>benchmark-766df231c38e0391`apecs::storage::Entry&lt;T&gt;::key (25 samples, 0.17%)</title><rect x="96.2053%" y="229" width="0.1656%" height="15" fill="rgb(209,9,3)" fg:x="14527" fg:w="25"/><text x="96.4553%" y="239.50"></text></g><g><title>benchmark-766df231c38e0391`&lt;apecs::storage::Entry&lt;T&gt; as apecs::storage::StorageComponent&gt;::value (34 samples, 0.23%)</title><rect x="96.3709%" y="245" width="0.2252%" height="15" fill="rgb(230,59,30)" fg:x="14552" fg:w="34"/><text x="96.6209%" y="255.50"></text></g><g><title>benchmark-766df231c38e0391`&lt;cgmath::vector::Vector3&lt;S&gt; as core::ops::arith::AddAssign&gt;::add_assign (93 samples, 0.62%)</title><rect x="96.5960%" y="245" width="0.6159%" height="15" fill="rgb(209,121,21)" fg:x="14586" fg:w="93"/><text x="96.8460%" y="255.50"></text></g><g><title>benchmark-766df231c38e0391`&lt;core::option::Option&lt;T&gt; as core::ops::try_trait::Try&gt;::branch (241 samples, 1.60%)</title><rect x="97.2119%" y="245" width="1.5960%" height="15" fill="rgb(220,109,13)" fg:x="14679" fg:w="241"/><text x="97.4619%" y="255.50"></text></g><g><title>benchmark-766df231c38e0391`&lt;f32 as core::ops::arith::AddAssign&gt;::add_assign (123 samples, 0.81%)</title><rect x="98.8079%" y="245" width="0.8146%" height="15" fill="rgb(232,18,1)" fg:x="14920" fg:w="123"/><text x="99.0579%" y="255.50"></text></g><g><title>benchmark-766df231c38e0391`benchmark::bench_simple_iter::_{{closure}} (3,781 samples, 25.04%)</title><rect x="74.8940%" y="309" width="25.0397%" height="15" fill="rgb(215,41,42)" fg:x="11309" fg:w="3781"/><text x="75.1440%" y="319.50">benchmark-766df231c38e0391`benchmark::be..</text></g><g><title>benchmark-766df231c38e0391`criterion::bencher::Bencher&lt;M&gt;::iter (3,736 samples, 24.74%)</title><rect x="75.1921%" y="293" width="24.7417%" height="15" fill="rgb(224,123,36)" fg:x="11354" fg:w="3736"/><text x="75.4421%" y="303.50">benchmark-766df231c38e0391`criterion::b..</text></g><g><title>benchmark-766df231c38e0391`benchmark::bench_simple_iter::_{{closure}}::_{{closure}} (3,736 samples, 24.74%)</title><rect x="75.1921%" y="277" width="24.7417%" height="15" fill="rgb(240,125,3)" fg:x="11354" fg:w="3736"/><text x="75.4421%" y="287.50">benchmark-766df231c38e0391`benchmark::b..</text></g><g><title>benchmark-766df231c38e0391`benchmark::simple_iter::Benchmark&lt;S2,S4&gt;::run (3,677 samples, 24.35%)</title><rect x="75.5828%" y="261" width="24.3510%" height="15" fill="rgb(205,98,50)" fg:x="11413" fg:w="3677"/><text x="75.8328%" y="271.50">benchmark-766df231c38e0391`benchmark::s..</text></g><g><title>benchmark-766df231c38e0391`apecs::join::sync (47 samples, 0.31%)</title><rect x="99.6225%" y="245" width="0.3113%" height="15" fill="rgb(205,185,37)" fg:x="15043" fg:w="47"/><text x="99.8725%" y="255.50"></text></g><g><title>benchmark-766df231c38e0391`benchmark::bench_simple_iter (15,075 samples, 99.83%)</title><rect x="0.1060%" y="405" width="99.8344%" height="15" fill="rgb(238,207,15)" fg:x="16" fg:w="15075"/><text x="0.3560%" y="415.50">benchmark-766df231c38e0391`benchmark::bench_simple_iter</text></g><g><title>benchmark-766df231c38e0391`criterion::benchmark_group::BenchmarkGroup&lt;M&gt;::bench_function (15,075 samples, 99.83%)</title><rect x="0.1060%" y="389" width="99.8344%" height="15" fill="rgb(213,199,42)" fg:x="16" fg:w="15075"/><text x="0.3560%" y="399.50">benchmark-766df231c38e0391`criterion::benchmark_group::BenchmarkGroup&lt;M&gt;::bench_function</text></g><g><title>benchmark-766df231c38e0391`criterion::benchmark_group::BenchmarkGroup&lt;M&gt;::run_bench (15,075 samples, 99.83%)</title><rect x="0.1060%" y="373" width="99.8344%" height="15" fill="rgb(235,201,11)" fg:x="16" fg:w="15075"/><text x="0.3560%" y="383.50">benchmark-766df231c38e0391`criterion::benchmark_group::BenchmarkGroup&lt;M&gt;::run_bench</text></g><g><title>benchmark-766df231c38e0391`criterion::routine::Routine::profile (15,074 samples, 99.83%)</title><rect x="0.1126%" y="357" width="99.8278%" height="15" fill="rgb(207,46,11)" fg:x="17" fg:w="15074"/><text x="0.3626%" y="367.50">benchmark-766df231c38e0391`criterion::routine::Routine::profile</text></g><g><title>benchmark-766df231c38e0391`&lt;criterion::routine::Function&lt;M,F,T&gt; as criterion::routine::Routine&lt;M,T&gt;&gt;::warm_up (3,782 samples, 25.05%)</title><rect x="74.8940%" y="341" width="25.0464%" height="15" fill="rgb(241,35,35)" fg:x="11309" fg:w="3782"/><text x="75.1440%" y="351.50">benchmark-766df231c38e0391`&lt;criterion::r..</text></g><g><title>benchmark-766df231c38e0391`criterion::benchmark_group::BenchmarkGroup&lt;M&gt;::bench_function::_{{closure}} (3,782 samples, 25.05%)</title><rect x="74.8940%" y="325" width="25.0464%" height="15" fill="rgb(243,32,47)" fg:x="11309" fg:w="3782"/><text x="75.1440%" y="335.50">benchmark-766df231c38e0391`criterion::be..</text></g><g><title>benchmark-766df231c38e0391`benchmark::benches (15,094 samples, 99.96%)</title><rect x="0.0132%" y="421" width="99.9603%" height="15" fill="rgb(247,202,23)" fg:x="2" fg:w="15094"/><text x="0.2632%" y="431.50">benchmark-766df231c38e0391`benchmark::benches</text></g><g><title>benchmark-766df231c38e0391`criterion::Criterion&lt;M&gt;::configure_from_args (5 samples, 0.03%)</title><rect x="99.9404%" y="405" width="0.0331%" height="15" fill="rgb(219,102,11)" fg:x="15091" fg:w="5"/><text x="100.1904%" y="415.50"></text></g><g><title>benchmark-766df231c38e0391`criterion::Criterion&lt;M&gt;::with_filter (2 samples, 0.01%)</title><rect x="99.9603%" y="389" width="0.0132%" height="15" fill="rgb(243,110,44)" fg:x="15094" fg:w="2"/><text x="100.2103%" y="399.50"></text></g><g><title>benchmark-766df231c38e0391`regex::re_unicode::Regex::new (2 samples, 0.01%)</title><rect x="99.9603%" y="373" width="0.0132%" height="15" fill="rgb(222,74,54)" fg:x="15094" fg:w="2"/><text x="100.2103%" y="383.50"></text></g><g><title>benchmark-766df231c38e0391`main (15,098 samples, 99.99%)</title><rect x="0.0000%" y="533" width="99.9868%" height="15" fill="rgb(216,99,12)" fg:x="0" fg:w="15098"/><text x="0.2500%" y="543.50">benchmark-766df231c38e0391`main</text></g><g><title>benchmark-766df231c38e0391`std::rt::lang_start (15,098 samples, 99.99%)</title><rect x="0.0000%" y="517" width="99.9868%" height="15" fill="rgb(226,22,26)" fg:x="0" fg:w="15098"/><text x="0.2500%" y="527.50">benchmark-766df231c38e0391`std::rt::lang_start</text></g><g><title>benchmark-766df231c38e0391`std::rt::lang_start_internal (15,098 samples, 99.99%)</title><rect x="0.0000%" y="501" width="99.9868%" height="15" fill="rgb(217,163,10)" fg:x="0" fg:w="15098"/><text x="0.2500%" y="511.50">benchmark-766df231c38e0391`std::rt::lang_start_internal</text></g><g><title>benchmark-766df231c38e0391`std::rt::lang_start::_{{closure}} (15,098 samples, 99.99%)</title><rect x="0.0000%" y="485" width="99.9868%" height="15" fill="rgb(213,25,53)" fg:x="0" fg:w="15098"/><text x="0.2500%" y="495.50">benchmark-766df231c38e0391`std::rt::lang_start::_{{closure}}</text></g><g><title>benchmark-766df231c38e0391`std::sys_common::backtrace::__rust_begin_short_backtrace (15,098 samples, 99.99%)</title><rect x="0.0000%" y="469" width="99.9868%" height="15" fill="rgb(252,105,26)" fg:x="0" fg:w="15098"/><text x="0.2500%" y="479.50">benchmark-766df231c38e0391`std::sys_common::backtrace::__rust_begin_short_backtrace</text></g><g><title>benchmark-766df231c38e0391`core::ops::function::FnOnce::call_once (15,098 samples, 99.99%)</title><rect x="0.0000%" y="453" width="99.9868%" height="15" fill="rgb(220,39,43)" fg:x="0" fg:w="15098"/><text x="0.2500%" y="463.50">benchmark-766df231c38e0391`core::ops::function::FnOnce::call_once</text></g><g><title>benchmark-766df231c38e0391`benchmark::main (15,098 samples, 99.99%)</title><rect x="0.0000%" y="437" width="99.9868%" height="15" fill="rgb(229,68,48)" fg:x="0" fg:w="15098"/><text x="0.2500%" y="447.50">benchmark-766df231c38e0391`benchmark::main</text></g><g><title>dyld`start (15,099 samples, 99.99%)</title><rect x="0.0000%" y="549" width="99.9934%" height="15" fill="rgb(252,8,32)" fg:x="0" fg:w="15099"/><text x="0.2500%" y="559.50">dyld`start</text></g><g><title>all (15,100 samples, 100%)</title><rect x="0.0000%" y="565" width="100.0000%" height="15" fill="rgb(223,20,43)" fg:x="0" fg:w="15100"/><text x="0.2500%" y="575.50"></text></g></svg></svg>

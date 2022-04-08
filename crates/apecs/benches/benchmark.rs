@@ -7,6 +7,8 @@ use std::{
 
 use apecs::storage::*;
 
+mod create_move_print;
+
 mod add_remove;
 mod frag_iter;
 mod heavy_compute;
@@ -36,19 +38,33 @@ impl std::fmt::Display for Syncronicity {
     }
 }
 
-//fn bench_create_move_print(c: &mut Criterion) {
-//    let mut group = c.benchmark_group("create_move_print");
-//    for kind in [Syncronicity::Async, Syncronicity::Sync] {
-//        for size in [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048] {
-//            let cmp = CreateMovePrint { size, kind };
-//            group.throughput(Throughput::Elements(size as u64));
-//            group.bench_with_input(BenchmarkId::new("1000_ticks", cmp), &cmp, |b, cmp| {
-//                b.iter(|| create_move_print(cmp.kind, cmp.size))
-//            });
-//        }
-//    }
-//    group.finish();
-//}
+fn bench_create_move_print(c: &mut Criterion) {
+    let mut group = c.benchmark_group("create_move_print_sync");
+    for size in [2, 256, 2048] {
+        let cmp = create_move_print::Benchmark { size, is_async: false  };
+        if size > 2 {
+            group.sample_size(10);
+        }
+        group.throughput(Throughput::Elements(size as u64));
+        group.bench_with_input("sync", &cmp, |b, cmp| {
+            b.iter(|| cmp.run())
+        });
+    }
+    group.finish();
+
+    let mut group = c.benchmark_group("create_move_print_async");
+    for size in [2, 256, 2048] {
+        if size > 2 {
+            group.sample_size(10);
+        }
+        let cmp = create_move_print::Benchmark { size, is_async: true  };
+        group.throughput(Throughput::Elements(size as u64));
+        group.bench_with_input("async", &cmp, |b, cmp| {
+            b.iter(|| cmp.run())
+        });
+    }
+    group.finish();
+}
 
 /// Measures the difference of speed of iteration between a wrapper of other std iterators
 /// and a custom one.
@@ -430,9 +446,6 @@ fn bench_schedule(c: &mut Criterion) {
 
 fn bench_heavy_compute(c: &mut Criterion) {
     let mut group = c.benchmark_group("heavy_compute");
-    //let plot_config =
-    //    criterion::PlotConfiguration::default().summary_scale(criterion::AxisScale::Logarithmic);
-    //group.plot_config(plot_config);
 
     group.bench_function("apecs::VecStorage", |b| {
         let mut bench = heavy_compute::Benchmark::<
@@ -444,16 +457,6 @@ fn bench_heavy_compute(c: &mut Criterion) {
         .unwrap();
         b.iter(move || bench.run());
     });
-    //group.bench_function("apecs::SparseStorage", |b| {
-    //    let mut bench = heavy_compute::Benchmark::<
-    //        SparseStorage<heavy_compute::Transform>,
-    //        SparseStorage<heavy_compute::Position>,
-    //        SparseStorage<heavy_compute::Rotation>,
-    //        SparseStorage<heavy_compute::Velocity>,
-    //    >::new()
-    //    .unwrap();
-    //    b.iter(move || bench.run());
-    //});
     group.bench_function("apecs::BTreeStorage", |b| {
         let mut bench = heavy_compute::Benchmark::<
             BTreeStorage<heavy_compute::Transform>,
@@ -489,6 +492,7 @@ fn bench_heavy_compute(c: &mut Criterion) {
 
 criterion_group!(
     benches,
+    bench_create_move_print,
     bench_heap_vs_stack,
     bench_add_remove,
     bench_simple_iter,

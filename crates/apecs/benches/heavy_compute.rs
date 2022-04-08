@@ -85,6 +85,6 @@ where
     }
 
     pub fn run(&mut self) {
-        self.world.tick_with_context(None).unwrap();
+        self.world.tick_sync().unwrap();
     }
 }

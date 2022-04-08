@@ -5,11 +5,7 @@ use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::{iter::FlatMap, slice::Iter, sync::Arc};
 
-use crate::{
-    mpsc,
-    world,
-    FetchReadyResource, Resource, ResourceId,
-};
+use crate::{mpsc, world, FetchReadyResource, Resource, ResourceId};
 
 pub(crate) trait IsBorrow: std::fmt::Debug {
     fn rez_id(&self) -> ResourceId;
@@ -26,7 +22,18 @@ pub(crate) trait IsSystem: std::fmt::Debug {
 
     fn borrows(&self) -> &[Self::Borrow];
 
-    fn conflicts_with(&self, other: &impl IsSystem) -> bool;
+    fn conflicts_with(&self, other: &impl IsSystem) -> bool {
+        for borrow_here in self.borrows().iter() {
+            for borrow_there in other.borrows() {
+                if borrow_here.rez_id() == borrow_there.rez_id()
+                    && (borrow_here.is_exclusive() || borrow_there.is_exclusive())
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
 
     fn run(
         &mut self,
@@ -35,16 +42,28 @@ pub(crate) trait IsSystem: std::fmt::Debug {
     ) -> anyhow::Result<()>;
 }
 
-#[derive(Default)]
-pub(crate) struct BatchData {
+#[derive(Debug)]
+pub(crate) struct BatchData<T> {
     pub resources: Vec<FxHashMap<ResourceId, FetchReadyResource>>,
     pub loaned_resources: FxHashMap<ResourceId, Arc<Resource>>,
+    pub extra: T,
+}
+
+impl<T> BatchData<T> {
+    pub fn new(extra: T) -> Self {
+        BatchData {
+            resources: Default::default(),
+            loaned_resources: Default::default(),
+            extra,
+        }
+    }
 }
 
 /// A batch of systems that can run in parallel (because their borrows
 /// don't conflict).
 pub(crate) trait IsBatch: std::fmt::Debug + Default {
     type System: IsSystem + Send + Sync;
+    type ExtraRunData: Clone;
 
     fn contains_system(&self, name: &str) -> bool {
         for system in self.systems() {
@@ -77,8 +96,9 @@ pub(crate) trait IsBatch: std::fmt::Debug + Default {
     fn prepare_batch_data(
         &self,
         resources: &mut FxHashMap<ResourceId, Resource>,
-    ) -> anyhow::Result<BatchData> {
-        let mut data = BatchData::default();
+        extra: Self::ExtraRunData,
+    ) -> anyhow::Result<BatchData<Self::ExtraRunData>> {
+        let mut data = BatchData::new(extra);
         for system in self.systems() {
             let (ready_resources, loaned_resources) =
                 world::try_take_resources(resources, system.borrows().iter(), Some(system.name()))?;
@@ -93,7 +113,7 @@ pub(crate) trait IsBatch: std::fmt::Debug + Default {
     fn run(
         &mut self,
         parallelize: bool,
-        mut data: BatchData,
+        mut data: BatchData<Self::ExtraRunData>,
         resources: &mut FxHashMap<ResourceId, Resource>,
         resources_from_system: &(
             mpsc::Sender<(ResourceId, Resource)>,
@@ -190,6 +210,7 @@ pub(crate) trait IsSchedule: std::fmt::Debug {
 
     fn run(
         &mut self,
+        extra: <Self::Batch as IsBatch>::ExtraRunData,
         resources: &mut FxHashMap<ResourceId, Resource>,
         resources_from_system: &(
             mpsc::Sender<(ResourceId, Resource)>,
@@ -199,10 +220,30 @@ pub(crate) trait IsSchedule: std::fmt::Debug {
         let parallelize = self.get_should_parallelize();
         for batch in self.batches_mut() {
             // make the batch data
-            let batch_data = batch.prepare_batch_data(resources)?;
+            let batch_data = batch.prepare_batch_data(resources, extra.clone())?;
             batch.run(parallelize, batch_data, resources, resources_from_system)?;
         }
 
         Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Borrow {
+    pub id: ResourceId,
+    pub is_exclusive: bool,
+}
+
+impl IsBorrow for Borrow {
+    fn rez_id(&self) -> ResourceId {
+        self.id.clone()
+    }
+
+    fn name(&self) -> &str {
+        self.id.name
+    }
+
+    fn is_exclusive(&self) -> bool {
+        self.is_exclusive
     }
 }

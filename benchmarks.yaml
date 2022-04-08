@@ -2,331 +2,331 @@
 benchmarks:
   - date: "2022-03-14T04:18:22.070062Z"
     benchmark:
-      name: create_move_print/1000_ticks/2
+      name: create_move_print/1000_ticks/async_2
       ns: 2137296
       range: 18656
     tags: []
   - date: "2022-03-14T04:18:22.070062Z"
     benchmark:
-      name: create_move_print/1000_ticks/4
+      name: create_move_print/1000_ticks/async_4
       ns: 2129592
       range: 20987
     tags: []
   - date: "2022-03-14T04:18:22.070062Z"
     benchmark:
-      name: create_move_print/1000_ticks/8
+      name: create_move_print/1000_ticks/async_8
       ns: 2238145
       range: 2697
     tags: []
   - date: "2022-03-14T04:18:22.070062Z"
     benchmark:
-      name: create_move_print/1000_ticks/16
+      name: create_move_print/1000_ticks/async_16
       ns: 2399222
       range: 20987
     tags: []
   - date: "2022-03-14T04:18:22.070062Z"
     benchmark:
-      name: create_move_print/1000_ticks/32
+      name: create_move_print/1000_ticks/async_32
       ns: 2846626
       range: 3924
     tags: []
   - date: "2022-03-14T04:18:22.070062Z"
     benchmark:
-      name: create_move_print/1000_ticks/64
+      name: create_move_print/1000_ticks/async_64
       ns: 3593584
       range: 19994
     tags: []
   - date: "2022-03-14T04:18:22.070062Z"
     benchmark:
-      name: create_move_print/1000_ticks/128
+      name: create_move_print/1000_ticks/async_128
       ns: 5106435
       range: 43654
     tags: []
   - date: "2022-03-14T04:18:22.070062Z"
     benchmark:
-      name: create_move_print/1000_ticks/256
+      name: create_move_print/1000_ticks/async_256
       ns: 8279595
       range: 39989
     tags: []
   - date: "2022-03-14T04:18:22.070062Z"
     benchmark:
-      name: create_move_print/1000_ticks/512
+      name: create_move_print/1000_ticks/async_512
       ns: 14614588
       range: 54168
     tags: []
   - date: "2022-03-14T04:18:22.070062Z"
     benchmark:
-      name: create_move_print/1000_ticks/1024
+      name: create_move_print/1000_ticks/async_1024
       ns: 27494916
       range: 219793
     tags: []
   - date: "2022-03-14T04:18:22.070062Z"
     benchmark:
-      name: create_move_print/1000_ticks/2048
+      name: create_move_print/1000_ticks/async_2048
       ns: 53426541
       range: 426742
     tags: []
   - date: "2022-03-14T04:36:35.857090Z"
     benchmark:
-      name: create_move_print/1000_ticks/2
+      name: create_move_print/1000_ticks/async_2
       ns: 2062093
       range: 9614
     tags: []
   - date: "2022-03-14T04:36:35.857090Z"
     benchmark:
-      name: create_move_print/1000_ticks/4
+      name: create_move_print/1000_ticks/async_4
       ns: 2156394
       range: 32825
     tags: []
   - date: "2022-03-14T04:36:35.857090Z"
     benchmark:
-      name: create_move_print/1000_ticks/8
+      name: create_move_print/1000_ticks/async_8
       ns: 2210451
       range: 15762
     tags: []
   - date: "2022-03-14T04:36:35.857090Z"
     benchmark:
-      name: create_move_print/1000_ticks/16
+      name: create_move_print/1000_ticks/async_16
       ns: 2408396
       range: 2107
     tags: []
   - date: "2022-03-14T04:36:35.857090Z"
     benchmark:
-      name: create_move_print/1000_ticks/32
+      name: create_move_print/1000_ticks/async_32
       ns: 2804656
       range: 5577
     tags: []
   - date: "2022-03-14T04:36:35.857090Z"
     benchmark:
-      name: create_move_print/1000_ticks/64
+      name: create_move_print/1000_ticks/async_64
       ns: 3571062
       range: 5764
     tags: []
   - date: "2022-03-14T04:36:35.857090Z"
     benchmark:
-      name: create_move_print/1000_ticks/128
+      name: create_move_print/1000_ticks/async_128
       ns: 5113175
       range: 12540
     tags: []
   - date: "2022-03-14T04:36:35.857090Z"
     benchmark:
-      name: create_move_print/1000_ticks/256
+      name: create_move_print/1000_ticks/async_256
       ns: 8262386
       range: 32518
     tags: []
   - date: "2022-03-14T04:36:35.857090Z"
     benchmark:
-      name: create_move_print/1000_ticks/512
+      name: create_move_print/1000_ticks/async_512
       ns: 14625718
       range: 102934
     tags: []
   - date: "2022-03-14T04:36:35.857090Z"
     benchmark:
-      name: create_move_print/1000_ticks/1024
+      name: create_move_print/1000_ticks/async_1024
       ns: 27537656
       range: 155197
     tags: []
   - date: "2022-03-14T04:36:35.857090Z"
     benchmark:
-      name: create_move_print/1000_ticks/2048
+      name: create_move_print/1000_ticks/async_2048
       ns: 53528270
       range: 509321
     tags: []
   - date: "2022-03-14T06:07:21.903336Z"
     benchmark:
-      name: create_move_print/1000_ticks/2
+      name: create_move_print/1000_ticks/async_2
       ns: 2042183
       range: 841
     tags: []
   - date: "2022-03-14T06:07:21.903336Z"
     benchmark:
-      name: create_move_print/1000_ticks/4
+      name: create_move_print/1000_ticks/async_4
       ns: 2082002
       range: 38448
     tags: []
   - date: "2022-03-14T06:07:21.903336Z"
     benchmark:
-      name: create_move_print/1000_ticks/8
+      name: create_move_print/1000_ticks/async_8
       ns: 2201820
       range: 10289
     tags: []
   - date: "2022-03-14T06:07:21.903336Z"
     benchmark:
-      name: create_move_print/1000_ticks/16
+      name: create_move_print/1000_ticks/async_16
       ns: 2403414
       range: 20062
     tags: []
   - date: "2022-03-14T06:07:21.903336Z"
     benchmark:
-      name: create_move_print/1000_ticks/32
+      name: create_move_print/1000_ticks/async_32
       ns: 2814378
       range: 14372
     tags: []
   - date: "2022-03-14T06:07:21.903336Z"
     benchmark:
-      name: create_move_print/1000_ticks/64
+      name: create_move_print/1000_ticks/async_64
       ns: 3569233
       range: 23616
     tags: []
   - date: "2022-03-14T06:07:21.903336Z"
     benchmark:
-      name: create_move_print/1000_ticks/128
+      name: create_move_print/1000_ticks/async_128
       ns: 5106006
       range: 45312
     tags: []
   - date: "2022-03-14T06:07:21.903336Z"
     benchmark:
-      name: create_move_print/1000_ticks/256
+      name: create_move_print/1000_ticks/async_256
       ns: 8242276
       range: 42565
     tags: []
   - date: "2022-03-14T06:07:21.903336Z"
     benchmark:
-      name: create_move_print/1000_ticks/512
+      name: create_move_print/1000_ticks/async_512
       ns: 14685927
       range: 265976
     tags: []
   - date: "2022-03-14T06:07:21.903336Z"
     benchmark:
-      name: create_move_print/1000_ticks/1024
+      name: create_move_print/1000_ticks/async_1024
       ns: 27460104
       range: 204826
     tags: []
   - date: "2022-03-14T06:07:21.903336Z"
     benchmark:
-      name: create_move_print/1000_ticks/2048
+      name: create_move_print/1000_ticks/async_2048
       ns: 53451937
       range: 449469
     tags: []
   - date: "2022-03-14T07:23:49.392613Z"
     benchmark:
-      name: create_move_print/1000_ticks/2
+      name: create_move_print/1000_ticks/async_2
       ns: 1769979
       range: 6943
     tags: []
   - date: "2022-03-14T07:23:49.392613Z"
     benchmark:
-      name: create_move_print/1000_ticks/4
+      name: create_move_print/1000_ticks/async_4
       ns: 1843944
       range: 13539
     tags: []
   - date: "2022-03-14T07:23:49.392613Z"
     benchmark:
-      name: create_move_print/1000_ticks/8
+      name: create_move_print/1000_ticks/async_8
       ns: 1960194
       range: 8975
     tags: []
   - date: "2022-03-14T07:23:49.392613Z"
     benchmark:
-      name: create_move_print/1000_ticks/16
+      name: create_move_print/1000_ticks/async_16
       ns: 2155579
       range: 9273
     tags: []
   - date: "2022-03-14T07:23:49.392613Z"
     benchmark:
-      name: create_move_print/1000_ticks/32
+      name: create_move_print/1000_ticks/async_32
       ns: 2597797
       range: 12529
     tags: []
   - date: "2022-03-14T07:23:49.392613Z"
     benchmark:
-      name: create_move_print/1000_ticks/64
+      name: create_move_print/1000_ticks/async_64
       ns: 3442434
       range: 16517
     tags: []
   - date: "2022-03-14T07:23:49.392613Z"
     benchmark:
-      name: create_move_print/1000_ticks/128
+      name: create_move_print/1000_ticks/async_128
       ns: 5097295
       range: 30979
     tags: []
   - date: "2022-03-14T07:23:49.392613Z"
     benchmark:
-      name: create_move_print/1000_ticks/256
+      name: create_move_print/1000_ticks/async_256
       ns: 8527736
       range: 39784
     tags: []
   - date: "2022-03-14T07:23:49.392613Z"
     benchmark:
-      name: create_move_print/1000_ticks/512
+      name: create_move_print/1000_ticks/async_512
       ns: 15350463
       range: 73481
     tags: []
   - date: "2022-03-14T07:23:49.392613Z"
     benchmark:
-      name: create_move_print/1000_ticks/1024
+      name: create_move_print/1000_ticks/async_1024
       ns: 29042604
       range: 189330
     tags: []
   - date: "2022-03-14T07:23:49.392613Z"
     benchmark:
-      name: create_move_print/1000_ticks/2048
+      name: create_move_print/1000_ticks/async_2048
       ns: 57055895
       range: 324366
     tags: []
   - date: "2022-03-17T07:59:00.725474Z"
     benchmark:
-      name: create_move_print/1000_ticks/2
+      name: create_move_print/1000_ticks/async_2
       ns: 2253905
       range: 22007
     tags: []
   - date: "2022-03-17T07:59:00.725474Z"
     benchmark:
-      name: create_move_print/1000_ticks/4
+      name: create_move_print/1000_ticks/async_4
       ns: 2199460
       range: 19564
     tags: []
   - date: "2022-03-17T07:59:00.725474Z"
     benchmark:
-      name: create_move_print/1000_ticks/8
+      name: create_move_print/1000_ticks/async_8
       ns: 2292374
       range: 10653
     tags: []
   - date: "2022-03-17T07:59:00.725474Z"
     benchmark:
-      name: create_move_print/1000_ticks/16
+      name: create_move_print/1000_ticks/async_16
       ns: 2329876
       range: 12204
     tags: []
   - date: "2022-03-17T07:59:00.725474Z"
     benchmark:
-      name: create_move_print/1000_ticks/32
+      name: create_move_print/1000_ticks/async_32
       ns: 2488839
       range: 17284
     tags: []
   - date: "2022-03-17T07:59:00.725474Z"
     benchmark:
-      name: create_move_print/1000_ticks/64
+      name: create_move_print/1000_ticks/async_64
       ns: 2718698
       range: 17264
     tags: []
   - date: "2022-03-17T07:59:00.725474Z"
     benchmark:
-      name: create_move_print/1000_ticks/128
+      name: create_move_print/1000_ticks/async_128
       ns: 3203385
       range: 13552
     tags: []
   - date: "2022-03-17T07:59:00.725474Z"
     benchmark:
-      name: create_move_print/1000_ticks/256
+      name: create_move_print/1000_ticks/async_256
       ns: 4212125
       range: 18768
     tags: []
   - date: "2022-03-17T07:59:00.725474Z"
     benchmark:
-      name: create_move_print/1000_ticks/512
+      name: create_move_print/1000_ticks/async_512
       ns: 6139847
       range: 33053
     tags: []
   - date: "2022-03-17T07:59:00.725474Z"
     benchmark:
-      name: create_move_print/1000_ticks/1024
+      name: create_move_print/1000_ticks/async_1024
       ns: 10078812
       range: 47832
     tags: []
   - date: "2022-03-17T07:59:00.725474Z"
     benchmark:
-      name: create_move_print/1000_ticks/2048
+      name: create_move_print/1000_ticks/async_2048
       ns: 17920881
       range: 115970
     tags: []

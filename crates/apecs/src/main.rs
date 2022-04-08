@@ -1,4 +1,4 @@
-use apecs::{entities::Entities, join::*, storage::*, CanFetch, Facade, Read, Write};
+use apecs::{entities::Entities, join::*, storage::*, CanFetch, world::Facade, Read, Write};
 use tracing::Level;
 
 #[derive(Clone)]
@@ -80,7 +80,6 @@ fn main() -> anyhow::Result<()> {
     let subscriber = tracing_subscriber::FmtSubscriber::builder()
         .with_max_level(Level::DEBUG)
         .finish();
-
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
     let mut world = apecs::world::World::default();

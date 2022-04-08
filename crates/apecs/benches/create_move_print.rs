@@ -1,5 +1,11 @@
 use anyhow::Context;
-use apecs::{entities::*, join::*, storage::*, CanFetch, Facade, Read, Write};
+use apecs::{
+    entities::*,
+    join::*,
+    storage::*,
+    world::{Facade, World},
+    CanFetch, Read, Write,
+};
 
 #[derive(Clone)]
 pub struct Position {
@@ -58,11 +64,13 @@ fn sync_create_n_system(mut data: CreateSystemData, n: usize) -> anyhow::Result<
 pub struct MoveSystemData {
     positions: Write<VecStorage<Position>>,
     velocities: Write<VecStorage<Velocity>>,
+    ticks: Write<usize>,
 }
 
 fn move_system(
     positions: &mut impl CanWriteStorage<Component = Position>,
     velocities: &mut impl CanWriteStorage<Component = Velocity>,
+    ticks: &mut usize,
 ) {
     for (_, mut position, mut velocity) in (positions, velocities).join() {
         position.x += velocity.x;
@@ -72,6 +80,8 @@ fn move_system(
             velocity.x = 1.0;
         }
     }
+
+    *ticks += 1;
 }
 
 async fn async_move_system(mut facade: Facade) -> anyhow::Result<()> {
@@ -79,13 +89,14 @@ async fn async_move_system(mut facade: Facade) -> anyhow::Result<()> {
         let MoveSystemData {
             mut positions,
             mut velocities,
+            mut ticks,
         } = facade.fetch::<MoveSystemData>().await?;
-        move_system(&mut positions, &mut velocities);
+        move_system(&mut positions, &mut velocities, &mut ticks);
     }
 }
 
 fn sync_move_system(mut data: MoveSystemData) -> anyhow::Result<()> {
-    move_system(&mut data.positions, &mut data.velocities);
+    move_system(&mut data.positions, &mut data.velocities, &mut data.ticks);
     Ok(())
 }
 
@@ -115,40 +126,46 @@ async fn async_print_system(mut facade: Facade) -> anyhow::Result<()> {
     }
 }
 
-pub fn create_move_print(syncronicity: super::Syncronicity, size: usize) -> anyhow::Result<()> {
-    let mut world = apecs::world::World::default();
-    world
-        .with_default_resource::<Entities>()?
-        .with_resource::<VecStorage<Position>>(VecStorage::new_with_capacity(size))?
-        .with_resource::<VecStorage<Velocity>>(VecStorage::new_with_capacity(size))?;
-    if syncronicity == super::Syncronicity::Async {
-        world
-            .with_async_system("create", |f| async_create_n_system(f, size))
-            .with_async_system("move", async_move_system)
-            .with_async_system("print", async_print_system);
-    } else {
-        world
-            .with_system("create", move |data| sync_create_n_system(data, size))
-            .with_system("move", sync_move_system)
-            .with_system("print", sync_print_system);
-    }
-    let waker = world.get_waker();
-    let mut cx = std::task::Context::from_waker(&waker);
-    for _ in 0..1000 {
-        world.tick_with_context(Some(&mut cx))?;
-    }
-
-    Ok(())
-}
-
 #[derive(Clone, Copy, Debug)]
-pub struct CreateMovePrint {
+pub struct Benchmark {
     pub size: usize,
-    pub kind: super::Syncronicity,
+    pub is_async: bool,
 }
 
-impl std::fmt::Display for CreateMovePrint {
+impl std::fmt::Display for Benchmark {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&format!("{}_{}", self.kind, self.size))
+        f.write_str(&format!("{}_{}", if self.is_async {"async"} else {"sync"}, self.size))
+    }
+}
+
+impl Benchmark {
+    pub fn run(&self) -> anyhow::Result<()> {
+        let size = self.size;
+        let mut world = World::default();
+        world
+            .with_default_resource::<Entities>()?
+            .with_resource::<VecStorage<Position>>(VecStorage::new_with_capacity(size))?
+            .with_resource::<VecStorage<Velocity>>(VecStorage::new_with_capacity(size))?;
+
+        if self.is_async {
+            world
+                .with_async_system("create", |f| async_create_n_system(f, size))
+                .with_async_system("move", async_move_system)
+                .with_async_system("print", async_print_system);
+        } else {
+            world
+                .with_system("create", move |data| sync_create_n_system(data, size))
+                .with_system("move", sync_move_system)
+                .with_system("print", sync_print_system);
+        }
+
+        for _ in 0..1000 {
+            world.tick()?;
+        }
+
+        let ticks = world.fetch::<Read<usize>>().unwrap();
+        assert_eq!(*ticks, 1000);
+
+        Ok(())
     }
 }

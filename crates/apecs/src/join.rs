@@ -44,13 +44,8 @@ apecs_derive::impl_parjoin_tuple!((A, B, C, D, E, F, G, H, I, J));
 apecs_derive::impl_parjoin_tuple!((A, B, C, D, E, F, G, H, I, J, K));
 apecs_derive::impl_parjoin_tuple!((A, B, C, D, E, F, G, H, I, J, K, L));
 
-#[inline(always)]
-pub fn sync<A, B>(
-    a: &mut A,
-    next_a: &mut A::Item,
-    b: &mut B,
-    next_b: &mut B::Item,
-) -> Option<()>
+#[inline]
+pub fn sync<A, B>(a: &mut A, next_a: &mut A::Item, b: &mut B, next_b: &mut B::Item) -> Option<()>
 where
     A: Iterator,
     <A as Iterator>::Item: StorageComponent,
@@ -62,7 +57,7 @@ where
             *next_a = a.next()?;
         }
         while next_b.id() < next_a.id() {
-                *next_b = b.next()?;
+            *next_b = b.next()?;
         }
     }
 
@@ -159,8 +154,8 @@ where
     B: Join,
     A::Iter: Iterator,
     B::Iter: Iterator,
-<A::Iter as Iterator>::Item: StorageComponent,
-<B::Iter as Iterator>::Item: StorageComponent,
+    <A::Iter as Iterator>::Item: StorageComponent,
+    <B::Iter as Iterator>::Item: StorageComponent,
 {
     type Iter = JoinedIter<(A::Iter, B::Iter)>;
     fn join(self) -> Self::Iter {

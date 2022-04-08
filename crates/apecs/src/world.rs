@@ -1,32 +1,56 @@
 //! The [`World`] contains resources and is responsible for ticking
 //! systems.
-use std::{
-    future::Future,
-    sync::Arc,
-    task::{Context as Ctx, RawWaker, Wake, Waker},
-};
+use std::{future::Future, sync::Arc};
 
 use anyhow::Context;
 use rustc_hash::FxHashMap;
-use smol::future::FutureExt;
 
 use crate::{
     mpsc,
     plugins::IsPlugin,
-    schedule::{IsBorrow, IsSchedule},
+    schedule::{Borrow, IsBorrow, IsSchedule},
     spsc,
-    system::{AsyncSystem, Borrow, SyncSchedule, SyncSystem},
-    CanFetch, Facade, FetchReadyResource, IsResource, Resource, ResourceId,
+    system::{AsyncSchedule, AsyncSystem, AsyncSystemRequest, SyncSchedule, SyncSystem},
+    CanFetch, FetchReadyResource, IsResource, Request, Resource, ResourceId,
 };
 
-struct DummyWaker;
+pub struct Facade {
+    // Unbounded. Sending a request from the system should not yield the async
+    pub(crate) resource_request_tx: spsc::Sender<Request>,
+    // Bounded(1). Awaiting in the system should yield the async
+    pub(crate) resources_to_system_rx: spsc::Receiver<FxHashMap<ResourceId, FetchReadyResource>>,
+    // Unbounded. Sending from the system should not yield the async
+    pub(crate) resources_from_system_tx: mpsc::Sender<(ResourceId, Resource)>,
+}
 
-impl Wake for DummyWaker {
-    fn wake(self: std::sync::Arc<Self>) {}
+impl Facade {
+    pub async fn fetch<T: CanFetch>(&mut self) -> anyhow::Result<T> {
+        let reads = T::reads().into_iter().map(|id| Borrow {
+            id,
+            is_exclusive: false,
+        });
+        let writes = T::writes().into_iter().map(|id| Borrow {
+            id,
+            is_exclusive: true,
+        });
+        self.resource_request_tx
+            .try_send(Request {
+                borrows: reads.chain(writes).collect(),
+            })
+            .context("could not send request for resources")?;
+
+        let mut resources = self
+            .resources_to_system_rx
+            .recv()
+            .await
+            .context("could not fetch resources")?;
+
+        T::construct(self.resources_from_system_tx.clone(), &mut resources)
+            .with_context(|| format!("could not construct {}", std::any::type_name::<T>()))
+    }
 }
 
 pub struct World {
-    waker: Option<Waker>,
     // world resources
     resources: FxHashMap<ResourceId, Resource>,
     // resources loaned out to the owner of
@@ -39,23 +63,21 @@ pub struct World {
     ),
     sync_schedule: SyncSchedule,
     async_systems: Vec<AsyncSystem>,
+    async_system_executor: smol::Executor<'static>,
     // executor for non-system futures
-    executor: smol::Executor<'static>,
-    // handles of all non-system futures
-    tasks: Vec<smol::Task<()>>,
+    async_task_executor: smol::Executor<'static>,
 }
 
 impl Default for World {
     fn default() -> Self {
         Self {
-            waker: None,
             resources: Default::default(),
             loaned_resources: FxHashMap::default(),
             resources_from_system: mpsc::unbounded(),
             sync_schedule: SyncSchedule::default(),
             async_systems: vec![],
-            executor: Default::default(),
-            tasks: vec![],
+            async_system_executor: Default::default(),
+            async_task_executor: Default::default(),
         }
     }
 }
@@ -165,9 +187,7 @@ impl World {
         for lazy_rez in plugin.resources().into_iter() {
             if !self.resources.contains_key(lazy_rez.id()) {
                 let (id, resource) = lazy_rez.into();
-                let _ = self
-                    .resources
-                    .insert(id, resource);
+                let _ = self.resources.insert(id, resource);
             }
         }
 
@@ -181,7 +201,7 @@ impl World {
         self
     }
 
-    pub fn with_system<T, F>(&mut self, name: impl AsRef<str>, mut sys_fn: F) -> &mut Self
+    pub fn with_system<T, F>(&mut self, name: impl AsRef<str>, sys_fn: F) -> &mut Self
     where
         F: FnMut(T) -> anyhow::Result<()> + Send + Sync + 'static,
         T: CanFetch,
@@ -209,21 +229,33 @@ impl World {
         let (resource_request_tx, resource_request_rx) = spsc::unbounded();
         let (resources_to_system_tx, resources_to_system_rx) =
             spsc::bounded::<FxHashMap<ResourceId, FetchReadyResource>>(1);
-
         let facade = Facade {
             resource_request_tx,
             resources_to_system_rx,
             resources_from_system_tx: self.resources_from_system.0.clone(),
         };
-
+        let name = name.as_ref().to_string();
         let system = AsyncSystem {
-            name: name.as_ref().to_string(),
-            future: Box::pin((make_system_future)(facade)),
+            name: name.clone(),
             resource_request_rx,
             resources_to_system_tx,
         };
-
         self.async_systems.push(system);
+
+        let asys = (make_system_future)(facade);
+        let future = async move {
+            match asys.await {
+                Ok(()) => {}
+                Err(err) => {
+                    let msg = err.chain().map(|err| format!("{}", err)).collect::<Vec<_>>().join("\n  ");
+                    tracing::error!("async system '{}' erred: {}", name, msg);
+                }
+            }
+        };
+
+        let task = self.async_system_executor.spawn(future);
+        task.detach();
+
         self
     }
 
@@ -235,56 +267,21 @@ impl World {
         self
     }
 
+    /// Spawn a non-system asynchronous task.
     pub fn spawn(&self, future: impl Future<Output = ()> + Send + Sync + 'static) {
-        let task = self.executor.spawn(future);
+        let task = self.async_task_executor.spawn(future);
         task.detach();
-    }
-
-    pub fn tick(&mut self) -> anyhow::Result<()> {
-        let waker = self.waker.take().unwrap_or_else(|| {
-            // create a dummy context for asyncs
-            let raw_waker = RawWaker::from(Arc::new(DummyWaker));
-            unsafe { Waker::from_raw(raw_waker) }
-        });
-        let mut cx = std::task::Context::from_waker(&waker);
-
-        self.tick_with_context(Some(&mut cx))
     }
 
     /// Conduct a world tick but use an explicit context.
     /// If no context is given, async systems and futures will not be ticked.
-    pub fn tick_with_context(&mut self, mut cx: Option<&mut Ctx>) -> anyhow::Result<()> {
-        tracing::trace!("tick");
+    pub fn tick(&mut self) -> anyhow::Result<()> {
+        self.tick_async()?;
+        self.tick_sync()
+    }
 
-        if let Some(cx) = cx.as_mut() {
-            self.async_systems.retain_mut(|system| {
-                tracing::trace!("running async system '{}'", system.name);
-                clear_returned_resources(
-                    Some(&system.name),
-                    &self.resources_from_system.1,
-                    &mut self.resources,
-                    &mut self.loaned_resources,
-                )
-                .unwrap();
-                system.tick_async_system(cx, &mut self.resources).unwrap()
-            });
-
-            // run the non-system futures and remove the finished tasks
-            if !self.tasks.is_empty() {
-                // tick the async tasks
-                let mut max_ticks = self.tasks.len();
-                while max_ticks > 0 && self.executor.try_tick() {
-                    max_ticks -= 1;
-                }
-
-                for mut task in std::mem::take(&mut self.tasks) {
-                    if task.poll(cx).is_pending() {
-                        self.tasks.push(task);
-                    }
-                }
-            }
-        }
-
+    /// Just tick the synchronous systems.
+    pub fn tick_sync(&mut self) -> anyhow::Result<()> {
         clear_returned_resources(
             None,
             &self.resources_from_system.1,
@@ -294,7 +291,69 @@ impl World {
 
         // run the scheduled sync systems
         self.sync_schedule
-            .run(&mut self.resources, &self.resources_from_system)?;
+            .run((), &mut self.resources, &self.resources_from_system)
+    }
+
+    /// Just tick the async futures, including sending resources to async
+    /// systems.
+    pub fn tick_async(&mut self) -> anyhow::Result<()> {
+        clear_returned_resources(
+            None,
+            &self.resources_from_system.1,
+            &mut self.resources,
+            &mut self.loaned_resources,
+        )
+        .unwrap();
+
+        // trim the systems that may request resources by checking their
+        // resource request/return channels
+        self.async_systems.retain(|system| {
+            // if the channels are closed they have been dropped by the
+            // async system and we should no longer poll them for requests
+            if system.resource_request_rx.is_closed() {
+                debug_assert!(system.resources_to_system_tx.is_closed());
+                false
+            } else {
+                true
+            }
+        });
+
+        // fetch all the requests for system resources and fold them into a schedule
+        let mut schedule =
+            self.async_systems
+                .iter()
+                .fold(AsyncSchedule::default(), |mut schedule, system| {
+                    let async_request = match system.resource_request_rx.try_recv() {
+                        Ok(request) => {
+                            tracing::trace!(
+                                "got system resource request from '{}': {:?}",
+                                system.name,
+                                request
+                            );
+                            AsyncSystemRequest(&system, request)
+                        }
+                        Err(err) => match err {
+                            // return an async system that requests nothing
+                            smol::channel::TryRecvError::Empty => {
+                                AsyncSystemRequest(&system, Request::default())
+                            }
+                            smol::channel::TryRecvError::Closed => unreachable!(),
+                        },
+                    };
+                    schedule.add_system(async_request);
+                    schedule
+                });
+
+        if !schedule.is_empty() {
+            schedule.run(
+                &self.async_system_executor,
+                &mut self.resources,
+                &self.resources_from_system,
+            )?;
+        }
+
+        // lastly tick all our non-system tasks
+        while self.async_task_executor.try_tick() {}
 
         Ok(())
     }
@@ -322,33 +381,18 @@ impl World {
         T::construct(self.resources_from_system.0.clone(), &mut rezs)
     }
 
-    pub fn new_waker() -> Waker {
-        // create a dummy context for asyncs
-        let raw_waker = RawWaker::from(Arc::new(DummyWaker));
-        unsafe { Waker::from_raw(raw_waker) }
-    }
-
-    pub fn get_waker(&mut self) -> Waker {
-        self.waker.take().unwrap_or_else(Self::new_waker)
-    }
-
     /// Run all system and non-system futures until they have all finished or one
     /// system has erred, whichever comes first.
+    ///
+    /// This will return even if there are general non-system futures in progress.
     pub fn run(&mut self) -> anyhow::Result<&mut Self> {
-        let waker = self.get_waker();
-        let mut cx = std::task::Context::from_waker(&waker);
-
         loop {
-            self.tick_with_context(Some(&mut cx))?;
-            if self.async_systems.is_empty()
-                && self.sync_schedule.is_empty()
-                && self.tasks.is_empty()
-            {
+            self.tick()?;
+            if self.async_systems.is_empty() && self.sync_schedule.is_empty() {
                 break;
             }
         }
 
-        self.waker = Some(waker);
         Ok(self)
     }
 
@@ -359,8 +403,8 @@ impl World {
 
 #[cfg(test)]
 mod test {
-    use crate as apecs;
-    use apecs::{anyhow, entities::*, join::*, spsc, storage::*, world::*, Read, Write};
+    use crate::{self as apecs};
+    use apecs::{anyhow, entities::*, join::*, spsc, storage::*, system, world::*, Read, Write};
 
     #[test]
     fn can_closure_system() -> anyhow::Result<()> {
@@ -408,8 +452,10 @@ mod test {
     }
 
     #[test]
-    fn systems_return_resources() -> anyhow::Result<()> {
-        async fn create(mut facade: Facade) -> anyhow::Result<()> {
+    fn async_systems_run_and_return_resources() -> anyhow::Result<()> {
+        async fn create(tx: spsc::Sender<()>, mut facade: Facade) -> anyhow::Result<()> {
+            println!("create running");
+            tx.try_send(()).unwrap();
             let (mut entities, mut names, mut numbers): (
                 Write<Entities>,
                 Write<VecStorage<String>>,
@@ -440,19 +486,28 @@ mod test {
             Ok(())
         }
 
+        let subscriber = tracing_subscriber::FmtSubscriber::builder()
+            .with_max_level(tracing::Level::TRACE)
+            .finish();
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("setting default subscriber failed");
+
+        let (tx, rx) = spsc::bounded(1);
         let mut world = World::default();
         world
             .with_default_resource::<Entities>()?
             .with_default_resource::<VecStorage<String>>()?
             .with_default_resource::<VecStorage<u32>>()?
             .with_default_resource::<FxHashMap<String, u32>>()?
-            .with_async_system("create", create)
+            .with_async_system("create", system::make_stateful_async_system(tx, create))
             .with_system("maintain", maintain_map);
 
-        // create system makes fetch request
+        // create system runs - sending on the channel and making the fetch request
         world.tick()?;
-        // world sends resources to create system which makes ECs,
-        // maintain system updates the book
+        rx.try_recv().unwrap();
+
+        // world sends resources to the create system which makes
+        // entities+components, then the maintain system updates the book
         world.tick()?;
 
         let book = world.fetch::<Read<FxHashMap<String, u32>>>()?;

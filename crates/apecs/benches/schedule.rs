@@ -109,6 +109,6 @@ impl Benchmark {
     }
 
     pub fn run(&mut self) {
-        self.0.tick_with_context(None).unwrap()
+        self.0.tick_sync().unwrap()
     }
 }

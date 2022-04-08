@@ -64,7 +64,7 @@ pub use fetch::*;
 
 use crate::{
     storage::{CanReadStorage, CanWriteStorage},
-    system::Borrow,
+    schedule::Borrow,
 };
 
 pub trait IsResource: Any + Send + Sync + 'static {}
@@ -81,6 +81,15 @@ pub type Resource = Box<dyn Any + Send + Sync + 'static>;
 pub enum FetchReadyResource {
     Owned(Resource),
     Ref(Arc<Resource>),
+}
+
+impl std::fmt::Debug for FetchReadyResource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Owned(_) => f.debug_tuple("Owned").field(&"_").finish(),
+            Self::Ref(_) => f.debug_tuple("Ref").field(&"_").finish(),
+        }
+    }
 }
 
 impl FetchReadyResource {
@@ -272,43 +281,9 @@ impl<T: IsResource + CanReadStorage> CanReadStorage for Read<T> {
     }
 }
 
-pub(crate) struct Request {
+#[derive(Debug, Default)]
+pub struct Request {
     pub borrows: Vec<Borrow>,
-}
-
-pub struct Facade {
-    // Unbounded. Sending from the system should not yield the async
-    pub(crate) resource_request_tx: spsc::Sender<Request>,
-    // Bounded(1). Awaiting in the system should yield the async
-    pub(crate) resources_to_system_rx: spsc::Receiver<FxHashMap<ResourceId, FetchReadyResource>>,
-    // Unbounded. Sending from the system should not yield the async
-    pub(crate) resources_from_system_tx: mpsc::Sender<(ResourceId, Resource)>,
-}
-
-impl Facade {
-    pub async fn fetch<T: CanFetch>(&mut self) -> anyhow::Result<T> {
-        let reads = T::reads().into_iter().map(|id| Borrow {
-            id,
-            is_exclusive: false,
-        });
-        let writes = T::writes().into_iter().map(|id| Borrow {
-            id,
-            is_exclusive: true,
-        });
-        self.resource_request_tx
-            .try_send(Request {
-                borrows: reads.chain(writes).collect(),
-            })
-            .context("could not send request for resources")?;
-
-        let mut resources = self
-            .resources_to_system_rx
-            .recv()
-            .await
-            .context("could not fetch resources")?;
-        T::construct(self.resources_from_system_tx.clone(), &mut resources)
-            .context("could not construct system data")
-    }
 }
 
 pub trait CanFetch: Sized {
@@ -336,14 +311,14 @@ impl<'a, T: IsResource> CanFetch for Write<T> {
         let id = ResourceId::new::<T>();
         let t: FetchReadyResource = fields.remove(&id).with_context(|| {
             format!(
-                "could not find '{}' in resources",
+                "Write::construct could not find '{}' in resources",
                 std::any::type_name::<T>(),
             )
         })?;
         let t = t.into_owned().context("resource is not owned")?;
         let inner: Option<Box<T>> = Some(t.downcast::<T>().map_err(|_| {
             anyhow::anyhow!(
-                "could not cast resource as '{}'",
+                "Write::construct could not cast resource as '{}'",
                 std::any::type_name::<T>(),
             )
         })?);
@@ -371,7 +346,7 @@ impl<'a, T: IsResource> CanFetch for Read<T> {
         let id = ResourceId::new::<T>();
         let t: FetchReadyResource = fields.remove(&id).with_context(|| {
             format!(
-                "could not find '{}' in resources",
+                "Read::construct could not find '{}' in resources",
                 std::any::type_name::<T>(),
             )
         })?;

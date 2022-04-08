@@ -575,7 +575,7 @@ pub mod test {
             }
 
             // run the world
-            world.tick_with_context(None)?;
+            world.tick_sync()?;
 
             // assert the state of the world
             let a: Read<A> = world.fetch()?;
