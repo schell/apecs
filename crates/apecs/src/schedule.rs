@@ -91,6 +91,12 @@ pub(crate) trait IsBatch: std::fmt::Debug + Default {
 
     fn add_system(&mut self, system: Self::System);
 
+    /// Returns the barrier number this batch runs after.
+    fn get_barrier(&self) -> usize;
+
+    /// Sets the barrier this batch runs after.
+    fn set_barrier(&mut self, barrier: usize);
+
     /// Prepare a vector of system data for each system in the batch given
     /// current world resources and previously loaned resources.
     fn prepare_batch_data(
@@ -191,7 +197,11 @@ pub(crate) trait IsSchedule: std::fmt::Debug {
 
     fn add_system_with_dependecies(&mut self, new_system: Self::System, deps: impl Iterator<Item = impl AsRef<str>>) {
         let deps = rustc_hash::FxHashSet::from_iter(deps.map(|s| s.as_ref().to_string()));
+        let current_barrier = self.current_barrier();
         'batch_loop: for batch in self.batches_mut() {
+            if batch.get_barrier() != current_barrier {
+                continue;
+            }
             for system in batch.systems() {
                 if system.conflicts_with(&new_system) {
                     // the new system conflicts with one in
@@ -215,9 +225,17 @@ pub(crate) trait IsSchedule: std::fmt::Debug {
         // if the system hasn't found a compatible batch, make a new
         // batch and add it
         let mut batch = Self::Batch::default();
+        batch.set_barrier(self.current_barrier());
         batch.add_system(new_system);
         self.add_batch(batch);
     }
+
+    /// Returns the id of the last barrier.
+    fn current_barrier(&self) -> usize;
+
+    /// Inserts a barrier, any systems added after the barrier will run
+    /// after the systems before the barrier.
+    fn add_barrier(&mut self);
 
     fn run(
         &mut self,
@@ -274,5 +292,24 @@ mod test {
         assert_eq!(batches.len(), 2);
         assert_eq!(batches[0].systems()[0].name(), "one");
         assert_eq!(batches[1].systems()[0].name(), "two");
+    }
+
+
+    #[test]
+    fn schedule_with_barrier() {
+        let mut schedule = SyncSchedule::default();
+        schedule.add_system(SyncSystem::new("one", |()| {Ok(())}));
+        schedule.add_barrier();
+        schedule.add_system(SyncSystem::new("two", |()| {Ok(())}));
+        schedule.add_system(SyncSystem::new("three", |()| {Ok(())}));
+        schedule.add_barrier();
+        schedule.add_system(SyncSystem::new("four", |()| {Ok(())}));
+
+        let batches = schedule.batches();
+        assert_eq!(batches.len(), 3);
+        assert_eq!(batches[0].systems()[0].name(), "one");
+        assert_eq!(batches[1].systems()[0].name(), "two");
+        assert_eq!(batches[1].systems()[1].name(), "three");
+        assert_eq!(batches[2].systems()[0].name(), "four");
     }
 }

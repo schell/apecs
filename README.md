@@ -24,10 +24,11 @@ short-lived systems.
 - parallel system scheduling (outer parallelism)
 - tracked storage (components created, updated, modified)
 - insert plugins/bundles (groups of systems and resources)
+- schedule: system dependencies
+- schedule: barriers
 
 ## Roadmap
-- [ ] schedule barriers
-      - [ ] local thread systems in schedule
-- [ ] wasm (even parallel)
-- [ ] make btree storage faster
-- [ ] archtypal storage (why should an ecs only have one or the other?)
+- schedule: local thread systems (maybe not necessary?)
+- wasm
+- make btree storage faster
+- archtypal storage (why should an ecs only have one or the other?)

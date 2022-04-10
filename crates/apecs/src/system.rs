@@ -112,7 +112,7 @@ impl SyncSystem {
 }
 
 #[derive(Debug, Default)]
-pub struct SyncBatch(Vec<SyncSystem>);
+pub struct SyncBatch(Vec<SyncSystem>, usize);
 
 impl IsBatch for SyncBatch {
     type System = SyncSystem;
@@ -129,12 +129,21 @@ impl IsBatch for SyncBatch {
     fn add_system(&mut self, system: Self::System) {
         self.0.push(system);
     }
+
+    fn get_barrier(&self) -> usize {
+        self.1
+    }
+
+    fn set_barrier(&mut self, barrier: usize) {
+        self.1 = barrier;
+    }
 }
 
 #[derive(Debug, Default)]
 pub struct SyncSchedule {
     batches: Vec<SyncBatch>,
     should_run_parallel: bool,
+    current_barrier: usize,
 }
 
 impl IsSchedule for SyncSchedule {
@@ -159,6 +168,14 @@ impl IsSchedule for SyncSchedule {
 
     fn get_should_parallelize(&self) -> bool {
         self.should_run_parallel
+    }
+
+    fn current_barrier(&self) -> usize {
+        self.current_barrier
+    }
+
+    fn add_barrier(&mut self) {
+        self.current_barrier += 1;
     }
 }
 
@@ -260,6 +277,12 @@ impl<'a> IsBatch for AsyncBatch<'a> {
 
         Ok(())
     }
+
+    fn get_barrier(&self) -> usize {
+        0
+    }
+
+    fn set_barrier(&mut self, _: usize) {}
 }
 
 #[derive(Debug, Default)]
@@ -286,4 +309,10 @@ impl<'a> IsSchedule for AsyncSchedule<'a> {
     fn get_should_parallelize(&self) -> bool {
         false
     }
+
+    fn current_barrier(&self) -> usize {
+        0
+    }
+
+    fn add_barrier(&mut self) {}
 }
