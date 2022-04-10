@@ -1,5 +1,4 @@
 //! Binary search tree storage.
-// TODO: Use btree-slab or btree-range-map instead of BTreeMap
 use rayon::iter::IntoParallelIterator;
 use std::{
     collections::btree_map::{BTreeMap, Iter, IterMut},
