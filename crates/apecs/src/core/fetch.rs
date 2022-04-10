@@ -1,5 +1,22 @@
 //! Implementations of `CanFetch`.
-use crate::{CanFetch, ResourceId, Resource, FetchReadyResource, mpsc};
+use crate as apecs;
+
+impl apecs::CanFetch for () {
+    fn reads() -> Vec<apecs::ResourceId> {
+        vec![]
+    }
+
+    fn writes() -> Vec<apecs::ResourceId> {
+        vec![]
+    }
+
+    fn construct(
+        _: apecs::mpsc::Sender<(apecs::ResourceId, apecs::Resource)>,
+        _: &mut rustc_hash::FxHashMap<apecs::ResourceId, apecs::FetchReadyResource>,
+    ) -> anyhow::Result<Self> {
+        Ok(())
+    }
+}
 
 apecs_derive::impl_canfetch_tuple!((A, B));
 apecs_derive::impl_canfetch_tuple!((A, B, C));

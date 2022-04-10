@@ -5,6 +5,7 @@ pub use rayon::iter::{
     FilterMap, IndexedParallelIterator, IntoParallelIterator, MultiZip, ParallelIterator, Zip,
 };
 
+use crate as apecs;
 use crate::{entities::*, storage::*};
 
 pub trait ParJoin {
@@ -118,7 +119,7 @@ impl<'a, T: CanReadStorage> Join for &'a T {
 }
 
 impl<'a> Join for &'a Entities {
-    type Iter = Map<BitIter<&'a BitSet>, fn(u32) -> Entry<Entity>>;
+    type Iter = Map<BitIter<&'a BitSet>, fn(u32) -> Entry<usize>>;
 
     fn join(self) -> Self::Iter {
         self.iter()

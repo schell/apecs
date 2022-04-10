@@ -1,11 +1,10 @@
+use apecs::join::{ParJoin, ParallelIterator};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::{
     iter::FilterMap,
     slice::Iter,
     sync::{Arc, Mutex},
 };
-
-use apecs::storage::*;
 
 mod create_move_print;
 
@@ -220,12 +219,12 @@ fn bench_simple_insert(c: &mut Criterion) {
     //    criterion::PlotConfiguration::default().summary_scale(criterion::AxisScale::Logarithmic);
     //group.plot_config(plot_config);
 
-    group.bench_function("apecs::VecStorage", |b| {
+    group.bench_function("apecs::apecs::storage::VecStorage", |b| {
         let mut bench = simple_insert::Benchmark::<
-            VecStorage<simple_insert::Transform>,
-            VecStorage<simple_insert::Position>,
-            VecStorage<simple_insert::Rotation>,
-            VecStorage<simple_insert::Velocity>,
+            apecs::storage::VecStorage<simple_insert::Transform>,
+            apecs::storage::VecStorage<simple_insert::Position>,
+            apecs::storage::VecStorage<simple_insert::Rotation>,
+            apecs::storage::VecStorage<simple_insert::Velocity>,
         >::new();
         b.iter(move || bench.run());
     });
@@ -238,12 +237,12 @@ fn bench_simple_insert(c: &mut Criterion) {
     //    >::new();
     //    b.iter(move || bench.run());
     //});
-    group.bench_function("apecs::BTreeStorage", |b| {
+    group.bench_function("apecs::apecs::storage::BTreeStorage", |b| {
         let mut bench = simple_insert::Benchmark::<
-            BTreeStorage<simple_insert::Transform>,
-            BTreeStorage<simple_insert::Position>,
-            BTreeStorage<simple_insert::Rotation>,
-            BTreeStorage<simple_insert::Velocity>,
+            apecs::storage::BTreeStorage<simple_insert::Transform>,
+            apecs::storage::BTreeStorage<simple_insert::Position>,
+            apecs::storage::BTreeStorage<simple_insert::Rotation>,
+            apecs::storage::BTreeStorage<simple_insert::Velocity>,
         >::new();
         b.iter(move || bench.run());
     });
@@ -280,9 +279,9 @@ fn bench_add_remove(c: &mut Criterion) {
     //    criterion::PlotConfiguration::default().summary_scale(criterion::AxisScale::Logarithmic);
     //group.plot_config(plot_config);
 
-    group.bench_function("apecs::VecStorage", |b| {
+    group.bench_function("apecs::apecs::storage::VecStorage", |b| {
         let mut bench =
-            add_remove::Benchmark::<VecStorage<add_remove::A>, VecStorage<add_remove::B>>::new();
+            add_remove::Benchmark::<apecs::storage::VecStorage<add_remove::A>, apecs::storage::VecStorage<add_remove::B>>::new();
         b.iter(move || bench.run());
     });
 
@@ -294,9 +293,9 @@ fn bench_add_remove(c: &mut Criterion) {
     //    b.iter(move || bench.run());
     //});
 
-    group.bench_function("apecs::BTreeStorage", |b| {
+    group.bench_function("apecs::apecs::storage::BTreeStorage", |b| {
         let mut bench =
-            add_remove::Benchmark::<BTreeStorage<add_remove::A>, BTreeStorage<add_remove::B>>::new(
+            add_remove::Benchmark::<apecs::storage::BTreeStorage<add_remove::A>, apecs::storage::BTreeStorage<add_remove::B>>::new(
             );
         b.iter(move || bench.run());
     });
@@ -336,19 +335,19 @@ fn bench_simple_iter(c: &mut Criterion) {
         let mut bench = legion::simple_iter::Benchmark::new();
         b.iter(move || bench.run());
     });
-    group.bench_function("apecs::VecStorage", |b| {
+    group.bench_function("apecs::apecs::storage::VecStorage", |b| {
         let mut bench = simple_iter::Benchmark::<
-                VecStorage<simple_iter::Position>,
-            VecStorage<simple_iter::Velocity>,
+                apecs::storage::VecStorage<simple_iter::Position>,
+            apecs::storage::VecStorage<simple_iter::Velocity>,
             >::new()
             .unwrap();
         b.iter(move || bench.run());
     });
 
-    group.bench_function("apecs::BTreeStorage", |b| {
+    group.bench_function("apecs::apecs::storage::BTreeStorage", |b| {
         let mut bench = simple_iter::Benchmark::<
-                BTreeStorage<simple_iter::Position>,
-            BTreeStorage<simple_iter::Velocity>,
+                apecs::storage::BTreeStorage<simple_iter::Position>,
+            apecs::storage::BTreeStorage<simple_iter::Velocity>,
             >::new()
             .unwrap();
         b.iter(move || bench.run());
@@ -381,7 +380,7 @@ fn bench_simple_iter(c: &mut Criterion) {
 fn bench_frag_iter(c: &mut Criterion) {
     let mut group = c.benchmark_group("frag_iter");
 
-    group.bench_function("apecs::VecStorage", |b| {
+    group.bench_function("apecs::apecs::storage::VecStorage", |b| {
         let mut bench = frag_iter::Benchmark::new();
         b.iter(move || bench.run())
     });
@@ -447,22 +446,22 @@ fn bench_schedule(c: &mut Criterion) {
 fn bench_heavy_compute(c: &mut Criterion) {
     let mut group = c.benchmark_group("heavy_compute");
 
-    group.bench_function("apecs::VecStorage", |b| {
+    group.bench_function("apecs::apecs::storage::VecStorage", |b| {
         let mut bench = heavy_compute::Benchmark::<
-            VecStorage<heavy_compute::Transform>,
-            VecStorage<heavy_compute::Position>,
-            VecStorage<heavy_compute::Rotation>,
-            VecStorage<heavy_compute::Velocity>,
+            apecs::storage::VecStorage<heavy_compute::Transform>,
+            apecs::storage::VecStorage<heavy_compute::Position>,
+            apecs::storage::VecStorage<heavy_compute::Rotation>,
+            apecs::storage::VecStorage<heavy_compute::Velocity>,
         >::new()
         .unwrap();
         b.iter(move || bench.run());
     });
-    group.bench_function("apecs::BTreeStorage", |b| {
+    group.bench_function("apecs::apecs::storage::BTreeStorage", |b| {
         let mut bench = heavy_compute::Benchmark::<
-            BTreeStorage<heavy_compute::Transform>,
-            BTreeStorage<heavy_compute::Position>,
-            BTreeStorage<heavy_compute::Rotation>,
-            BTreeStorage<heavy_compute::Velocity>,
+            apecs::storage::BTreeStorage<heavy_compute::Transform>,
+            apecs::storage::BTreeStorage<heavy_compute::Position>,
+            apecs::storage::BTreeStorage<heavy_compute::Rotation>,
+            apecs::storage::BTreeStorage<heavy_compute::Velocity>,
         >::new()
         .unwrap();
         b.iter(move || bench.run());
@@ -490,8 +489,115 @@ fn bench_heavy_compute(c: &mut Criterion) {
     });
 }
 
+fn bench_tracked_storage(c: &mut Criterion) {
+    use apecs::storage::*;
+
+    let mut group = c.benchmark_group("tracked_storage");
+    let size = 10_000;
+
+    group.throughput(criterion::Throughput::Elements(size as u64));
+    group.bench_with_input(BenchmarkId::new("insert", "raw"), &(), |b, ()| {
+        b.iter(|| {
+            let mut store = VecStorage::<usize>::new_with_capacity(size);
+
+            for i in 0..size {
+                let _ = store.insert(i, i);
+            }
+        });
+    });
+
+    group.throughput(criterion::Throughput::Elements(size as u64));
+    group.bench_with_input(BenchmarkId::new("insert", "tracked"), &(), |b, ()| {
+        b.iter(|| {
+            let mut store = apecs::storage::VecStorage::<usize>::new_with_capacity(10_000);
+            let mut tracker = tracking::Tracker::default();
+            let mut tracked = tracker.track(&mut store);
+
+            for i in 0..size {
+                let _ = tracked.insert(i, i);
+            }
+        });
+    });
+
+    let mut store = apecs::storage::VecStorage::<usize>::new_with_capacity(10_000);
+    for i in 0..size {
+        let _ = store.insert(i, i);
+    }
+
+    group.throughput(criterion::Throughput::Elements(size as u64));
+    group.bench_with_input(BenchmarkId::new("modify", "raw"), &(), |b, ()| {
+        b.iter(|| {
+            let mut store = store.clone();
+            for n in store.iter_mut() {
+                *n.value += 1;
+            }
+        });
+    });
+
+    group.throughput(criterion::Throughput::Elements(size as u64));
+    group.bench_with_input(BenchmarkId::new("modify", "tracked"), &(), |b, ()| {
+        b.iter(|| {
+            let mut store = store.clone();
+            let mut tracker = tracking::Tracker::default();
+            let mut tracked = tracker.track(&mut store);
+            for n in tracked.iter_mut() {
+                *n.value += 1;
+            }
+        });
+    });
+
+    group.throughput(criterion::Throughput::Elements(size as u64));
+    group.bench_with_input(BenchmarkId::new("remove", "raw"), &(), |b, ()| {
+        b.iter(|| {
+            let mut store = store.clone();
+            for i in 0..size {
+                assert!(store.remove(i).is_some(), "{} not in store", i);
+            }
+        });
+    });
+
+    group.throughput(criterion::Throughput::Elements(size as u64));
+    group.bench_with_input(BenchmarkId::new("remove", "tracked"), &(), |b, ()| {
+        b.iter(|| {
+            let mut store = store.clone();
+            let mut tracker = tracking::Tracker::default();
+            let mut tracked = tracker.track(&mut store);
+
+            for i in 0..size {
+                assert!(tracked.remove(i).is_some(), "{} not in store", i);
+            }
+        });
+    });
+
+    group.throughput(criterion::Throughput::Elements(size as u64));
+    group.bench_with_input(BenchmarkId::new("modify_par", "raw"), &(), |b, ()| {
+        b.iter(|| {
+            let mut store = store.clone();
+            (&mut store,).par_join().for_each(|n| {
+                *n += 1;
+            });
+        });
+    });
+
+    group.throughput(criterion::Throughput::Elements(size as u64));
+    group.bench_with_input(BenchmarkId::new("modify_par", "tracked"), &(), |b, ()| {
+        b.iter(|| {
+            let mut store = store.clone();
+            let mut tracker = tracking::Tracker::default();
+            let mut tracked = tracker.track(&mut store);
+
+            (&mut tracked,).par_join().for_each(|n| {
+                *n += 1;
+            });
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
+    bench_tracked_storage,
     bench_create_move_print,
     bench_heap_vs_stack,
     bench_add_remove,

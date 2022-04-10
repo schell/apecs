@@ -10,9 +10,11 @@ use crate::{
     plugins::IsPlugin,
     schedule::{Borrow, IsBorrow, IsSchedule},
     spsc,
-    system::{AsyncSchedule, AsyncSystem, AsyncSystemRequest, SyncSchedule, SyncSystem},
+    system::{AsyncSchedule, AsyncSystem, AsyncSystemRequest, SyncSchedule, SyncSystem, AsyncSystemFuture},
     CanFetch, FetchReadyResource, IsResource, Request, Resource, ResourceId,
 };
+
+pub use crate::plugins::entity_upkeep::EntityUpkeepExt;
 
 pub struct Facade {
     // Unbounded. Sending a request from the system should not yield the async
@@ -154,6 +156,32 @@ pub(crate) fn try_take_resources<'a>(
     Ok((ready_resources, stay_resources))
 }
 
+pub(crate) fn make_async_system_pack<F, Fut>(
+    world: &World,
+    name: String,
+    make_system_future: F,
+) -> (AsyncSystem, AsyncSystemFuture)
+where
+    F: FnOnce(Facade) -> Fut,
+    Fut: Future<Output = anyhow::Result<()>> + Send + Sync + 'static,
+{
+    let (resource_request_tx, resource_request_rx) = spsc::unbounded();
+    let (resources_to_system_tx, resources_to_system_rx) =
+        spsc::bounded::<FxHashMap<ResourceId, FetchReadyResource>>(1);
+    let facade = Facade {
+        resource_request_tx,
+        resources_to_system_rx,
+        resources_from_system_tx: world.resources_from_system.0.clone(),
+    };
+    let system = AsyncSystem {
+        name: name.clone(),
+        resource_request_rx,
+        resources_to_system_tx,
+    };
+    let asys = Box::pin((make_system_future)(facade));
+    (system, asys)
+}
+
 impl World {
     pub fn with_default_resource<T: Default + IsResource>(&mut self) -> anyhow::Result<&mut Self> {
         let resource: T = T::default();
@@ -192,12 +220,21 @@ impl World {
         }
 
         for system in plugin.sync_systems().into_iter() {
-            if !self.sync_schedule.contains_system(&system.name) {
-                self.sync_schedule.add_system(system);
+            if !self.sync_schedule.contains_system(&system.0.name) {
+                self.sync_schedule.add_system_with_dependecies(system.0, system.1.into_iter());
             }
         }
 
-        // TODO: Add async systems to plugins
+        'outer: for asystem in plugin.async_systems().into_iter() {
+            for asys in self.async_systems.iter() {
+                if asys.name == asystem.0 {
+                    continue 'outer;
+                }
+            }
+
+            let (sys, fut) = make_async_system_pack(&self, asystem.0, asystem.1);
+            self.add_async_system_pack(sys, fut);
+        }
         self
     }
 
@@ -206,15 +243,45 @@ impl World {
         F: FnMut(T) -> anyhow::Result<()> + Send + Sync + 'static,
         T: CanFetch,
     {
+        self.with_system_with_dependencies(name, &[], sys_fn)
+    }
+
+    pub fn with_system_with_dependencies<T, F>(&mut self, name: impl AsRef<str>, deps: &[&str], sys_fn: F) -> &mut Self
+    where
+        F: FnMut(T) -> anyhow::Result<()> + Send + Sync + 'static,
+        T: CanFetch,
+    {
         let system = SyncSystem::new(name, sys_fn);
 
-        self.sync_schedule.add_system(system);
+        self.sync_schedule.add_system_with_dependecies(system, deps.iter());
         self
     }
 
     pub fn with_sync_systems_run_in_parallel(&mut self, parallelize: bool) -> &mut Self {
         self.sync_schedule.set_should_parallelize(parallelize);
         self
+    }
+
+    pub(crate) fn add_async_system_pack(&mut self, system: AsyncSystem, fut: AsyncSystemFuture) {
+        let name = system.name.clone();
+        self.async_systems.push(system);
+
+        let future = async move {
+            match fut.await {
+                Ok(()) => {}
+                Err(err) => {
+                    let msg = err
+                        .chain()
+                        .map(|err| format!("{}", err))
+                        .collect::<Vec<_>>()
+                        .join("\n  ");
+                    tracing::error!("async system '{}' erred: {}", name, msg);
+                }
+            }
+        };
+
+        let task = self.async_system_executor.spawn(future);
+        task.detach();
     }
 
     pub fn with_async_system<F, Fut>(
@@ -226,35 +293,9 @@ impl World {
         F: FnOnce(Facade) -> Fut,
         Fut: Future<Output = anyhow::Result<()>> + Send + Sync + 'static,
     {
-        let (resource_request_tx, resource_request_rx) = spsc::unbounded();
-        let (resources_to_system_tx, resources_to_system_rx) =
-            spsc::bounded::<FxHashMap<ResourceId, FetchReadyResource>>(1);
-        let facade = Facade {
-            resource_request_tx,
-            resources_to_system_rx,
-            resources_from_system_tx: self.resources_from_system.0.clone(),
-        };
-        let name = name.as_ref().to_string();
-        let system = AsyncSystem {
-            name: name.clone(),
-            resource_request_rx,
-            resources_to_system_tx,
-        };
-        self.async_systems.push(system);
-
-        let asys = (make_system_future)(facade);
-        let future = async move {
-            match asys.await {
-                Ok(()) => {}
-                Err(err) => {
-                    let msg = err.chain().map(|err| format!("{}", err)).collect::<Vec<_>>().join("\n  ");
-                    tracing::error!("async system '{}' erred: {}", name, msg);
-                }
-            }
-        };
-
-        let task = self.async_system_executor.spawn(future);
-        task.detach();
+        let (system, fut) =
+            make_async_system_pack(&self, name.as_ref().to_string(), make_system_future);
+        self.add_async_system_pack(system, fut);
 
         self
     }
@@ -396,7 +437,7 @@ impl World {
 
 #[cfg(test)]
 mod test {
-    use crate::{self as apecs};
+    use crate as apecs;
     use apecs::{anyhow, entities::*, join::*, spsc, storage::*, system, world::*, Read, Write};
 
     #[test]

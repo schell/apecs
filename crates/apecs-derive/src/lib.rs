@@ -101,7 +101,7 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
             fn construct(
                 tx: apecs::mpsc::Sender<(apecs::ResourceId, apecs::Resource)>,
                 fields: &mut rustc_hash::FxHashMap<apecs::ResourceId, apecs::FetchReadyResource>,
-            ) -> anyhow::Result<Self> {
+            ) -> apecs::anyhow::Result<Self> {
                 Ok(#construct_return)
             }
         }
@@ -115,23 +115,23 @@ pub fn impl_canfetch_tuple(input: proc_macro::TokenStream) -> proc_macro::TokenS
     let tuple: TypeTuple = parse_macro_input!(input);
     let tys = tuple.elems.iter().collect::<Vec<_>>();
     let output = quote! {
-        impl <#(#tys:CanFetch),*> CanFetch for #tuple {
-            fn reads() -> Vec<ResourceId> {
+        impl <#(#tys:apecs::CanFetch),*> apecs::CanFetch for #tuple {
+            fn reads() -> Vec<apecs::ResourceId> {
                 let mut r = Vec::new();
-                #(r.extend(<#tys as CanFetch>::reads());)*
+                #(r.extend(<#tys as apecs::CanFetch>::reads());)*
                 r
             }
 
-            fn writes() -> Vec<ResourceId> {
+            fn writes() -> Vec<apecs::ResourceId> {
                 let mut w = Vec::new();
-                #(w.extend(<#tys as CanFetch>::writes());)*
+                #(w.extend(<#tys as apecs::CanFetch>::writes());)*
                 w
             }
 
             fn construct(
-                tx: mpsc::Sender<(ResourceId, Resource)>,
-                fields: &mut rustc_hash::FxHashMap<ResourceId, FetchReadyResource>,
-            ) -> anyhow::Result<Self> {
+                tx: apecs::mpsc::Sender<(apecs::ResourceId, apecs::Resource)>,
+                fields: &mut rustc_hash::FxHashMap<apecs::ResourceId, apecs::FetchReadyResource>,
+            ) -> apecs::anyhow::Result<Self> {
                 Ok((
                     #(#tys::construct(tx.clone(), fields)?),*
                 ))
@@ -268,7 +268,7 @@ pub fn impl_parjoin_tuple(input: proc_macro::TokenStream) -> proc_macro::TokenSt
         .zip(comps.iter())
         .map(|(iter, comp)| {
             quote! {
-                #iter: IndexedParallelIterator<Item = Option<#comp>>
+                #iter: rayon::iter::IndexedParallelIterator<Item = Option<#comp>>
             }
         })
         .collect();
@@ -283,14 +283,14 @@ pub fn impl_parjoin_tuple(input: proc_macro::TokenStream) -> proc_macro::TokenSt
         .collect();
 
     let join_for_tuple = quote! {
-        impl <#(#tys,)* #(#iters,)* #(#comps,)*> ParJoin for #tuple
+        impl <#(#tys,)* #(#iters,)* #(#comps,)*> apecs::join::ParJoin for #tuple
         where
             #(#store_constraints,)*
             #(#iter_constraints,)*
             #(#comps: Send,)*
         {
-            type Iter = FilterMap<
-                    MultiZip<(#(#iters),*)>,
+            type Iter = rayon::iter::FilterMap<
+                    rayon::iter::MultiZip<(#(#iters),*)>,
                 fn((#(Option<#comps>),*)) -> Option<(#(#comps),*)>,
             >;
 

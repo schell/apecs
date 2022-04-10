@@ -6,6 +6,7 @@ use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 use super::Entry;
 
+#[derive(Clone)]
 pub struct VecStorage<T> (Vec<Option<Entry<T>>>);
 
 impl<T> VecStorage<T> {
@@ -197,5 +198,34 @@ impl<T: Send + Sync + 'static> ParallelStorage for VecStorage<T> {
 impl<T: Send + Sync + 'static> WorldStorage for VecStorage<T> {
     fn new_with_capacity(cap: usize) -> Self {
         VecStorage::new_with_capacity(cap)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn vec_store_can_insert_and_remove() {
+        let mut store = VecStorage::<usize>::new_with_capacity(10);
+        let _ = store.insert(0, 0);
+        let _ = store.insert(1, 1);
+        let _ = store.insert(2, 2);
+
+        assert!(store.remove(0).is_some());
+        assert!(store.remove(1).is_some());
+        assert!(store.remove(2).is_some());
+        assert!(store.remove(0).is_none());
+
+        let size = 10_000;
+        let mut store = VecStorage::<usize>::new_with_capacity(size);
+        for i in 0..size {
+            let _ = store.insert(i, i);
+        }
+
+        for i in 0..size {
+            assert!(store.remove(i).is_some(), "{} not in store", i);
+        }
+
     }
 }

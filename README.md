@@ -13,14 +13,21 @@ short-lived systems.
   - like `specs`, `bevy_ecs`, `hecs`, `legion`, `shipyard`
 
 ## Features
-[x] fetch resources from the world asyncronously
-[x] async systems, ie systems that end and/or change over time (for scenes, stories, etc)
-[x] sync systems with failure
-[x] futures
-[x] system data derive macros
-[x] efficient (in space or iteration) component storages
-[x] joins / queries
-[x] parallel joins / queries (inner parallelism)
-[x] parallel system scheduling (outer parallelism)
-[x] tracked storage (components created, updated, modified)
-[x] insert plugins/bundles (groups of systems and resources)
+- fetch resources from the world asyncronously
+- async systems, ie systems that end and/or change over time (for scenes, stories, etc)
+- sync systems with failure
+- futures
+- system data derive macros
+- efficient (in space or iteration) component storages
+- joins / queries
+- parallel joins / queries (inner parallelism)
+- parallel system scheduling (outer parallelism)
+- tracked storage (components created, updated, modified)
+- insert plugins/bundles (groups of systems and resources)
+
+## Roadmap
+- [ ] schedule barriers
+      - [ ] local thread systems in schedule
+- [ ] wasm (even parallel)
+- [ ] make btree storage faster
+- [ ] archtypal storage (why should an ecs only have one or the other?)

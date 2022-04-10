@@ -4,15 +4,28 @@ use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterato
 
 use super::{CanReadStorage, CanWriteStorage, Entry, ParallelStorage};
 
+#[derive(Default)]
 pub struct Tracker {
     inserted: BitSet,
     modified: AtomicBitSet,
     removed: BitSet,
 }
 
+impl Tracker {
+    pub fn track<'a, Store>(&'a mut self, storage: &'a mut Store) -> TrackedStorage<'a, Store>
+    where
+        Store: CanWriteStorage + ParallelStorage,
+    {
+        TrackedStorage {
+            tracker: self,
+            storage,
+        }
+    }
+}
+
 pub struct TrackedStorage<'a, S> {
-    tracker: &'a mut Tracker,
-    storage: &'a mut S,
+    pub(crate) tracker: &'a mut Tracker,
+    pub(crate) storage: &'a mut S,
 }
 
 impl<'a, S: CanReadStorage> CanReadStorage for TrackedStorage<'a, S> {
@@ -35,6 +48,7 @@ impl<'a, S: CanReadStorage> CanReadStorage for TrackedStorage<'a, S> {
     }
 }
 
+// TODO: Use separate iterators for par modified and regular (atomicbitset is slower)
 pub struct TrackedStorageIter<'a, S: CanWriteStorage + 'a>(&'a AtomicBitSet, S::IterMut<'a>);
 
 impl<'a, S: CanWriteStorage> Iterator for TrackedStorageIter<'a, S> {
@@ -130,5 +144,31 @@ where
             &self.tracker.modified,
             get_mut as TrackedStorageGetMutFn<'b, S>,
         )
+    }
+}
+
+impl<'a, 'b: 'a, T: ParallelStorage + Default> IntoParallelIterator for &'a TrackedStorage<'b, T>
+    where
+    T::Component: Send + Sync
+{
+    type Iter = <TrackedStorage<'b, T> as ParallelStorage>::ParIter<'a>;
+
+    type Item = Option<&'a T::Component>;
+
+    fn into_par_iter(self) -> Self::Iter {
+        self.storage.par_iter().into_par_iter()
+    }
+}
+
+impl<'a, 'b: 'a, T: ParallelStorage + Default> IntoParallelIterator for &'a mut TrackedStorage<'b, T>
+where
+    T::Component: Send + Sync
+{
+    type Iter = <TrackedStorage<'b, T> as ParallelStorage>::ParIterMut<'a>;
+
+    type Item = Option<&'a mut T::Component>;
+
+    fn into_par_iter(self) -> Self::Iter {
+        self.par_iter_mut().into_par_iter()
     }
 }

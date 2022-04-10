@@ -58,7 +58,7 @@ impl StorageComponent for usize {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Entry<T> {
     pub(crate) key: usize,
     pub value: T,

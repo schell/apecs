@@ -185,12 +185,23 @@ pub(crate) trait IsSchedule: std::fmt::Debug {
     fn get_should_parallelize(&self) -> bool;
 
     fn add_system(&mut self, new_system: Self::System) {
+        let deps:Vec<String> = vec![];
+        self.add_system_with_dependecies(new_system, deps.into_iter())
+    }
+
+    fn add_system_with_dependecies(&mut self, new_system: Self::System, deps: impl Iterator<Item = impl AsRef<str>>) {
+        let deps = rustc_hash::FxHashSet::from_iter(deps.map(|s| s.as_ref().to_string()));
         'batch_loop: for batch in self.batches_mut() {
             for system in batch.systems() {
                 if system.conflicts_with(&new_system) {
                     // the new system conflicts with one in
                     // the current batch, break and check
                     // the next batch
+                    continue 'batch_loop;
+                }
+                if deps.contains(system.name()) {
+                    // the new system has a dependency on this system,
+                    // so it must be added to a later batch.
                     continue 'batch_loop;
                 }
             }
@@ -245,5 +256,23 @@ impl IsBorrow for Borrow {
 
     fn is_exclusive(&self) -> bool {
         self.is_exclusive
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::system::*;
+
+    #[test]
+    fn schedule_with_dependencies() {
+        let mut schedule = SyncSchedule::default();
+        schedule.add_system(SyncSystem::new("one", |()| {Ok(())}));
+        schedule.add_system_with_dependecies(SyncSystem::new("two", |()| {Ok(())}), ["one"].into_iter());
+
+        let batches = schedule.batches();
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].systems()[0].name(), "one");
+        assert_eq!(batches[1].systems()[0].name(), "two");
     }
 }
