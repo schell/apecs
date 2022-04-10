@@ -28,7 +28,7 @@ bench = false
 
 [dependencies]
 anyhow = "^1.0"
-apecs-derive = { version = "^0.1", path = "../apecs-derive" }
+apecs-derive = { version = "0.1.1", path = "../apecs-derive" }
 async-broadcast = "^0.4"
 #crossfire = "^0.1"
 hibitset = "^0.6"
