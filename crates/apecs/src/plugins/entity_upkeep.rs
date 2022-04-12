@@ -5,13 +5,13 @@
 use std::marker::PhantomData;
 
 use crate as apecs;
-use crate::plugins::SyncSystemWithDeps;
+use crate::system::{ok, ShouldContinue};
 use crate::{
-    entities::Entities, plugins::LazyResource, storage::CanWriteStorage, world::World, CanFetch,
+    entities::Entities, storage::CanWriteStorage, world::World, CanFetch,
     Read, Write,
 };
 
-use super::IsPlugin;
+use super::Plugin;
 
 pub struct DestroyedIds(Vec<usize>);
 
@@ -21,7 +21,7 @@ pub struct PreEntityUpkeepData {
     destroyed_ids: Write<DestroyedIds>,
 }
 
-fn pre_upkeep_system(mut data: PreEntityUpkeepData) -> anyhow::Result<()> {
+fn pre_upkeep_system(mut data: PreEntityUpkeepData) -> anyhow::Result<ShouldContinue> {
     let dead = data
         .entities
         .dead
@@ -30,7 +30,7 @@ fn pre_upkeep_system(mut data: PreEntityUpkeepData) -> anyhow::Result<()> {
         .collect::<Vec<_>>();
     data.destroyed_ids.0 = dead;
     data.entities.recycle_dead();
-    Ok(())
+    ok()
 }
 
 #[derive(CanFetch)]
@@ -39,39 +39,33 @@ pub struct EntityUpkeep<Storage: Send + Sync + 'static> {
     storage: Write<Storage>,
 }
 
-fn upkeep_system<Storage>(mut data: EntityUpkeep<Storage>) -> anyhow::Result<()>
+fn upkeep_system<Storage>(mut data: EntityUpkeep<Storage>) -> anyhow::Result<ShouldContinue>
 where
     Storage: CanWriteStorage + Send + Sync + 'static,
 {
     for id in data.dead_ids.0.iter() {
         let _ = data.storage.remove(*id);
     }
-    Ok(())
+    ok()
 }
 
 /// The entity upkeep plugin.
 pub struct PluginEntityUpkeep<Storage>(PhantomData<Storage>);
 
-impl<Storage: CanWriteStorage + Default + Send + Sync + 'static> IsPlugin
-    for PluginEntityUpkeep<Storage>
+impl<Storage: CanWriteStorage + Default + Send + Sync + 'static> From<PluginEntityUpkeep<Storage>>
+    for Plugin
 {
-    fn resources(&self) -> Vec<super::LazyResource> {
-        vec![
-            LazyResource::new(|| Entities::default()),
-            LazyResource::new(|| DestroyedIds(vec![])),
-            LazyResource::new(|| Storage::default()),
-        ]
-    }
-
-    fn sync_systems(&self) -> Vec<SyncSystemWithDeps> {
-        vec![
-            SyncSystemWithDeps::new("entity_pre_upkeep", pre_upkeep_system, None),
-            SyncSystemWithDeps::new(
+    fn from(_: PluginEntityUpkeep<Storage>) -> Self {
+        Plugin::default()
+            .with_resource(|| Entities::default())
+            .with_resource(|| DestroyedIds(vec![]))
+            .with_resource(|| Storage::default())
+            .with_system("entity_pre_upkeep", pre_upkeep_system, &[])
+            .with_system(
                 &format!("entity_upkeep_{}", std::any::type_name::<Storage>()),
                 upkeep_system::<Storage>,
-                None,
-            ),
-        ]
+                &["entity_pre_upkeep"],
+            )
     }
 }
 

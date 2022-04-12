@@ -7,10 +7,13 @@ use rustc_hash::FxHashMap;
 
 use crate::{
     mpsc,
-    plugins::IsPlugin,
+    plugins::Plugin,
     schedule::{Borrow, IsBorrow, IsSchedule},
     spsc,
-    system::{AsyncSchedule, AsyncSystem, AsyncSystemRequest, SyncSchedule, SyncSystem, AsyncSystemFuture},
+    system::{
+        AsyncSchedule, AsyncSystem, AsyncSystemFuture, AsyncSystemRequest, ShouldContinue,
+        SyncSchedule, SyncSystem,
+    },
     CanFetch, FetchReadyResource, IsResource, Request, Resource, ResourceId,
 };
 
@@ -211,21 +214,24 @@ impl World {
         Ok(self)
     }
 
-    pub fn with_plugin<Plugin: IsPlugin>(&mut self, plugin: Plugin) -> &mut Self {
-        for lazy_rez in plugin.resources().into_iter() {
+    pub fn with_plugin(&mut self, plugin: impl Into<Plugin>) -> &mut Self {
+        let plugin = plugin.into();
+
+        for lazy_rez in plugin.resources.into_iter() {
             if !self.resources.contains_key(lazy_rez.id()) {
                 let (id, resource) = lazy_rez.into();
                 let _ = self.resources.insert(id, resource);
             }
         }
 
-        for system in plugin.sync_systems().into_iter() {
+        for system in plugin.sync_systems.into_iter() {
             if !self.sync_schedule.contains_system(&system.0.name) {
-                self.sync_schedule.add_system_with_dependecies(system.0, system.1.into_iter());
+                self.sync_schedule
+                    .add_system_with_dependecies(system.0, system.1.into_iter());
             }
         }
 
-        'outer: for asystem in plugin.async_systems().into_iter() {
+        'outer: for asystem in plugin.async_systems.into_iter() {
             for asys in self.async_systems.iter() {
                 if asys.name == asystem.0 {
                     continue 'outer;
@@ -235,25 +241,32 @@ impl World {
             let (sys, fut) = make_async_system_pack(&self, asystem.0, asystem.1);
             self.add_async_system_pack(sys, fut);
         }
+
         self
     }
 
     pub fn with_system<T, F>(&mut self, name: impl AsRef<str>, sys_fn: F) -> &mut Self
     where
-        F: FnMut(T) -> anyhow::Result<()> + Send + Sync + 'static,
+        F: FnMut(T) -> anyhow::Result<ShouldContinue> + Send + Sync + 'static,
         T: CanFetch,
     {
         self.with_system_with_dependencies(name, &[], sys_fn)
     }
 
-    pub fn with_system_with_dependencies<T, F>(&mut self, name: impl AsRef<str>, deps: &[&str], sys_fn: F) -> &mut Self
+    pub fn with_system_with_dependencies<T, F>(
+        &mut self,
+        name: impl AsRef<str>,
+        deps: &[&str],
+        sys_fn: F,
+    ) -> &mut Self
     where
-        F: FnMut(T) -> anyhow::Result<()> + Send + Sync + 'static,
+        F: FnMut(T) -> anyhow::Result<ShouldContinue> + Send + Sync + 'static,
         T: CanFetch,
     {
         let system = SyncSystem::new(name, sys_fn);
 
-        self.sync_schedule.add_system_with_dependecies(system, deps.iter());
+        self.sync_schedule
+            .add_system_with_dependecies(system, deps.iter());
         self
     }
 
@@ -438,7 +451,7 @@ impl World {
 #[cfg(test)]
 mod test {
     use crate as apecs;
-    use apecs::{anyhow, entities::*, join::*, spsc, storage::*, system, world::*, Read, Write};
+    use apecs::{anyhow, entities::*, join::*, spsc, storage::*, system::*, world::*, Read, Write};
 
     #[test]
     fn can_closure_system() -> anyhow::Result<()> {
@@ -449,7 +462,7 @@ mod test {
 
         fn mk_stateful_system(
             tx: spsc::Sender<(f32, f32)>,
-        ) -> impl FnMut(StatefulSystemData) -> anyhow::Result<()> {
+        ) -> impl FnMut(StatefulSystemData) -> anyhow::Result<ShouldContinue> {
             let mut highest_pos: (f32, f32) = (0.0, f32::NEG_INFINITY);
 
             move |data: StatefulSystemData| {
@@ -461,7 +474,7 @@ mod test {
 
                 tx.try_send(highest_pos)?;
 
-                Ok(())
+                ok()
             }
         }
 
@@ -510,14 +523,14 @@ mod test {
                 Read<VecStorage<u32>>,
                 Write<FxHashMap<String, u32>>,
             ),
-        ) -> anyhow::Result<()> {
+        ) -> anyhow::Result<ShouldContinue> {
             for (_, name, number) in (&data.0, &data.1).join() {
                 if !data.2.contains_key(name) {
                     let _ = data.2.insert(name.to_string(), *number);
                 }
             }
 
-            Ok(())
+            ok()
         }
 
         let subscriber = tracing_subscriber::FmtSubscriber::builder()
@@ -533,7 +546,7 @@ mod test {
             .with_default_resource::<VecStorage<String>>()?
             .with_default_resource::<VecStorage<u32>>()?
             .with_default_resource::<FxHashMap<String, u32>>()?
-            .with_async_system("create", system::make_stateful_async_system(tx, create))
+            .with_async_system("create", |facade| async move { create(tx, facade).await })
             .with_system("maintain", maintain_map);
 
         // create system runs - sending on the channel and making the fetch request

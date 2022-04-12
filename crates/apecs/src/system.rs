@@ -38,11 +38,32 @@ pub struct AsyncSystem {
     pub resources_to_system_tx: spsc::Sender<FxHashMap<ResourceId, FetchReadyResource>>,
 }
 
+/// Whether or not a system should continue execution.
+pub enum ShouldContinue {
+    Yes,
+    No
+}
+
+/// Everything is ok, the system should continue.
+pub fn ok() -> anyhow::Result<ShouldContinue> {
+    Ok(ShouldContinue::Yes)
+}
+
+/// Everything is ok, the system should not be run again.
+pub fn end() -> anyhow::Result<ShouldContinue> {
+    Ok(ShouldContinue::No)
+}
+
+/// An error occured.
+pub fn err(err: anyhow::Error) -> anyhow::Result<ShouldContinue> {
+    Err(err)
+}
+
 pub type SystemFunction = Box<
     dyn FnMut(
             mpsc::Sender<(ResourceId, Resource)>,
             FxHashMap<ResourceId, FetchReadyResource>,
-        ) -> anyhow::Result<()>
+        ) -> anyhow::Result<ShouldContinue>
         + Send
         + Sync
         + 'static,
@@ -79,7 +100,7 @@ impl IsSystem for SyncSystem {
         &mut self,
         tx: mpsc::Sender<(ResourceId, Resource)>,
         resources: FxHashMap<ResourceId, FetchReadyResource>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<ShouldContinue> {
         (self.function)(tx, resources)
     }
 }
@@ -87,7 +108,7 @@ impl IsSystem for SyncSystem {
 impl SyncSystem {
     pub fn new<T, F>(name: impl AsRef<str>, mut sys_fn: F) -> Self
     where
-        F: FnMut(T) -> anyhow::Result<()> + Send + Sync + 'static,
+        F: FnMut(T) -> anyhow::Result<ShouldContinue> + Send + Sync + 'static,
         T: CanFetch,
     {
         SyncSystem {
@@ -126,6 +147,10 @@ impl IsBatch for SyncBatch {
         &mut self.0
     }
 
+    fn trim_systems(&mut self, should_remove: rustc_hash::FxHashSet<&str>) {
+        self.0.retain(|sys| !should_remove.contains(sys.name()))
+    }
+
     fn add_system(&mut self, system: Self::System) {
         self.0.push(system);
     }
@@ -136,6 +161,14 @@ impl IsBatch for SyncBatch {
 
     fn set_barrier(&mut self, barrier: usize) {
         self.1 = barrier;
+    }
+
+    fn take_systems(&mut self) -> Vec<Self::System> {
+        std::mem::replace(&mut self.0, vec![])
+    }
+
+    fn set_systems(&mut self, systems: Vec<Self::System>) {
+        self.0 = systems;
     }
 }
 
@@ -198,14 +231,15 @@ impl<'a> IsSystem for AsyncSystemRequest<'a> {
         &mut self,
         _: mpsc::Sender<(ResourceId, Resource)>,
         resources: FxHashMap<ResourceId, FetchReadyResource>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<ShouldContinue> {
         self.0
             .resources_to_system_tx
             .try_send(resources)
             .context(format!(
                 "could not send resources to async system '{}'",
                 self.0.name
-            ))
+            ))?;
+        ok()
     }
 }
 
@@ -216,6 +250,7 @@ impl<'a> IsBatch for AsyncBatch<'a> {
     type System = AsyncSystemRequest<'a>;
     type ExtraRunData = &'a smol::Executor<'static>;
 
+
     fn systems(&self) -> &[Self::System] {
         self.0.as_slice()
     }
@@ -224,8 +259,26 @@ impl<'a> IsBatch for AsyncBatch<'a> {
         self.0.as_mut_slice()
     }
 
+    fn trim_systems(&mut self, should_remove: rustc_hash::FxHashSet<&str>) {
+        self.0.retain(|s| !should_remove.contains(s.name()));
+    }
+
     fn add_system(&mut self, system: Self::System) {
         self.0.push(system);
+    }
+
+    fn get_barrier(&self) -> usize {
+        0
+    }
+
+    fn set_barrier(&mut self, _: usize) {}
+
+    fn take_systems(&mut self) -> Vec<Self::System> {
+        std::mem::replace(&mut self.0, vec![])
+    }
+
+    fn set_systems(&mut self, systems: Vec<Self::System>) {
+        self.0 = systems;
     }
 
     fn run(
@@ -238,27 +291,31 @@ impl<'a> IsBatch for AsyncBatch<'a> {
             mpsc::Receiver<(ResourceId, Resource)>,
         ),
     ) -> anyhow::Result<()> {
-        // send the resources off, if need be
-        self.systems()
-            .iter()
-            .zip(data.resources.into_iter())
-            .try_for_each(|(system, data)| -> anyhow::Result<()> {
-                // sometimes a system doesn't request resources every frame
-                if !data.is_empty() {
-                    system
-                        .0
-                        .resources_to_system_tx
-                        .try_send(data)
-                        .with_context(|| {
-                            format!(
-                                "could not send resources to async system '{}'",
-                                system.name()
-                            )
-                        })?;
-                }
+        let mut systems = self.take_systems();
+        systems.retain(|system| {
+            let data = data.resources.pop_front().unwrap();
+            if system.0.resource_request_rx.is_closed() {
+                return false;
+            }
+            // sometimes a system doesn't request resources every frame
+            if !data.is_empty() {
+                // send the resources off, if need be
+                system
+                    .0
+                    .resources_to_system_tx
+                    .try_send(data)
+                    .with_context(|| {
+                        format!(
+                            "could not send resources to async system '{}'",
+                            system.name()
+                        )
+                    })
+                    .unwrap();
+            }
+            true
+        });
 
-                Ok(())
-            })?;
+        self.set_systems(systems);
 
         // tick the executor
         while data.extra.try_tick() {}
@@ -277,12 +334,6 @@ impl<'a> IsBatch for AsyncBatch<'a> {
 
         Ok(())
     }
-
-    fn get_barrier(&self) -> usize {
-        0
-    }
-
-    fn set_barrier(&mut self, _: usize) {}
 }
 
 #[derive(Debug, Default)]

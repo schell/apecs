@@ -1,11 +1,11 @@
 //! System scheduling for outer parallelism.
 //!
 //! This module contains trait definitions. Implementations can be found in other modeluse.
-use rayon::prelude::*;
-use rustc_hash::FxHashMap;
-use std::{iter::FlatMap, slice::Iter, sync::Arc};
+use rayon::{iter::Either, prelude::*};
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::{collections::VecDeque, iter::FlatMap, slice::Iter, sync::Arc};
 
-use crate::{mpsc, world, FetchReadyResource, Resource, ResourceId};
+use crate::{mpsc, system::ShouldContinue, world, FetchReadyResource, Resource, ResourceId};
 
 pub(crate) trait IsBorrow: std::fmt::Debug {
     fn rez_id(&self) -> ResourceId;
@@ -39,12 +39,12 @@ pub(crate) trait IsSystem: std::fmt::Debug {
         &mut self,
         resource_return: mpsc::Sender<(ResourceId, Resource)>,
         resources: FxHashMap<ResourceId, FetchReadyResource>,
-    ) -> anyhow::Result<()>;
+    ) -> anyhow::Result<ShouldContinue>;
 }
 
 #[derive(Debug)]
 pub(crate) struct BatchData<T> {
-    pub resources: Vec<FxHashMap<ResourceId, FetchReadyResource>>,
+    pub resources: VecDeque<FxHashMap<ResourceId, FetchReadyResource>>,
     pub loaned_resources: FxHashMap<ResourceId, Arc<Resource>>,
     pub extra: T,
 }
@@ -78,6 +78,8 @@ pub(crate) trait IsBatch: std::fmt::Debug + Default {
 
     fn systems_mut(&mut self) -> &mut [Self::System];
 
+    fn trim_systems(&mut self, should_remove: FxHashSet<&str>);
+
     /// All borrows of all systems in this batch
     fn borrows(
         &self,
@@ -108,14 +110,19 @@ pub(crate) trait IsBatch: std::fmt::Debug + Default {
         for system in self.systems() {
             let (ready_resources, loaned_resources) =
                 world::try_take_resources(resources, system.borrows().iter(), Some(system.name()))?;
-            data.resources.push(ready_resources);
+            data.resources.push_back(ready_resources);
             data.loaned_resources.extend(loaned_resources);
         }
 
         Ok(data)
     }
 
+    fn take_systems(&mut self) -> Vec<Self::System>;
+
+    fn set_systems(&mut self, systems: Vec<Self::System>);
+
     /// Run the batch in parallel and then unify the resources to make the world "whole".
+    /// Return the names of the systems that should be trimmed.
     fn run(
         &mut self,
         parallelize: bool,
@@ -126,21 +133,45 @@ pub(crate) trait IsBatch: std::fmt::Debug + Default {
             mpsc::Receiver<(ResourceId, Resource)>,
         ),
     ) -> anyhow::Result<()> {
-        if parallelize {
-            self.systems_mut()
-                .par_iter_mut()
+        let (remaining_systems, errs): (Vec<_>, Vec<_>) = if parallelize {
+            self.take_systems()
+                .into_par_iter()
                 .zip(data.resources.into_par_iter())
-                .try_for_each(|(system, data)| -> anyhow::Result<()> {
-                    system.run(resources_from_system.0.clone(), data)
-                })?;
+                .filter_map(|(mut system, data)| {
+                    match system.run(resources_from_system.0.clone(), data) {
+                        Ok(ShouldContinue::Yes) => Some(Either::Left(system)),
+                        Ok(ShouldContinue::No) => None,
+                        Err(err) => Some(Either::Right(err)),
+                    }
+                })
+                .partition_map(|e| e)
         } else {
-            self.systems_mut()
-                .iter_mut()
+            let mut remaining_systems = vec![];
+            let mut errs = vec![];
+            self.take_systems()
+                .into_iter()
                 .zip(data.resources.into_iter())
-                .try_for_each(|(system, data)| -> anyhow::Result<()> {
-                    system.run(resources_from_system.0.clone(), data)
-                })?;
-        }
+                .for_each(|(mut system, data)| {
+                    match system.run(resources_from_system.0.clone(), data) {
+                        Ok(ShouldContinue::Yes) => {
+                            remaining_systems.push(system);
+                        }
+                        Ok(ShouldContinue::No) => {}
+                        Err(err) => {
+                            errs.push(err);
+                        }
+                    }
+                });
+            (remaining_systems, errs)
+        };
+
+        self.set_systems(remaining_systems);
+
+        errs.into_iter()
+            .fold(Ok(()), |may_err, err| match may_err {
+                Ok(()) => Err(err),
+                Err(prev) => Err(prev.context(format!("and {}", err))),
+            })?;
 
         world::clear_returned_resources(
             Some("batch"),
@@ -191,11 +222,15 @@ pub(crate) trait IsSchedule: std::fmt::Debug {
     fn get_should_parallelize(&self) -> bool;
 
     fn add_system(&mut self, new_system: Self::System) {
-        let deps:Vec<String> = vec![];
+        let deps: Vec<String> = vec![];
         self.add_system_with_dependecies(new_system, deps.into_iter())
     }
 
-    fn add_system_with_dependecies(&mut self, new_system: Self::System, deps: impl Iterator<Item = impl AsRef<str>>) {
+    fn add_system_with_dependecies(
+        &mut self,
+        new_system: Self::System,
+        deps: impl Iterator<Item = impl AsRef<str>>,
+    ) {
         let deps = rustc_hash::FxHashSet::from_iter(deps.map(|s| s.as_ref().to_string()));
         let current_barrier = self.current_barrier();
         'batch_loop: for batch in self.batches_mut() {
@@ -285,8 +320,9 @@ mod test {
     #[test]
     fn schedule_with_dependencies() {
         let mut schedule = SyncSchedule::default();
-        schedule.add_system(SyncSystem::new("one", |()| {Ok(())}));
-        schedule.add_system_with_dependecies(SyncSystem::new("two", |()| {Ok(())}), ["one"].into_iter());
+        schedule.add_system(SyncSystem::new("one", |()| ok()));
+        schedule
+            .add_system_with_dependecies(SyncSystem::new("two", |()| ok()), ["one"].into_iter());
 
         let batches = schedule.batches();
         assert_eq!(batches.len(), 2);
@@ -294,16 +330,15 @@ mod test {
         assert_eq!(batches[1].systems()[0].name(), "two");
     }
 
-
     #[test]
     fn schedule_with_barrier() {
         let mut schedule = SyncSchedule::default();
-        schedule.add_system(SyncSystem::new("one", |()| {Ok(())}));
+        schedule.add_system(SyncSystem::new("one", |()| ok()));
         schedule.add_barrier();
-        schedule.add_system(SyncSystem::new("two", |()| {Ok(())}));
-        schedule.add_system(SyncSystem::new("three", |()| {Ok(())}));
+        schedule.add_system(SyncSystem::new("two", |()| ok()));
+        schedule.add_system(SyncSystem::new("three", |()| ok()));
         schedule.add_barrier();
-        schedule.add_system(SyncSystem::new("four", |()| {Ok(())}));
+        schedule.add_system(SyncSystem::new("four", |()| ok()));
 
         let batches = schedule.batches();
         assert_eq!(batches.len(), 3);
@@ -311,5 +346,30 @@ mod test {
         assert_eq!(batches[1].systems()[0].name(), "two");
         assert_eq!(batches[1].systems()[1].name(), "three");
         assert_eq!(batches[2].systems()[0].name(), "four");
+    }
+
+    #[test]
+    fn schedule_with_ephemeral() {
+        let mut schedule = SyncSchedule::default();
+        schedule.add_system(SyncSystem::new("one", |()| end()));
+        schedule.add_system(SyncSystem::new("two", |()| ok()));
+        schedule.add_system(SyncSystem::new("three", |()| ok()));
+
+        let batches = schedule.batches();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].systems().len(), 3);
+        assert_eq!(batches[0].systems()[0].name(), "one");
+        assert_eq!(batches[0].systems()[1].name(), "two");
+        assert_eq!(batches[0].systems()[2].name(), "three");
+
+        let mut resources = FxHashMap::default();
+        let chan = mpsc::unbounded();
+        schedule.run((), &mut resources, &chan).unwrap();
+
+        let batches = schedule.batches();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].systems().len(), 2);
+        assert_eq!(batches[0].systems()[0].name(), "two");
+        assert_eq!(batches[0].systems()[1].name(), "three");
     }
 }

@@ -1,7 +1,10 @@
 //! Plugins are collections of complimentary systems and resources.
+use std::future::Future;
+
 use crate::{
-    system::{SyncSystem, AsyncSystemFuture},
-    IsResource, Resource, ResourceId, world::Facade, CanFetch,
+    system::{AsyncSystemFuture, ShouldContinue, SyncSystem},
+    world::Facade,
+    CanFetch, IsResource, Resource, ResourceId,
 };
 
 pub mod entity_upkeep;
@@ -27,9 +30,9 @@ impl From<LazyResource> for (ResourceId, Resource) {
 pub struct SyncSystemWithDeps(pub SyncSystem, pub Vec<String>);
 
 impl SyncSystemWithDeps {
-    pub fn new<T, F>(name: &str, f:F, deps: Option<&[&str]>) -> Self
-        where
-        F: FnMut(T) -> anyhow::Result<()> + Send + Sync + 'static,
+    pub fn new<T, F>(name: &str, system: F, deps: Option<&[&str]>) -> Self
+    where
+        F: FnMut(T) -> anyhow::Result<ShouldContinue> + Send + Sync + 'static,
         T: CanFetch,
     {
         let mut vs = vec![];
@@ -38,53 +41,68 @@ impl SyncSystemWithDeps {
                 vs.push(name.to_string());
             }
         }
-        SyncSystemWithDeps(SyncSystem::new(name, f), vs)
+        SyncSystemWithDeps(SyncSystem::new(name, system), vs)
     }
 }
 
 pub struct LazyAsyncSystem(pub String, pub Box<dyn FnOnce(Facade) -> AsyncSystemFuture>);
 
-pub trait IsPlugin {
-    /// Provide the resources required by this plugin
-    fn resources(&self) -> Vec<LazyResource> {
-        vec![]
-    }
-
-    /// Provide the sync systems and their dependencies required by this plugin
-    fn sync_systems(&self) -> Vec<SyncSystemWithDeps> {
-        vec![]
-    }
-
-    /// Provide the async systems required by this plugin
-    fn async_systems(&self) -> Vec<LazyAsyncSystem> {
-        vec![]
+impl<A, B> From<(A, B)> for Plugin
+where
+    A: Into<Plugin>,
+    B: Into<Plugin>,
+{
+    fn from((a, b): (A, B)) -> Self {
+        a.into().with_plugin(b.into())
     }
 }
 
-impl<A, B> IsPlugin for (A, B)
-where
-    A: IsPlugin,
-    B: IsPlugin,
-{
-    fn resources(&self) -> Vec<LazyResource> {
-        let mut r = vec![];
-        r.extend(self.0.resources());
-        r.extend(self.1.resources());
-        r
+#[derive(Default)]
+pub struct Plugin {
+    pub resources: Vec<LazyResource>,
+    pub sync_systems: Vec<SyncSystemWithDeps>,
+    pub async_systems: Vec<LazyAsyncSystem>,
+}
+
+impl Plugin {
+    pub fn with_plugin(mut self, plug: impl Into<Plugin>) -> Self {
+        let plug = plug.into();
+        self.resources.extend(plug.resources);
+        self.sync_systems.extend(plug.sync_systems);
+        self.async_systems.extend(plug.async_systems);
+        self
     }
 
-    fn sync_systems(&self) -> Vec<SyncSystemWithDeps> {
-        let mut r = vec![];
-        r.extend(self.0.sync_systems());
-        r.extend(self.1.sync_systems());
-        r
+    pub fn with_resource<T: IsResource>(mut self, mk_rez: impl FnOnce() -> T + 'static) -> Self {
+        self.resources.push(LazyResource::new(mk_rez));
+        self
     }
 
-    fn async_systems(&self) -> Vec<LazyAsyncSystem> {
-        let mut r = vec![];
-        r.extend(self.0.async_systems());
-        r.extend(self.1.async_systems());
-        r
+    pub fn with_system<T: CanFetch>(
+        mut self,
+        name: &str,
+        system: impl FnMut(T) -> anyhow::Result<ShouldContinue> + Send + Sync + 'static,
+        deps: &[&str],
+    ) -> Self {
+        let deps = if deps.is_empty() { None } else { Some(deps) };
+        self.sync_systems
+            .push(SyncSystemWithDeps::new(name, system, deps));
+        self
+    }
+
+    pub fn with_async_system<Fut>(
+        mut self,
+        name: &str,
+        system: impl FnOnce(Facade) -> Fut + 'static,
+    ) -> Self
+    where
+        Fut: Future<Output = anyhow::Result<()>> + Send + Sync + 'static,
+    {
+        self.async_systems.push(LazyAsyncSystem(
+            name.to_string(),
+            Box::new(move |facade| Box::pin(system(facade))),
+        ));
+        self
     }
 }
 
@@ -96,7 +114,7 @@ mod test {
 
     #[test]
     fn sanity() {
-        use apecs::{storage::VecStorage, Write, join::Join, world::World, CanFetch};
+        use apecs::{join::Join, storage::VecStorage, system::*, world::World, CanFetch, Write};
         struct MyPlugin;
 
         #[derive(CanFetch)]
@@ -105,24 +123,20 @@ mod test {
             numbers: Write<VecStorage<usize>>,
         }
 
-        fn my_system(mut data: MyData) -> anyhow::Result<()> {
+        fn my_system(mut data: MyData) -> anyhow::Result<ShouldContinue> {
             for (_, _, n) in (&data.strings, &mut data.numbers).join() {
                 *n += 1;
             }
 
-            Ok(())
+            ok()
         }
 
-        impl IsPlugin for MyPlugin {
-            fn resources(&self) -> Vec<LazyResource> {
-                vec![
-                    LazyResource::new(|| VecStorage::<&'static str>::default()),
-                    LazyResource::new(|| VecStorage::<usize>::default()),
-                ]
-            }
-
-            fn sync_systems(&self) -> Vec<SyncSystemWithDeps> {
-                vec![SyncSystemWithDeps::new("my_system", my_system, None)]
+        impl From<MyPlugin> for Plugin {
+            fn from(_: MyPlugin) -> Plugin {
+                Plugin::default()
+                    .with_resource(|| VecStorage::<&'static str>::default())
+                    .with_resource(|| VecStorage::<usize>::default())
+                    .with_system("my_system", my_system, &[])
             }
         }
 

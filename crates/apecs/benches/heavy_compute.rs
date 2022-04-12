@@ -1,6 +1,6 @@
 use std::marker::PhantomData;
 
-use apecs::{anyhow, entities::*, join::*, storage::*, world::*, CanFetch, IsResource, Write};
+use apecs::{anyhow, entities::*, join::*, storage::*, world::*, system::*, CanFetch, IsResource, Write};
 use cgmath::*;
 
 #[derive(Copy, Clone)]
@@ -21,7 +21,7 @@ struct HeavyComputeData<P: IsResource, T: IsResource> {
     transforms: Write<T>,
 }
 
-fn system<P, T>(mut data: HeavyComputeData<P, T>) -> anyhow::Result<()>
+fn system<P, T>(mut data: HeavyComputeData<P, T>) -> anyhow::Result<ShouldContinue>
 where
     P: WorldStorage<Component = Position>,
     T: WorldStorage<Component = Transform>,
@@ -35,7 +35,7 @@ where
             }
             pos.0 = mat.0.transform_vector(pos.0);
         });
-    Ok(())
+    ok()
 }
 
 pub struct Benchmark<T, P, R, V>

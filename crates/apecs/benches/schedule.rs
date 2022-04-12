@@ -1,4 +1,4 @@
-use apecs::{anyhow, entities::*, join::*, storage::*, world::*, CanFetch, Write};
+use apecs::{anyhow, entities::*, join::*, storage::*, world::*, system::*, CanFetch, Write};
 
 struct A(f32);
 struct B(f32);
@@ -12,12 +12,12 @@ struct ABSystemData {
     b_store: Write<VecStorage<B>>,
 }
 
-fn ab_system(mut data: ABSystemData) -> anyhow::Result<()> {
+fn ab_system(mut data: ABSystemData) -> anyhow::Result<ShouldContinue> {
     for (_, a, b) in (&mut data.a_store, &mut data.b_store).join() {
         std::mem::swap(&mut a.0, &mut b.0);
     }
 
-    Ok(())
+    ok()
 }
 
 #[derive(CanFetch)]
@@ -26,12 +26,12 @@ struct CDSystemData {
     d_store: Write<VecStorage<D>>,
 }
 
-fn cd_system(mut data: CDSystemData) -> anyhow::Result<()> {
+fn cd_system(mut data: CDSystemData) -> anyhow::Result<ShouldContinue> {
     for (_, c, d) in (&mut data.c_store, &mut data.d_store).join() {
         std::mem::swap(&mut c.0, &mut d.0);
     }
 
-    Ok(())
+    ok()
 }
 
 #[derive(CanFetch)]
@@ -40,12 +40,12 @@ struct CESystemData {
     e_store: Write<VecStorage<E>>,
 }
 
-fn ce_system(mut data: CESystemData) -> anyhow::Result<()> {
+fn ce_system(mut data: CESystemData) -> anyhow::Result<ShouldContinue> {
     for (_, c, e) in (&mut data.c_store, &mut data.e_store).join() {
         std::mem::swap(&mut c.0, &mut e.0);
     }
 
-    Ok(())
+    ok()
 }
 
 pub struct Benchmark(World);

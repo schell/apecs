@@ -3,6 +3,7 @@ use apecs::{
     entities::*,
     join::*,
     storage::*,
+    system::*,
     world::{Facade, World},
     CanFetch, Read, Write,
 };
@@ -51,13 +52,14 @@ async fn async_create_n_system(mut facade: Facade, n: usize) -> anyhow::Result<(
     create(n, &mut entities, &mut positions, &mut velocities)
 }
 
-fn sync_create_n_system(mut data: CreateSystemData, n: usize) -> anyhow::Result<()> {
+fn sync_create_n_system(mut data: CreateSystemData, n: usize) -> anyhow::Result<ShouldContinue> {
     create(
         n,
         &mut data.entities,
         &mut data.positions,
         &mut data.velocities,
-    )
+    )?;
+    ok()
 }
 
 #[derive(CanFetch)]
@@ -95,9 +97,9 @@ async fn async_move_system(mut facade: Facade) -> anyhow::Result<()> {
     }
 }
 
-fn sync_move_system(mut data: MoveSystemData) -> anyhow::Result<()> {
+fn sync_move_system(mut data: MoveSystemData) -> anyhow::Result<ShouldContinue> {
     move_system(&mut data.positions, &mut data.velocities, &mut data.ticks);
-    Ok(())
+    ok()
 }
 
 fn print_system(positions: &impl CanReadStorage<Component = Position>) -> anyhow::Result<()> {
@@ -115,8 +117,9 @@ fn print_system(positions: &impl CanReadStorage<Component = Position>) -> anyhow
     Ok(())
 }
 
-fn sync_print_system(positions: Read<VecStorage<Position>>) -> anyhow::Result<()> {
-    print_system(&positions)
+fn sync_print_system(positions: Read<VecStorage<Position>>) -> anyhow::Result<ShouldContinue> {
+    print_system(&positions)?;
+    ok()
 }
 
 async fn async_print_system(mut facade: Facade) -> anyhow::Result<()> {

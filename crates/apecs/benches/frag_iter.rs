@@ -1,4 +1,4 @@
-use apecs::{entities::*, join::*, storage::*, world::*, Write, anyhow};
+use apecs::{entities::*, join::*, storage::*, world::*, Write, anyhow, system::*};
 
 pub type Storage<T> = VecStorage<T>;
 
@@ -20,12 +20,12 @@ macro_rules! create_entities {
 
 struct Data(f32);
 
-fn run(mut data_storage: Write<Storage<Data>>) -> anyhow::Result<()> {
+fn run(mut data_storage: Write<Storage<Data>>) -> anyhow::Result<ShouldContinue> {
     for (_, data) in (&mut data_storage,).join() {
         data.0 *= 2.0;
     }
 
-    Ok(())
+    ok()
 }
 
 pub struct Benchmark(World);

@@ -494,7 +494,15 @@ pub trait WorldStorage:
 
 #[cfg(test)]
 pub mod test {
-    use crate::{self as apecs, entities::*, join::*, storage::*, world::World, CanFetch};
+    use crate::{
+        self as apecs,
+        entities::*,
+        join::*,
+        storage::*,
+        system::{ok, ShouldContinue},
+        world::World,
+        CanFetch,
+    };
 
     pub fn make_abc_vecstorage() -> VecStorage<String> {
         let mut vs = VecStorage::default();
@@ -556,7 +564,7 @@ pub mod test {
             b: Write<B>,
         }
 
-        fn system<A, B, const IS_PAR: bool>(mut data: Data<A, B>) -> anyhow::Result<()>
+        fn system<A, B, const IS_PAR: bool>(mut data: Data<A, B>) -> anyhow::Result<ShouldContinue>
         where
             A: WorldStorage<Component = f32>,
             B: WorldStorage<Component = &'static str>,
@@ -573,7 +581,7 @@ pub mod test {
                 }
             }
 
-            Ok(())
+            ok()
         }
 
         fn run<A, B, const IS_PAR: bool>() -> anyhow::Result<()>

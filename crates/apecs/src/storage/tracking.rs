@@ -1,20 +1,23 @@
 //! Provides tracking of insert, remove and modify storage operations.
+use std::marker::PhantomData;
+
 use hibitset::{AtomicBitSet, BitSet};
 use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 
 use super::{CanReadStorage, CanWriteStorage, Entry, ParallelStorage};
 
 #[derive(Default)]
-pub struct Tracker {
+pub struct Tracker<T> {
     inserted: BitSet,
     modified: AtomicBitSet,
     removed: BitSet,
+    _component: PhantomData<T>,
 }
 
-impl Tracker {
+impl<T> Tracker<T> {
     pub fn track<'a, Store>(&'a mut self, storage: &'a mut Store) -> TrackedStorage<'a, Store>
     where
-        Store: CanWriteStorage + ParallelStorage,
+        Store: CanWriteStorage<Component = T> + ParallelStorage,
     {
         TrackedStorage {
             tracker: self,
@@ -23,8 +26,8 @@ impl Tracker {
     }
 }
 
-pub struct TrackedStorage<'a, S> {
-    pub(crate) tracker: &'a mut Tracker,
+pub struct TrackedStorage<'a, S: CanReadStorage> {
+    pub(crate) tracker: &'a mut Tracker<S::Component>,
     pub(crate) storage: &'a mut S,
 }
 
