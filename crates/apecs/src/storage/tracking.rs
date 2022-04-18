@@ -1,4 +1,8 @@
 //! Provides tracking of insert, remove and modify storage operations.
+//!
+//! TODO
+//! - [ ] try generation-counter changed detection instead of bitmasks:
+//!       https://github.com/bevyengine/bevy/pull/1471
 use std::marker::PhantomData;
 
 use hibitset::{AtomicBitSet, BitSet};

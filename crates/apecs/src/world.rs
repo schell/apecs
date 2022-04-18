@@ -17,8 +17,6 @@ use crate::{
     CanFetch, FetchReadyResource, IsResource, Request, Resource, ResourceId,
 };
 
-pub use crate::plugins::entity_upkeep::EntityUpkeepExt;
-
 pub struct Facade {
     // Unbounded. Sending a request from the system should not yield the async
     pub(crate) resource_request_tx: spsc::Sender<Request>,

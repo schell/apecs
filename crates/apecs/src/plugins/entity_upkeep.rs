@@ -5,11 +5,9 @@
 use std::marker::PhantomData;
 
 use crate as apecs;
+use crate::storage::WorldStorage;
 use crate::system::{ok, ShouldContinue};
-use crate::{
-    entities::Entities, storage::CanWriteStorage, world::World, CanFetch,
-    Read, Write,
-};
+use crate::{entities::Entities, CanFetch, Read, Write};
 
 use super::Plugin;
 
@@ -41,20 +39,16 @@ pub struct EntityUpkeep<Storage: Send + Sync + 'static> {
 
 fn upkeep_system<Storage>(mut data: EntityUpkeep<Storage>) -> anyhow::Result<ShouldContinue>
 where
-    Storage: CanWriteStorage + Send + Sync + 'static,
+    Storage: WorldStorage,
 {
-    for id in data.dead_ids.0.iter() {
-        let _ = data.storage.remove(*id);
-    }
+    data.storage.upkeep(&data.dead_ids.0);
     ok()
 }
 
 /// The entity upkeep plugin.
-pub struct PluginEntityUpkeep<Storage>(PhantomData<Storage>);
+pub struct PluginEntityUpkeep<Storage>(pub(crate) PhantomData<Storage>);
 
-impl<Storage: CanWriteStorage + Default + Send + Sync + 'static> From<PluginEntityUpkeep<Storage>>
-    for Plugin
-{
+impl<Storage: WorldStorage> From<PluginEntityUpkeep<Storage>> for Plugin {
     fn from(_: PluginEntityUpkeep<Storage>) -> Self {
         Plugin::default()
             .with_resource(|| Entities::default())
@@ -69,47 +63,21 @@ impl<Storage: CanWriteStorage + Default + Send + Sync + 'static> From<PluginEnti
     }
 }
 
-pub trait EntityUpkeepExt {
-    fn with_storage<T>(&mut self, storage: T) -> anyhow::Result<&mut Self>
-    where
-        T: CanWriteStorage + Default + Send + Sync + 'static;
-
-    fn with_default_storage<T>(&mut self) -> &mut Self
-    where
-        T: CanWriteStorage + Default + Send + Sync + 'static;
-}
-
-impl EntityUpkeepExt for World {
-    fn with_storage<T>(&mut self, storage: T) -> anyhow::Result<&mut Self>
-    where
-        T: CanWriteStorage + Default + Send + Sync + 'static,
-    {
-        Ok(self
-            .with_resource(storage)?
-            .with_plugin(PluginEntityUpkeep::<T>(PhantomData)))
-    }
-
-    fn with_default_storage<T>(&mut self) -> &mut Self
-    where
-        T: CanWriteStorage + Default + Send + Sync + 'static,
-    {
-        self.with_plugin(PluginEntityUpkeep::<T>(PhantomData))
-    }
-}
-
 #[cfg(test)]
 mod test {
     use crate::{entities::Entities, storage::*, world::World, Write};
 
-    use super::EntityUpkeepExt;
-
     #[test]
     fn can_run_storage_upkeep() {
+        impl StoredComponent for usize {
+            type StorageType = VecStorage<Self>;
+        }
+
         let mut world = World::default();
-        world.with_default_storage::<VecStorage<usize>>();
+        world.with_default_storage::<usize>().unwrap();
 
         let c = {
-            let (mut entities, mut abc): (Write<Entities>, Write<VecStorage<usize>>) =
+            let (mut entities, mut abc): (Write<Entities>, WriteStore<usize>) =
                 world.fetch().unwrap();
 
             let a = entities.create();

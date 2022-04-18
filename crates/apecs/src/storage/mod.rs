@@ -1,16 +1,19 @@
 //! Entity component storage traits.
 use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
-use std::sync::{Arc, Mutex};
-
-mod vec;
-pub use vec::*;
+use std::{
+    marker::PhantomData,
+    sync::{Arc, Mutex},
+};
 
 mod btree;
 pub use btree::*;
-
+mod range_map;
+pub use range_map::*;
 pub mod tracking;
+mod vec;
+pub use vec::*;
 
-use crate::{Read, Write};
+use crate::{plugins::entity_upkeep::PluginEntityUpkeep, world::World, Read, Write};
 
 pub mod bitset {
     pub use hibitset::*;
@@ -490,6 +493,50 @@ pub trait WorldStorage:
 {
     /// Create a new storage with a pre-allocated capacity
     fn new_with_capacity(cap: usize) -> Self;
+
+    /// Perform entity, defragmentation or any other upkeep on the storage.
+    /// When the storage is added through [`WorldStorageExt::with_storage`]
+    /// or [`WorldStorageExt::with_default_storage`], this function will be
+    /// called once per frame.
+    fn upkeep(&mut self, dead_ids: &[usize]) {
+        for id in dead_ids {
+            let _ = self.remove(*id);
+        }
+    }
+}
+
+pub trait StoredComponent: Send + Sync + 'static {
+    type StorageType: WorldStorage<Component = Self>;
+}
+
+pub type ReadStore<T> = Read<<T as StoredComponent>::StorageType>;
+pub type WriteStore<T> = Write<<T as StoredComponent>::StorageType>;
+
+pub trait WorldStorageExt {
+    fn with_storage<T: StoredComponent>(
+        &mut self,
+        store: T::StorageType,
+    ) -> anyhow::Result<&mut Self>;
+
+    fn with_default_storage<T: StoredComponent>(&mut self) -> anyhow::Result<&mut Self>;
+}
+
+impl WorldStorageExt for World {
+    fn with_storage<T: StoredComponent>(
+        &mut self,
+        store: T::StorageType,
+    ) -> anyhow::Result<&mut Self> {
+        Ok(self
+            .with_resource(store)?
+            .with_plugin(PluginEntityUpkeep::<T::StorageType>(PhantomData)))
+    }
+
+    fn with_default_storage<T: StoredComponent>(&mut self) -> anyhow::Result<&mut Self> {
+        let store = <T::StorageType>::default();
+        Ok(self
+            .with_resource(store)?
+            .with_plugin(PluginEntityUpkeep::<T::StorageType>(PhantomData)))
+    }
 }
 
 #[cfg(test)]
@@ -503,6 +550,9 @@ pub mod test {
         world::World,
         CanFetch,
     };
+
+    #[test]
+    pub fn store_sanity() {}
 
     pub fn make_abc_vecstorage() -> VecStorage<String> {
         let mut vs = VecStorage::default();

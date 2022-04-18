@@ -17,11 +17,7 @@ pub struct Rotation(Vector3<f32>);
 #[derive(Copy, Clone)]
 pub struct Velocity(Vector3<f32>);
 
-pub struct Benchmark<S2, S4>
-where
-    S2: WorldStorage<Component = Position>,
-    S4: WorldStorage<Component = Velocity>,
-{
+pub struct Benchmark<S2, S4> {
     ps: S2, vs: S4,
 }
 

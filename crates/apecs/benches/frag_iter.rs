@@ -1,51 +1,38 @@
-use apecs::{entities::*, join::*, storage::*, world::*, Write, anyhow, system::*};
-
-pub type Storage<T> = VecStorage<T>;
+use apecs::{anyhow, entities::*, join::*, storage::*, system::*, world::*, Write};
 
 macro_rules! create_entities {
-    ($world:ident; $datas:ident; $entities:ident; $( $variants:ident ),*) => {
+    ($store:expr; $datas:ident; $entities:ident; $( $variants:ident ),*) => {
         $(
             struct $variants(f32);
-            let mut rez = Storage::default();
+            let mut rez = $store;
             (0..20)
                 .for_each(|_| {
                     let e = $entities.create();
                     rez.insert(e.id(), $variants(0.0));
                     $datas.insert(e.id(), Data(1.0));
                 });
-            $world.with_resource(rez).unwrap();
         )*
     };
 }
 
-struct Data(f32);
+pub struct Data(f32);
 
-fn run(mut data_storage: Write<Storage<Data>>) -> anyhow::Result<ShouldContinue> {
-    for (_, data) in (&mut data_storage,).join() {
-        data.0 *= 2.0;
+pub fn tick<S: CanWriteStorage<Component = Data> + Send + Sync + 'static>(data_storage: &mut S) {
+    for data in data_storage.iter_mut() {
+        data.value.0 *= 2.0;
     }
-
-    ok()
 }
 
-pub struct Benchmark(World);
+pub fn vec() -> VecStorage<Data> {
+    let mut entities = Entities::default();
+    let mut datas: VecStorage<Data> = VecStorage::new_with_capacity(26 * 20);
+    create_entities!(VecStorage::new_with_capacity(20); datas; entities; A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z);
+    datas
+}
 
-impl Benchmark {
-    pub fn new() -> Self {
-        let mut world = World::default();
-        let mut entities = Entities::default();
-        let mut datas = Storage::<Data>::default();
-        create_entities!(world; datas; entities; A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z);
-        world
-            .with_resource(entities)
-            .unwrap()
-            .with_resource(datas)
-            .unwrap()
-            .with_system("frag_iter", run);
-        Self(world)
-    }
-
-    pub fn run(&mut self) {
-        self.0.tick_sync().unwrap();
-    }
+pub fn range() -> RangeStore<Data> {
+    let mut entities = Entities::default();
+    let mut datas: RangeStore<Data> = RangeStore::new_with_capacity(26 * 20);
+    create_entities!(RangeStore::default(); datas; entities; A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z);
+    datas
 }
