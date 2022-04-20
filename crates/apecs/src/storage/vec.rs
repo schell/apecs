@@ -7,20 +7,20 @@ use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use super::Entry;
 
 #[derive(Clone)]
-pub struct VecStorage<T> (Vec<Option<Entry<T>>>);
+pub struct VecStorage<T>(Vec<Option<Entry<T>>>);
 
 impl<T> VecStorage<T> {
     pub fn new_with_capacity(cap: usize) -> Self {
         let mut store = Vec::new();
         store.resize_with(cap, Default::default);
 
-        VecStorage (store)
+        VecStorage(store)
     }
 }
 
 impl<T> Default for VecStorage<T> {
     fn default() -> Self {
-        VecStorage (vec![])
+        VecStorage(vec![])
     }
 }
 
@@ -33,45 +33,43 @@ impl<'a, T> VecStorageIter<'a, T> {
 }
 
 impl<'a, T> Iterator for VecStorageIter<'a, T> {
-    type Item = Entry<&'a T>;
+    type Item = &'a Entry<T>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            let item = self.0.next()?;
-            if let Some(item) = item {
-                return Some(item.as_ref());
-            }
+        let mut item = self.0.next()?;
+        while item.is_none() {
+            item = self.0.next()?;
         }
+        item.as_ref()
     }
 }
 
 impl<'a, T: Send + Sync> IntoParallelIterator for &'a VecStorage<T> {
     type Iter = rayon::iter::Map<
         rayon::slice::Iter<'a, Option<Entry<T>>>,
-        fn(&Option<Entry<T>>) -> Option<&T>,
+        fn(&Option<Entry<T>>) -> Option<&Entry<T>>,
     >;
 
-    type Item = Option<&'a T>;
+    type Item = Option<&'a Entry<T>>;
 
     fn into_par_iter(self) -> Self::Iter {
         (&self.0)
             .into_par_iter()
-            .map(|may| may.as_ref().map(|e| &e.value))
+            .map(|may| may.as_ref())
     }
 }
 
 pub struct VecStorageIterMut<'a, T>(IterMut<'a, Option<Entry<T>>>);
 
 impl<'a, T> Iterator for VecStorageIterMut<'a, T> {
-    type Item = Entry<&'a mut T>;
+    type Item = &'a mut Entry<T>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            match self.0.next()? {
-                Some(entry) => return Some(entry.as_mut()),
-                None => {}
-            }
+        let mut item: &mut Option<Entry<T>> = self.0.next()?;
+        while item.is_none() {
+            item = self.0.next()?;
         }
+        item.as_mut()
     }
 }
 
@@ -84,16 +82,16 @@ impl<'a, T> VecStorageIterMut<'a, T> {
 impl<'a, T: Send> IntoParallelIterator for &'a mut VecStorage<T> {
     type Iter = rayon::iter::Map<
         rayon::slice::IterMut<'a, Option<Entry<T>>>,
-        fn(&'a mut Option<Entry<T>>) -> Option<&'a mut T>,
+        fn(&'a mut Option<Entry<T>>) -> Option<&'a mut Entry<T>>,
     >;
 
-    type Item = Option<&'a mut T>;
+    type Item = Option<&'a mut Entry<T>>;
 
     fn into_par_iter(self) -> Self::Iter {
         self.0
             .as_mut_slice()
             .into_par_iter()
-            .map(|me| me.as_mut().map(|e| &mut e.value))
+            .map(|me| me.as_mut())
     }
 }
 
@@ -102,18 +100,16 @@ impl<T> CanReadStorage for VecStorage<T> {
     type Iter<'a> = VecStorageIter<'a, T> where T: 'a;
 
     fn get(&self, id: usize) -> Option<&Self::Component> {
-        self.0
-            .get(id)
-            .and_then(|m| m.as_ref().map(|e| &e.value))
+        self.0.get(id).and_then(|m| m.as_ref().map(|e| &e.value))
     }
 
     fn iter(&self) -> Self::Iter<'_> {
         VecStorageIter(self.0.iter())
     }
 
-    fn last(&self) -> Option<Entry<&Self::Component>> {
+    fn last(&self) -> Option<&Entry<Self::Component>> {
         let me = self.0.last()?;
-        me.as_ref().map(Entry::as_ref)
+        me.as_ref()
     }
 }
 
@@ -121,9 +117,9 @@ impl<T> CanWriteStorage for VecStorage<T> {
     type IterMut<'a> = VecStorageIterMut<'a, T> where T: 'a;
 
     fn get_mut(&mut self, id: usize) -> Option<&mut Self::Component> {
-            self.0
-                .get_mut(id)
-                .and_then(|m| m.as_mut().map(|e| &mut e.value))
+        self.0
+            .get_mut(id)
+            .and_then(|m| m.as_mut().map(|e| &mut e.value))
     }
 
     fn insert(&mut self, id: usize, component: Self::Component) -> Option<Self::Component> {
@@ -131,12 +127,12 @@ impl<T> CanWriteStorage for VecStorage<T> {
             self.0.resize_with(id + 1, Default::default);
         }
 
-        let prev = std::mem::replace(&mut self.0[id], Some(Entry {
-            key: id,
-            value: component,
-        }));
-
-        prev.map(|entry| entry.value)
+        if self.0[id].is_some() {
+            self.0[id].as_mut().map(|e| e.replace_value(component))
+        } else {
+            self.0[id] = Some(Entry::new(id, component));
+            None
+        }
     }
 
     fn remove(&mut self, id: usize) -> Option<Self::Component> {
@@ -170,20 +166,21 @@ impl<'a, T> std::ops::Not for &'a mut VecStorage<T> {
 
 impl<T: Send + Sync + 'static> ParallelStorage for VecStorage<T> {
     type ParIter<'a> = rayon::iter::Map<
-        rayon::slice::Iter<'a, Option<Entry<T>>>,
-        fn(&Option<Entry<T>>) -> Option<&T>,
-    >;
+            rayon::slice::Iter<'a, Option<Entry<T>>>,
+        fn(&Option<Entry<T>>) -> Option<&Entry<T>>,
+        >;
     type IntoParIter<'a> = rayon::iter::Map<
-        rayon::slice::Iter<'a, Option<Entry<T>>>,
-        fn(&Option<Entry<T>>) -> Option<&T>,
-    >;
+            rayon::slice::Iter<'a, Option<Entry<T>>>,
+        fn(&Option<Entry<T>>) -> Option<&Entry<T>>,
+        >;
+
     type ParIterMut<'a> = rayon::iter::Map<
         rayon::slice::IterMut<'a, Option<Entry<T>>>,
-        fn(&'a mut Option<Entry<T>>) -> Option<&'a mut T>,
+        fn(&'a mut Option<Entry<T>>) -> Option<&'a mut Entry<T>>,
     >;
     type IntoParIterMut<'a> = rayon::iter::Map<
         rayon::slice::IterMut<'a, Option<Entry<T>>>,
-        fn(&'a mut Option<Entry<T>>) -> Option<&'a mut T>,
+        fn(&'a mut Option<Entry<T>>) -> Option<&'a mut Entry<T>>,
     >;
 
     fn par_iter(&self) -> Self::IntoParIter<'_> {
@@ -226,6 +223,5 @@ mod test {
         for i in 0..size {
             assert!(store.remove(i).is_some(), "{} not in store", i);
         }
-
     }
 }

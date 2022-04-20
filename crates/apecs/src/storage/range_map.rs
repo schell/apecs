@@ -4,13 +4,16 @@
 //! - [x] vecs instead of vecdeque
 //! - [x] custom iterators
 //! - [ ] use smallvecs instead of vec
-use std::marker::PhantomData;
+use std::{marker::PhantomData, ops::DerefMut};
 
-use rayon::iter::IntoParallelIterator;
+use rayon::iter::{
+    plumbing::{Producer, Reducer},
+    IndexedParallelIterator, IntoParallelIterator, ParallelIterator,
+};
 
-use super::{CanReadStorage, CanWriteStorage, Entry, ParallelStorage, WorldStorage};
+use super::{CanReadStorage, CanWriteStorage, Entry, ParallelStorage, WorldStorage, Without};
 
-pub struct MissingRange<'a, T>(usize, usize, PhantomData<&'a T>);
+pub struct MissingRange<'a, T>(usize, PhantomData<&'a T>);
 
 pub struct RangeStoreIter<'a, T> {
     group: Option<(usize, &'a [Entry<T>])>,
@@ -19,17 +22,19 @@ pub struct RangeStoreIter<'a, T> {
 }
 
 impl<'a, T> Iterator for RangeStoreIter<'a, T> {
-    type Item = Entry<&'a T>;
+    type Item = &'a Entry<T>;
 
     fn next(&mut self) -> Option<Self::Item> {
         #[inline]
-        fn next_in_group<'a, T>(index: &mut usize, group: &mut &'a [Entry<T>]) -> Option<Entry<&'a T>> {
-            let id = *index;
+        fn next_in_group<'a, T>(
+            index: &mut usize,
+            group: &mut &'a [Entry<T>],
+        ) -> Option<&'a Entry<T>> {
             match std::mem::replace(group, &[]) {
                 [entry, rest @ ..] => {
                     *index += 1;
                     *group = rest;
-                    Some(entry.as_ref())
+                    Some(entry)
                 }
                 [] => None,
             }
@@ -53,21 +58,217 @@ pub struct RangeStoreIterMut<'a, T> {
 }
 
 impl<'a, T> Iterator for RangeStoreIterMut<'a, T> {
-    type Item = Entry<&'a mut T>;
+    type Item = &'a mut Entry<T>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(group) = self.group.as_mut() {
             if let Some(entry) = group.next() {
-                return Some(entry.as_mut());
+                return Some(entry);
             }
         }
 
         if let Some(mut group) = self.groups.pop() {
-            let entry = group.next().map(Entry::as_mut)?;
+            let entry = group.next()?;
             self.group = Some(group);
             Some(entry)
         } else {
             None
+        }
+    }
+}
+
+pub trait Splittable: Iterator + Sized {
+    type ParIter: IndexedParallelIterator + ParallelIterator<Item = Self::Item>;
+
+    fn len(&self) -> usize;
+    fn split_at(self, index: usize) -> (Self, Self);
+    fn into_indexed_par_iter(self) -> Self::ParIter;
+}
+
+impl<'a, T: Send + Sync> Splittable for std::slice::Iter<'a, T> {
+    type ParIter = rayon::slice::Iter<'a, T>;
+
+    fn len(&self) -> usize {
+        ExactSizeIterator::len(self)
+    }
+
+    fn split_at(self, index: usize) -> (Self, Self) {
+        let (left, right) = self.as_slice().split_at(index);
+        (left.into_iter(), right.into_iter())
+    }
+
+    fn into_indexed_par_iter(self) -> Self::ParIter {
+        self.as_slice().into_par_iter()
+    }
+}
+
+impl<'a, T: Send + Sync> Splittable for std::slice::IterMut<'a, T> {
+    type ParIter = rayon::slice::IterMut<'a, T>;
+
+    fn len(&self) -> usize {
+        ExactSizeIterator::len(self)
+    }
+
+    fn split_at(self, index: usize) -> (Self, Self) {
+        let (left, right) = self.into_slice().split_at_mut(index);
+        (left.into_iter(), right.into_iter())
+    }
+
+    fn into_indexed_par_iter(self) -> Self::ParIter {
+        self.into_slice().into_par_iter()
+    }
+}
+
+pub enum ParGroupIter<I> {
+    Missing(usize),
+    Present(I),
+}
+
+impl<I: Splittable> ParGroupIter<I> {
+    pub fn len(&self) -> usize {
+        match self {
+            ParGroupIter::Missing(l) => *l,
+            ParGroupIter::Present(i) => i.len(),
+        }
+    }
+}
+
+pub struct RangeStoreParIter<I>(Vec<ParGroupIter<I>>);
+
+impl<I: Splittable> RangeStoreParIter<I> {
+    fn len(&self) -> usize {
+        self.0.iter().fold(0, |acc, group| acc + group.len())
+    }
+}
+
+impl<I> ParallelIterator for RangeStoreParIter<I>
+where
+    I: Splittable + Send + Sync,
+    I::Item: Send + Sync,
+{
+    type Item = Option<<I as Iterator>::Item>;
+
+    fn drive_unindexed<C>(self, consumer: C) -> C::Result
+    where
+        C: rayon::iter::plumbing::UnindexedConsumer<Self::Item>,
+    {
+        rayon::iter::plumbing::bridge(self, consumer)
+    }
+}
+
+impl<I> IndexedParallelIterator for RangeStoreParIter<I>
+where
+    I: Splittable + Send + Sync,
+    I::Item: Send + Sync,
+{
+    fn len(&self) -> usize {
+        RangeStoreParIter::len(self)
+    }
+
+    fn drive<C: rayon::iter::plumbing::Consumer<Self::Item>>(mut self, consumer: C) -> C::Result {
+        let starting_len = self.len();
+        if let Some(tail) = self.0.pop() {
+            let (left, right, reducer) = consumer.split_at(starting_len - tail.len());
+            let (a, b) = rayon::join(
+                || self.drive(left),
+                || match tail {
+                    ParGroupIter::Missing(length) => {
+                        (0..length).into_par_iter().map(|_| None).drive(right)
+                    }
+                    ParGroupIter::Present(slice) => {
+                        slice.into_indexed_par_iter().map(|e| Some(e)).drive(right)
+                    }
+                },
+            );
+            reducer.reduce(a, b)
+        } else {
+            rayon::iter::empty().drive(consumer)
+        }
+    }
+
+    fn with_producer<CB: rayon::iter::plumbing::ProducerCallback<Self::Item>>(
+        self,
+        callback: CB,
+    ) -> CB::Output {
+        return callback.callback(RangeStoreProducer(self));
+
+        struct RangeStoreProducer<I>(RangeStoreParIter<I>);
+
+        impl<'a, I> Producer for RangeStoreProducer<I>
+        where
+            I: Splittable + Send + Sync,
+            I::Item: Send + Sync
+        {
+            type Item = Option<I::Item>;
+
+            type IntoIter = std::vec::IntoIter<Self::Item>;
+
+            fn into_iter(self) -> Self::IntoIter {
+                let mut vs = vec![];
+                for group in self.0 .0.into_iter() {
+                    match group {
+                        ParGroupIter::Missing(length) => {
+                            for _ in 0..length {
+                                vs.push(None);
+                            }
+                        }
+                        ParGroupIter::Present(slice) => {
+                            for entry in slice {
+                                vs.push(Some(entry));
+                            }
+                        }
+                    }
+                }
+                vs.into_iter()
+            }
+
+            fn split_at(self, index: usize) -> (Self, Self) {
+                let mut num_items = index;
+                let mut left = vec![];
+                let mut right = vec![];
+                let total_len = self.0.len();
+                let mut groups = self.0 .0.into_iter();
+                while let Some(group) = groups.next() {
+                    let length = group.len();
+                    if length > num_items {
+                        // split the group
+                        match group {
+                            ParGroupIter::Missing(len) => {
+                                left.push(ParGroupIter::Missing(num_items));
+                                right.push(ParGroupIter::Missing(len - num_items));
+                            }
+                            ParGroupIter::Present(slice) => {
+                                let (slice_left, slice_right) = slice.split_at(num_items);
+                                left.push(ParGroupIter::Present(slice_left));
+                                right.push(ParGroupIter::Present(slice_right));
+                            }
+                        }
+                        // push the rest into right
+                        right.extend(groups);
+                        break;
+                    } else if length <= num_items {
+                        left.push(group);
+                        num_items -= length;
+                    }
+                }
+
+                let left = RangeStoreProducer(RangeStoreParIter(left));
+                let right = RangeStoreProducer(RangeStoreParIter(right));
+                debug_assert!(
+                    left.0.len() == index,
+                    "left producer wrong length, {} /= {}",
+                    left.0.len(),
+                    index
+                );
+                debug_assert!(
+                    left.0.len() + right.0.len() == total_len,
+                    "right producer wrong length, {} /= {}",
+                    right.0.len(),
+                    total_len - left.0.len()
+                );
+
+                (left, right)
+            }
         }
     }
 }
@@ -88,18 +289,16 @@ impl<T> Default for RangeStore<T> {
 
 impl<T> RangeStore<T> {
     pub fn insert(&mut self, id: usize, value: T) -> Option<T> {
-        let mut value = value;
         // element goes last in the last group
         let new_end_group = if let (Some((start, end)), Some(group)) =
             (self.groups.last_mut(), self.elements.last_mut())
         {
             if *end + 1 == id {
                 *end = id;
-                group.push(Entry{key: id, value});
+                group.push(Entry::new(id, value));
                 return None;
             } else if *start <= id && id <= *end {
-                std::mem::swap(&mut group[id - *start].value, &mut value);
-                return Some(value);
+                return Some(group[id - *start].replace_value(value));
             }
 
             id > *end
@@ -113,11 +312,10 @@ impl<T> RangeStore<T> {
         {
             if id + 1 == *start {
                 self.groups[0].0 = id;
-                group.insert(0, Entry{key: id, value});
+                group.insert(0, Entry::new(id, value));
                 return None;
             } else if *start <= id && id <= *end {
-                std::mem::swap(&mut group[id - *start].value, &mut value);
-                return Some(value);
+                return Some(group[id - *start].replace_value(value));
             }
 
             id < *start
@@ -129,7 +327,7 @@ impl<T> RangeStore<T> {
             // component goes first in a new group
             self.groups.push((id, id));
             let mut group = Vec::new();
-            group.push(Entry{key: id, value});
+            group.push(Entry::new(id, value));
             self.elements.push(group);
             return None;
         }
@@ -138,7 +336,7 @@ impl<T> RangeStore<T> {
             // component goes first in a new group
             self.groups.insert(0, (id, id));
             let mut group = Vec::new();
-            group.push(Entry{key: id, value});
+            group.push(Entry::new(id, value));
             self.elements.insert(0, group);
             return None;
         }
@@ -154,7 +352,7 @@ impl<T> RangeStore<T> {
         {
             if id + 1 == *start {
                 *start = id;
-                group.insert(0, Entry{key: id, value});
+                group.insert(0, Entry::new(id, value));
                 return None;
             }
 
@@ -165,7 +363,7 @@ impl<T> RangeStore<T> {
                 self.groups.insert(insert_at, (id, id));
                 self.elements.insert(insert_at, {
                     let mut group = Vec::default();
-                    group.push(Entry{key: id, value});
+                    group.push(Entry::new(id, value));
                     group
                 });
                 return None;
@@ -173,20 +371,19 @@ impl<T> RangeStore<T> {
 
             if *end + 1 == id {
                 *end = id;
-                group.push(Entry{key: id, value});
+                group.push(Entry::new(id, value));
                 return None;
             }
 
             if *start <= id && id <= *end {
-                std::mem::swap(&mut group[id - *start].value, &mut value);
-                return Some(value);
+                return Some(group[id - *start].replace_value(value));
             }
         }
 
         self.groups.push((id, id));
         self.elements.push({
             let mut group = Vec::default();
-            group.push(Entry{key: id, value});
+            group.push(Entry::new(id, value));
             group
         });
 
@@ -205,7 +402,7 @@ impl<T> RangeStore<T> {
     pub fn get_mut(&mut self, id: usize) -> Option<&mut T> {
         for ((start, end), components) in self.groups.iter_mut().zip(self.elements.iter_mut()) {
             if *start <= id && id <= *end {
-                return components.get_mut(id - *start).map(|e| e.as_mut().value);
+                return components.get_mut(id - *start).map(|e| e.deref_mut());
             }
         }
         None
@@ -218,6 +415,44 @@ impl<T> RangeStore<T> {
             }
         }
         false
+    }
+
+    /// Pushes a component onto the end of the store and returns the id.
+    pub fn push(&mut self, value: T) -> usize {
+        if let Some((_start, end)) = self.groups.last_mut() {
+            let id = *end + 1;
+            *end = id;
+
+            self.elements
+                .last_mut()
+                .unwrap()
+                .push(Entry::new(id, value));
+
+            id
+        } else {
+            self.groups.push((0, 0));
+            self.elements.push(vec![Entry::new(0, value)]);
+            0
+        }
+    }
+
+    /// Removes the last component from the end of the store and returns it,
+    /// if possible.
+    pub fn pop(&mut self) -> Option<T> {
+        if let Some((start, end)) = self.groups.last_mut() {
+            if start < end {
+                *end -= 1;
+                return self
+                    .elements
+                    .last_mut()
+                    .unwrap()
+                    .pop()
+                    .map(Entry::into_inner);
+            }
+        };
+        let _ = self.groups.pop()?;
+        let mut group = self.elements.pop()?;
+        group.pop().map(Entry::into_inner)
     }
 
     pub fn remove(&mut self, id: usize) -> Option<T> {
@@ -328,9 +563,7 @@ impl<T> RangeStore<T> {
         }
     }
 
-    pub fn iter_mut<'a>(
-        &'a mut self,
-    ) -> RangeStoreIterMut<'a, T> {
+    pub fn iter_mut<'a>(&'a mut self) -> RangeStoreIterMut<'a, T> {
         RangeStoreIterMut {
             group: None,
             groups: self
@@ -343,56 +576,6 @@ impl<T> RangeStore<T> {
     }
 }
 
-//impl<T: Send + Sync + 'static> RangeStore<T> {
-//    pub fn par_iter<'a>(
-//        &'a self,
-//    ) -> rayon::iter::Flatten<
-//        rayon::vec::IntoIter<
-//            rayon::iter::Chain<
-//                rayon::iter::RepeatN<Option<&'a T>>,
-//                rayon::iter::Map<
-//                    rayon::slice::Iter<'a, T>,
-//                    fn(&'a T) -> Option<&'a T>,
-//                >,
-//            >,
-//        >,
-//    > {
-//        let (_, groups) = self.groups.iter().zip(self.elements.iter()).fold(
-//            (0, vec![]),
-//            |(prev_end, mut groups), ((start, end), group)| {
-//                groups.push(par_group_iter(prev_end, *start, group));
-//                (*end, groups)
-//            },
-//        );
-//
-//        groups.into_par_iter().flatten()
-//    }
-//
-//    pub fn par_iter_mut<'a>(
-//        &'a mut self,
-//    ) -> rayon::iter::Flatten<
-//        rayon::vec::IntoIter<
-//            rayon::iter::Chain<
-//                rayon::iter::Map<rayon::range::Iter<usize>, fn(usize) -> Option<&'a mut T>>,
-//                rayon::iter::Map<
-//                    rayon::slice::IterMut<'a, T>,
-//                    fn(&'a mut T) -> Option<&'a mut T>,
-//                >,
-//            >,
-//        >,
-//    > {
-//        let (_, groups) = self.groups.iter().zip(self.elements.iter_mut()).fold(
-//            (0, vec![]),
-//            |(prev_end, mut groups), ((start, end), group)| {
-//                groups.push(par_group_iter_mut(prev_end, *start, group));
-//                (*end, groups)
-//            },
-//        );
-//
-//        groups.into_par_iter().flatten()
-//    }
-//}
-
 impl<T> CanReadStorage for RangeStore<T> {
     type Component = T;
 
@@ -400,9 +583,9 @@ impl<T> CanReadStorage for RangeStore<T> {
     where
         Self: 'a;
 
-    fn last(&self) -> Option<super::Entry<&Self::Component>> {
+    fn last(&self) -> Option<&super::Entry<Self::Component>> {
         let group = self.elements.last()?;
-        group.last().map(Entry::as_ref)
+        group.last()
     }
 
     fn get(&self, id: usize) -> Option<&Self::Component> {
@@ -437,34 +620,92 @@ impl<T> CanWriteStorage for RangeStore<T> {
 }
 
 impl<T: Send + Sync + 'static> ParallelStorage for RangeStore<T> {
-    type ParIter<'a> = rayon::vec::IntoIter<Option<&'a T>>
+    type ParIter<'a> = RangeStoreParIter<std::slice::Iter<'a, Entry<T>>>
     where
         Self: 'a;
 
-    type IntoParIter<'a> = Self::ParIter<'a>
+    type IntoParIter<'a> = RangeStoreParIter<std::slice::Iter<'a, Entry<T>>>
     where
         Self: 'a;
 
-    type ParIterMut<'a> = rayon::vec::IntoIter<Option<&'a mut T>>
+    type ParIterMut<'a> = RangeStoreParIter<std::slice::IterMut<'a, Entry<T>>>
     where
         Self: 'a;
 
-    type IntoParIterMut<'a> = Self::ParIterMut<'a>
+    type IntoParIterMut<'a> = RangeStoreParIter<std::slice::IterMut<'a, Entry<T>>>
     where
         Self: 'a;
 
     fn par_iter(&self) -> Self::IntoParIter<'_> {
-        vec![].into_par_iter()
+        let mut next_id = 0;
+        let mut groups = vec![];
+        for ((start, end), group) in self.groups.iter().zip(self.elements.iter()) {
+            if next_id < *start {
+                groups.push(ParGroupIter::Missing(start - next_id));
+            }
+
+            groups.push(ParGroupIter::Present(group.iter()));
+            next_id = *end + 1;
+        }
+
+        RangeStoreParIter(groups)
     }
 
     fn par_iter_mut(&mut self) -> Self::IntoParIterMut<'_> {
-        vec![].into_par_iter()
+        let mut next_id = 0;
+        let mut groups = vec![];
+        for ((start, end), group) in self.groups.iter().zip(self.elements.iter_mut()) {
+            if next_id < *start {
+                groups.push(ParGroupIter::Missing(start - next_id));
+            }
+
+            groups.push(ParGroupIter::Present(group.iter_mut()));
+            next_id = *end + 1;
+        }
+
+        RangeStoreParIter(groups)
     }
 }
 
 impl<T: Send + Sync + 'static> WorldStorage for RangeStore<T> {
     fn new_with_capacity(_cap: usize) -> Self {
         RangeStore::default()
+    }
+}
+
+impl<'a, T> std::ops::Not for &'a RangeStore<T> {
+    type Output = Without<&'a RangeStore<T>>;
+
+    fn not(self) -> Self::Output {
+        Without(self)
+    }
+}
+
+impl<'a, T> std::ops::Not for &'a mut RangeStore<T> {
+    type Output = Without<&'a mut RangeStore<T>>;
+
+    fn not(self) -> Self::Output {
+        Without(self)
+    }
+}
+
+impl<'a, T: Send + Sync + 'static> IntoParallelIterator for &'a RangeStore<T> {
+    type Iter = RangeStoreParIter<std::slice::Iter<'a, Entry<T>>>;
+
+    type Item = Option<&'a Entry<T>>;
+
+    fn into_par_iter(self) -> Self::Iter {
+        self.par_iter()
+    }
+}
+
+impl<'a, T: Send + Sync + 'static> IntoParallelIterator for &'a mut RangeStore<T> {
+    type Iter = RangeStoreParIter<std::slice::IterMut<'a, Entry<T>>>;
+
+    type Item = Option<&'a mut Entry<T>>;
+
+    fn into_par_iter(self) -> Self::Iter {
+        self.par_iter_mut()
     }
 }
 

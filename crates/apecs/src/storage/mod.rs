@@ -2,14 +2,14 @@
 use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 use std::{
     marker::PhantomData,
-    sync::{Arc, Mutex},
+    ops::{Deref, DerefMut},
+    sync::atomic::AtomicU64,
 };
 
-mod btree;
-pub use btree::*;
 mod range_map;
 pub use range_map::*;
-pub mod tracking;
+mod tracking;
+pub use tracking::*;
 mod vec;
 pub use vec::*;
 
@@ -19,94 +19,117 @@ pub mod bitset {
     pub use hibitset::*;
 }
 
-pub trait StorageComponent {
+pub(crate) static SYSTEM_ITERATION: AtomicU64 = AtomicU64::new(0);
+
+pub fn current_iteration() -> u64 {
+    SYSTEM_ITERATION.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub(crate) fn increment_current_iteration() {
+    let _ = SYSTEM_ITERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub trait IsEntry {
     type Component;
 
-    fn split(self) -> (usize, Self::Component);
-
     fn id(&self) -> usize;
-
-    fn value(self) -> Self::Component;
 }
 
-impl<A> StorageComponent for (usize, A) {
-    type Component = A;
-
-    fn split(self) -> (usize, Self::Component) {
-        self
-    }
-
-    fn id(&self) -> usize {
-        self.0
-    }
-
-    fn value(self) -> Self::Component {
-        self.1
-    }
-}
-
-impl StorageComponent for usize {
+impl IsEntry for usize {
     type Component = usize;
-
-    fn split(self) -> (usize, Self::Component) {
-        (self, self)
-    }
 
     fn id(&self) -> usize {
         *self
-    }
-
-    fn value(self) -> Self::Component {
-        self
     }
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Entry<T> {
     pub(crate) key: usize,
-    pub value: T,
+    pub(crate) value: T,
+    changed: u64,
 }
 
-impl<T> StorageComponent for Entry<T> {
+impl<T> IsEntry for Entry<T> {
     type Component = T;
 
-    fn split(self) -> (usize, Self::Component) {
-        (self.key, self.value)
+    fn id(&self) -> usize {
+        self.id()
     }
+}
+
+impl<'a, T> IsEntry for &'a Entry<T> {
+    type Component = T;
 
     fn id(&self) -> usize {
-        self.key()
+        self.key
     }
+}
 
-    fn value(self) -> Self::Component {
-        self.value
+impl<'a, T> IsEntry for &'a mut Entry<T> {
+    type Component = T;
+
+    fn id(&self) -> usize {
+        self.key
+    }
+}
+
+impl<T> Deref for Entry<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.value
+    }
+}
+
+impl<T> DerefMut for Entry<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.mark_changed();
+        &mut self.value
     }
 }
 
 impl<T> Entry<T> {
-    pub fn key(&self) -> usize {
+    pub fn new(id: usize, value: T) -> Self {
+        Entry {
+            key: id,
+            value,
+            changed: 0,
+        }
+    }
+
+    fn mark_changed(&mut self) {
+        self.changed = SYSTEM_ITERATION.load(std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn has_changed_since(&self, iteration: u64) -> bool {
+        self.changed > iteration
+    }
+
+    pub fn value(&self) -> &T {
+        &self.value
+    }
+
+    pub fn set_value(&mut self, t: T) {
+        self.mark_changed();
+        self.value = t;
+    }
+
+    pub fn replace_value(&mut self, t: T) -> T {
+        self.mark_changed();
+        std::mem::replace(&mut self.value, t)
+    }
+
+    pub fn id(&self) -> usize {
         self.key
     }
 
-    pub fn as_ref(&self) -> Entry<&T> {
-        Entry {
-            key: self.key,
-            value: &self.value,
-        }
+    pub fn into_inner(self) -> T {
+        self.value
     }
 
-    pub fn as_mut(&mut self) -> Entry<&mut T> {
-        Entry {
-            key: self.key,
-            value: &mut self.value,
-        }
-    }
-
-    pub fn map<X>(self, f: impl FnOnce(T) -> X) -> Entry<X> {
-        Entry {
-            key: self.key,
-            value: f(self.value),
-        }
+    pub fn split(self) -> (usize, T) {
+        (self.key, self.value)
     }
 }
 
@@ -117,7 +140,7 @@ where
     T: ParallelStorage,
     T::ParIter<'a>: Send + Sync,
 {
-    type Iter = rayon::iter::Map<T::ParIter<'a>, fn(Option<&'a T::Component>) -> Option<()>>;
+    type Iter = rayon::iter::Map<T::ParIter<'a>, fn(Option<&'a Entry<T::Component>>) -> Option<()>>;
 
     type Item = Option<()>;
 
@@ -137,10 +160,10 @@ pub struct WithoutIter<T: Iterator> {
     next_id: usize,
 }
 
-impl<T> WithoutIter<T>
+impl<T, C> WithoutIter<T>
 where
-    T: Iterator,
-    T::Item: StorageComponent,
+    C: IsEntry,
+    T: Iterator<Item = C>,
 {
     pub(crate) fn new(mut iter: T) -> Self {
         let next_id = iter.next().map(|e| e.id()).unwrap_or_else(|| usize::MAX);
@@ -152,10 +175,10 @@ where
     }
 }
 
-impl<T: Iterator> Iterator for WithoutIter<T>
+impl<T: Iterator, C> Iterator for WithoutIter<T>
 where
-    T: Iterator,
-    T::Item: StorageComponent,
+    C: IsEntry,
+    T: Iterator<Item = C>,
 {
     type Item = Entry<()>;
 
@@ -172,73 +195,79 @@ where
         let entry = Entry {
             key: self.id,
             value: (),
+            changed: 0,
         };
         self.id += 1;
         Some(entry)
     }
 }
 
-pub struct MaybeIter<T: Iterator>
-where
-    T::Item: StorageComponent,
-{
+#[derive(Clone, Debug, PartialEq)]
+pub struct Maybe<T> {
+    pub key: usize,
+    pub inner: Option<T>,
+}
+
+impl<T> IsEntry for Maybe<T> {
+    type Component = T;
+
+    fn id(&self) -> usize {
+        self.key
+    }
+}
+
+pub struct MaybeIter<C: IsEntry, T: Iterator<Item = C>> {
     iter: T,
     id: usize,
     next_id: usize,
-    next_value: Option<<T::Item as StorageComponent>::Component>,
+    next_entry: Option<C>,
 }
 
-fn maybe_next<T: Iterator>(
-    iter: &mut T,
-) -> (usize, Option<<T::Item as StorageComponent>::Component>)
+impl<C, T> MaybeIter<C, T>
 where
-    T::Item: StorageComponent,
-{
-    iter.next()
-        .map(|mn| {
-            let (id, value) = mn.split();
-            (id, Some(value))
-        })
-        .unwrap_or_else(|| (usize::MAX, None))
-}
-
-impl<T> MaybeIter<T>
-where
-    T: Iterator,
-    T::Item: StorageComponent,
+    C: IsEntry,
+    T: Iterator<Item = C>,
 {
     pub(crate) fn new(mut iter: T) -> Self {
-        let (next_id, next_value) = maybe_next(&mut iter);
+        let next_entry = iter.next();
         MaybeIter {
             iter,
             id: 0,
-            next_id,
-            next_value,
+            next_id: next_entry.as_ref().map(|e| e.id()).unwrap_or(usize::MAX),
+            next_entry,
         }
     }
 }
 
-impl<T: Iterator> Iterator for MaybeIter<T>
+impl<C, T> Iterator for MaybeIter<C, T>
 where
-    T: Iterator,
-    T::Item: StorageComponent,
+    C: IsEntry,
+    T: Iterator<Item = C>,
 {
-    type Item = Entry<Option<<T::Item as StorageComponent>::Component>>;
+    type Item = Maybe<C>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let value = if self.id == self.next_id {
-            let (next_id, next_value) = maybe_next(&mut self.iter);
-            self.next_id = next_id;
-            std::mem::replace(&mut self.next_value, next_value)
+        let entry = if self.next_id == self.id {
+            if let Some(entry) = self.next_entry.take() {
+                self.next_entry = self.iter.next();
+                self.next_id = self
+                    .next_entry
+                    .as_ref()
+                    .map(|e| e.id())
+                    .unwrap_or_else(|| usize::MAX);
+                Some(entry)
+            } else {
+                None
+            }
         } else {
             None
         };
-        let entry = Entry {
+        let maybe = Maybe {
             key: self.id,
-            value,
+            inner: entry,
         };
         self.id += 1;
-        Some(entry)
+        Some(maybe)
     }
 }
 
@@ -258,18 +287,18 @@ impl<T: IntoParallelIterator> IntoParallelIterator for MaybeParIter<T> {
 pub trait CanReadStorage {
     type Component;
 
-    type Iter<'a>: Iterator<Item = Entry<&'a Self::Component>>
+    type Iter<'a>: Iterator<Item = &'a Entry<Self::Component>>
     where
         Self: 'a;
 
     /// Return the last (alive) entry.
-    fn last(&self) -> Option<Entry<&Self::Component>>;
+    fn last(&self) -> Option<&Entry<Self::Component>>;
 
     /// Returns the length of the storage, which is really how many
     /// indices might be stored (based on the last stored entry),
     /// *not the number of actual entries*.
     fn len(&self) -> usize {
-        self.last().map(|e| e.key() + 1).unwrap_or(0)
+        self.last().map(|e| e.id() + 1).unwrap_or(0)
     }
 
     fn is_empty(&self) -> bool {
@@ -283,7 +312,10 @@ pub trait CanReadStorage {
 
     /// Return an iterator over all contiguous entities, regardless
     /// of whether they reside in the storage.
-    fn maybe(&self) -> MaybeIter<Self::Iter<'_>> {
+    ///
+    /// ## WARNING
+    /// This iterator is unconstrained. It does not terminate.
+    fn maybe(&self) -> MaybeIter<&Entry<Self::Component>, Self::Iter<'_>> {
         MaybeIter::new(self.iter())
     }
 }
@@ -295,7 +327,7 @@ impl<'a, S: CanReadStorage> CanReadStorage for &'a S {
     where
         Self: 'b;
 
-    fn last(&self) -> Option<Entry<&Self::Component>> {
+    fn last(&self) -> Option<&Entry<Self::Component>> {
         <S as CanReadStorage>::last(self)
     }
 
@@ -310,7 +342,7 @@ impl<'a, S: CanReadStorage> CanReadStorage for &'a S {
 
 /// A storage that can be read and written
 pub trait CanWriteStorage: CanReadStorage {
-    type IterMut<'a>: Iterator<Item = Entry<&'a mut Self::Component>>
+    type IterMut<'a>: Iterator<Item = &'a mut Entry<Self::Component>>
     where
         Self: 'a;
 
@@ -325,102 +357,14 @@ pub trait CanWriteStorage: CanReadStorage {
 
     /// Return an iterator over all contiguous entities, regardless
     /// of whether they reside in the storage. Uses mutable components.
-    fn maybe_mut(&mut self) -> MaybeIter<Self::IterMut<'_>> {
+    fn maybe_mut(&mut self) -> MaybeIter<&mut Entry<Self::Component>, Self::IterMut<'_>> {
         MaybeIter::new(self.iter_mut())
-    }
-}
-
-/// A helper for writing `IntoParallelIterator` implementations for references to storages.
-pub struct StorageIter<'a, S>(&'a S);
-
-impl<'a, S> IntoParallelIterator for StorageIter<'a, S>
-where
-    S: CanReadStorage + Send + Sync,
-    S::Component: Send + Sync,
-{
-    type Iter = rayon::iter::MapWith<
-        rayon::range::Iter<usize>,
-        &'a S,
-        fn(&mut &'a S, usize) -> Option<&'a S::Component>,
-    >;
-
-    type Item = Option<&'a S::Component>;
-
-    fn into_par_iter(self) -> Self::Iter {
-        fn get<'a, S: CanReadStorage>(s: &mut &'a S, n: usize) -> Option<&'a S::Component> {
-            s.get(n)
-        }
-
-        let range = 0..self.0.len();
-        let iter: _ = range.into_par_iter().map_with(
-            self.0,
-            get as fn(&mut &'a S, usize) -> Option<&'a S::Component>,
-        );
-        iter
-    }
-}
-
-impl<'a, T> StorageIter<'a, T>
-where
-    T: CanReadStorage,
-{
-    pub fn new(s: &'a T) -> Self {
-        StorageIter(s)
-    }
-
-    pub fn get(&self, id: usize) -> Option<&'a T::Component> {
-        self.0.get(id)
-    }
-}
-
-/// A helper for writing `IntoParallelIterator` implementations for references to storages.
-pub struct StorageIterMut<'a, S>(&'a mut S);
-
-pub type StorageIterGetFn<'a, S> =
-    fn(&mut Arc<Mutex<&'a mut S>>, usize) -> Option<&'a mut <S as CanReadStorage>::Component>;
-
-impl<'a, S> IntoParallelIterator for StorageIterMut<'a, S>
-where
-    S: CanWriteStorage + Send + Sync,
-    S::Component: Send + Sync,
-{
-    type Iter = rayon::iter::MapWith<
-        rayon::range::Iter<usize>,
-        Arc<Mutex<&'a mut S>>,
-        StorageIterGetFn<'a, S>,
-    >;
-
-    type Item = Option<&'a mut S::Component>;
-
-    fn into_par_iter(self) -> Self::Iter {
-        fn get_mut<'a, S: CanWriteStorage>(
-            s: &mut Arc<Mutex<&'a mut S>>,
-            n: usize,
-        ) -> Option<&'a mut S::Component> {
-            s.lock()
-                .unwrap()
-                .get_mut(n)
-                .map(|t: &mut S::Component| -> &'a mut S::Component {
-                    //modified.try_send(n).unwrap();
-                    // we know that the index is monotonically increasing, so we will
-                    // never give out a reference to the same item twice, so this is
-                    // tolerably unsafe
-                    unsafe { &mut *(t as *mut S::Component) }
-                })
-        }
-
-        let range = 0..self.0.len();
-        let a: Arc<Mutex<&'a mut S>> = Arc::new(Mutex::new(self.0));
-        let iter: _ = range
-            .into_par_iter()
-            .map_with(a, get_mut as StorageIterGetFn<'a, S>);
-        iter
     }
 }
 
 pub trait ParallelStorage: CanReadStorage + CanWriteStorage + Send + Sync {
     /// The indexed parallel iterator
-    type ParIter<'a>: IndexedParallelIterator<Item = Option<&'a Self::Component>>
+    type ParIter<'a>: IndexedParallelIterator<Item = Option<&'a Entry<Self::Component>>>
     where
         Self: 'a;
     /// A helper type that can be turned into `Self::ParIter<'a>` above.
@@ -429,7 +373,7 @@ pub trait ParallelStorage: CanReadStorage + CanWriteStorage + Send + Sync {
         Self: 'a;
 
     /// The mutable indexed parallel iterator
-    type ParIterMut<'a>: IndexedParallelIterator<Item = Option<&'a mut Self::Component>>
+    type ParIterMut<'a>: IndexedParallelIterator<Item = Option<&'a mut Entry<Self::Component>>>
     where
         Self: 'a;
     /// A helper type that can be turned into `Self::ParIterMut<'a>` above.
@@ -455,7 +399,7 @@ impl<'a, S: ParallelStorage<Component = T> + 'static, T: Send + Sync + 'a> IntoP
 {
     type Iter = <S as ParallelStorage>::ParIter<'a>;
 
-    type Item = Option<&'a T>;
+    type Item = Option<&'a Entry<T>>;
 
     fn into_par_iter(self) -> Self::Iter {
         self.par_iter().into_par_iter()
@@ -467,7 +411,7 @@ impl<'a, S: ParallelStorage<Component = T> + 'static, T: Send + 'a> IntoParallel
 {
     type Iter = <S as ParallelStorage>::ParIterMut<'a>;
 
-    type Item = Option<&'a mut T>;
+    type Item = Option<&'a mut Entry<T>>;
 
     fn into_par_iter(self) -> Self::Iter {
         self.par_iter_mut().into_par_iter()
@@ -479,7 +423,7 @@ impl<'a, S: ParallelStorage<Component = T> + 'static, T: Send + Sync + 'a> IntoP
 {
     type Iter = <S as ParallelStorage>::ParIter<'a>;
 
-    type Item = Option<&'a T>;
+    type Item = Option<&'a Entry<T>>;
 
     fn into_par_iter(self) -> Self::Iter {
         self.par_iter().into_par_iter()
@@ -552,7 +496,29 @@ pub mod test {
     };
 
     #[test]
-    pub fn store_sanity() {}
+    pub fn can_track_stores() {
+        let mut vs = VecStorage::default();
+        vs.insert(0, 0usize);
+        vs.insert(1, 1);
+        vs.insert(2, 2);
+
+        let mut rs = RangeStore::default();
+        rs.insert(0, 0);
+        rs.insert(1, 1);
+        rs.insert(2, 2);
+
+        increment_current_iteration();
+
+        for v in (&mut vs,).join() {
+            if *v.value() > 1usize {
+                *v.deref_mut() *= 2;
+            }
+        }
+
+        increment_current_iteration();
+
+
+    }
 
     pub fn make_abc_vecstorage() -> VecStorage<String> {
         let mut vs = VecStorage::default();
@@ -593,8 +559,8 @@ pub mod test {
         let c = entities.create();
         strings.insert(c.id(), "C".to_string());
 
-        for (_, entity, s, n) in (&entities, &mut strings, &numbers).join() {
-            *s = format!("{}{}{}", s, entity.id(), n);
+        for (entity, s, n) in (&entities, &mut strings, &numbers).join() {
+            s.set_value(format!("{}{}{}", s.value(), entity, n.value()));
         }
 
         assert_eq!(strings.get(a.id()), Some(&"A01".to_string()));
@@ -603,7 +569,7 @@ pub mod test {
     }
 
     #[test]
-    fn can_par_join() {
+    fn can_par_join_system() {
         #[derive(CanFetch)]
         struct Data<A, B>
         where
@@ -623,11 +589,11 @@ pub mod test {
                 (&mut data.a, &mut data.b)
                     .par_join()
                     .for_each(|(number, _string)| {
-                        *number *= -1.0;
+                        *number.deref_mut() *= -1.0;
                     });
             } else {
-                for (_, number, _string) in (&mut data.a, &mut data.b).join() {
-                    *number *= -1.0;
+                for (number, _string) in (&mut data.a, &mut data.b).join() {
+                    number.set_value(number.value() * -1.0);
                 }
             }
 
@@ -665,7 +631,7 @@ pub mod test {
                 }
                 // affirm the state of the world
                 let sum: f32 = if IS_PAR {
-                    a.par_iter().into_par_iter().flatten_iter().sum()
+                    a.par_iter().into_par_iter().flatten_iter().map(|e| e.value).sum()
                 } else {
                     a.iter().map(|e| e.value).sum()
                 };
@@ -685,23 +651,27 @@ pub mod test {
         }
 
         run::<VecStorage<f32>, VecStorage<&'static str>, false>().unwrap();
-        //run::<SparseStorage<f32>, SparseStorage<&'static str>, false>().unwrap();
-        run::<BTreeStorage<f32>, BTreeStorage<&'static str>, false>().unwrap();
+        run::<RangeStore<f32>, RangeStore<&'static str>, false>().unwrap();
 
         run::<VecStorage<f32>, VecStorage<&'static str>, true>().unwrap();
-        //run::<SparseStorage<f32>, SparseStorage<&'static str>, true>().unwrap();
-        run::<BTreeStorage<f32>, BTreeStorage<&'static str>, true>().unwrap();
+        run::<RangeStore<f32>, RangeStore<&'static str>, true>().unwrap();
     }
 
     #[test]
     fn can_join_not() {
         let vs_abc = make_abc_vecstorage();
         let vs_246 = make_2468_vecstorage();
-        let joined = (&vs_abc, !&vs_246).join().collect::<Vec<_>>();
-        assert_eq!(joined, vec![(1, &"def".to_string(), ()),]);
+        let joined = (&vs_abc, !&vs_246)
+            .join()
+            .map(|(s, t)| {
+                assert!(s.id() == t.id());
+                (s.id(), s.value().as_str(), t.value().clone())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(joined, vec![(1, "def", ()),]);
 
-        let joined = (&vs_abc, !&vs_246).par_join().collect::<Vec<_>>();
-        assert_eq!(joined, vec![(&"def".to_string(), ()),]);
+        let joined = (&vs_abc, !&vs_246).par_join().map(|(e, n)| (e.as_str(), n)).collect::<Vec<_>>();
+        assert_eq!(joined, vec![("def", ()),]);
     }
 
     #[test]
@@ -709,32 +679,45 @@ pub mod test {
         let vs_abc = make_abc_vecstorage();
         let vs_246 = make_2468_vecstorage();
 
+        fn unwrap<'a, 'b: 'a>(
+            iter: &'a mut impl Iterator<Item = (&'b Entry<String>, Maybe<&'b Entry<i32>>)>,
+        ) -> (usize, String, Option<i32>) {
+            let (s, Maybe { key, inner }) = iter.next().unwrap();
+            assert!(s.id() == key);
+            (
+                s.id(),
+                s.value().clone(),
+                inner.as_ref().map(|e| *e.value()),
+            )
+        }
+
         let mut joined = (&vs_abc, vs_246.maybe()).join();
-        assert_eq!(joined.next().unwrap(), (0, &"abc".to_string(), Some(&0)));
-        assert_eq!(joined.next().unwrap(), (1, &"def".to_string(), None));
-        assert_eq!(joined.next().unwrap(), (2, &"hij".to_string(), Some(&2)));
-        assert_eq!(joined.next().unwrap(), (10, &"666".to_string(), Some(&10)));
+        assert_eq!(unwrap(&mut joined), (0, "abc".to_string(), Some(0)));
+        assert_eq!(unwrap(&mut joined), (1, "def".to_string(), None));
+        assert_eq!(unwrap(&mut joined), (2, "hij".to_string(), Some(2)));
+        assert_eq!(unwrap(&mut joined), (10, "666".to_string(), Some(10)));
         assert_eq!(joined.next(), None);
 
         let joined = (&vs_abc, vs_246.maybe_par_iter())
             .par_join()
+            .map(|(es, ns)| (es.as_str(), ns.as_ref().map(|e| e.value)))
             .collect::<Vec<_>>();
         assert_eq!(
             joined,
             vec![
-                (&"abc".to_string(), Some(&0)),
-                (&"def".to_string(), None),
-                (&"hij".to_string(), Some(&2)),
-                (&"666".to_string(), Some(&10))
+                ("abc", Some(0)),
+                ("def", None),
+                ("hij", Some(2)),
+                ("666", Some(10))
             ]
         );
 
-        let mut btree = BTreeStorage::<usize>::default();
-        btree.insert(0, 0);
-        let joined = (&btree,).par_join().collect::<Vec<_>>();
-        assert_eq!(joined, vec![&0]);
-        let joined = (&mut btree,).par_join().collect::<Vec<_>>();
-        assert_eq!(joined, vec![&0]);
+        let mut range = RangeStore::<usize>::default();
+        range.insert(0, 0);
+        let joined = (&range,).par_join().map(|e| e.value).collect::<Vec<_>>();
+        assert_eq!(joined, vec![0]);
+        let joined = (&mut range,).par_join().map(|e| e.value).collect::<Vec<_>>();
+        assert_eq!(joined, vec![0]);
     }
 
     #[test]
@@ -742,10 +725,12 @@ pub mod test {
         let vs_abc = make_abc_vecstorage();
         let vs_246 = make_2468_vecstorage();
 
-        let mut iter = (&vs_abc, &vs_246).join();
-        assert_eq!(iter.next(), Some((0, &"abc".to_string(), &0)));
-        assert_eq!(iter.next(), Some((2, &"hij".to_string(), &2)));
-        assert_eq!(iter.next(), Some((10, &"666".to_string(), &10)));
+        let mut iter = (&vs_abc, &vs_246)
+            .join()
+            .map(|(s, i)| (s.id(), s.as_str(), *i.value()));
+        assert_eq!(iter.next(), Some((0, "abc", 0)));
+        assert_eq!(iter.next(), Some((2, "hij", 2)));
+        assert_eq!(iter.next(), Some((10, "666", 10)));
     }
 
     #[test]
@@ -773,5 +758,12 @@ pub mod test {
                 e
             })
             .collect::<Vec<_>>();
+    }
+
+    #[test]
+    fn choose_system_iteration_type() {
+        let max = u64::MAX as f32;
+        let years: f32 = max / (1000.0 * 60.0 * 60.0 * 60.0 * 24.0 * 365.0);
+        assert!(1.0 <= years, "{} years", years);
     }
 }

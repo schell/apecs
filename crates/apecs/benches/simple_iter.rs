@@ -43,7 +43,7 @@ where
     }
 
     pub fn run(&mut self) {
-        for (_, velocity, position) in (&self.vs, &mut self.ps).join() {
+        for (velocity, position) in (&self.vs, &mut self.ps).join() {
             position.0 += velocity.0;
         }
     }

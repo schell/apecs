@@ -4,8 +4,6 @@ use std::{iter::Map, ops::Deref};
 
 use hibitset::{BitIter, BitSet, BitSetLike};
 
-use crate::storage::Entry;
-
 #[derive(Clone, Copy)]
 pub struct Entity {
     id: usize,
@@ -62,11 +60,8 @@ impl Entities {
         self.dead.push(entity);
     }
 
-    pub fn iter(&self) -> Map<BitIter<&BitSet>, fn(u32) -> Entry<usize>> {
-        (&self.alive_set).iter().map(|id| Entry {
-            key: id as usize,
-            value: id as usize,
-        })
+    pub fn iter(&self) -> Map<BitIter<&BitSet>, fn(u32) -> usize> {
+        (&self.alive_set).iter().map(|id| id as usize)
     }
 
     pub fn recycle_dead(&mut self) {

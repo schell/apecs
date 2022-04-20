@@ -464,9 +464,9 @@ mod test {
             let mut highest_pos: (f32, f32) = (0.0, f32::NEG_INFINITY);
 
             move |data: StatefulSystemData| {
-                for (_, pos) in (&data.positions,).join() {
+                for pos in data.positions.iter() {
                     if pos.1 > highest_pos.1 {
-                        highest_pos = *pos;
+                        highest_pos = *pos.value();
                     }
                 }
 
@@ -522,9 +522,9 @@ mod test {
                 Write<FxHashMap<String, u32>>,
             ),
         ) -> anyhow::Result<ShouldContinue> {
-            for (_, name, number) in (&data.0, &data.1).join() {
-                if !data.2.contains_key(name) {
-                    let _ = data.2.insert(name.to_string(), *number);
+            for (name, number) in (&data.0, &data.1).join() {
+                if !data.2.contains_key(name.value()) {
+                    let _ = data.2.insert(name.to_string(), *number.value());
                 }
             }
 

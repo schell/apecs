@@ -62,9 +62,9 @@ apecs_derive::impl_parjoin_tuple!((A, B, C, D, E, F, G, H, I, J, K, L));
 pub fn sync<A, B>(a: &mut A, next_a: &mut A::Item, b: &mut B, next_b: &mut B::Item) -> Option<()>
 where
     A: Iterator,
-    <A as Iterator>::Item: StorageComponent,
+    A::Item: IsEntry,
     B: Iterator,
-    <B as Iterator>::Item: StorageComponent,
+    B::Item: IsEntry,
 {
     while next_a.id() != next_b.id() {
         while next_a.id() < next_b.id() {
@@ -79,22 +79,6 @@ where
 }
 
 pub struct JoinedIter<T>(T);
-
-impl<A> Iterator for JoinedIter<(A,)>
-where
-    A: Iterator,
-    <A as Iterator>::Item: StorageComponent,
-{
-    type Item = (
-        usize,
-        <<A as Iterator>::Item as StorageComponent>::Component,
-    );
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let next_a = self.0 .0.next()?.split();
-        Some((next_a.0, next_a.1))
-    }
-}
 
 pub trait Join {
     type Iter: Iterator;
@@ -119,16 +103,18 @@ impl<'a, T: CanReadStorage> Join for &'a T {
 }
 
 impl<'a> Join for &'a Entities {
-    type Iter = Map<BitIter<&'a BitSet>, fn(u32) -> Entry<usize>>;
+    type Iter = Map<BitIter<&'a BitSet>, fn(u32) -> usize>;
 
     fn join(self) -> Self::Iter {
         self.iter()
     }
 }
 
-impl<T: Join> Join for Without<T>
+impl<C, T> Join for Without<T>
 where
-    <<T as Join>::Iter as Iterator>::Item: StorageComponent
+    C: IsEntry,
+    T: Join,
+    T::Iter: Iterator<Item = C>,
 {
     type Iter = WithoutIter<T::Iter>;
 
@@ -137,10 +123,10 @@ where
     }
 }
 
-impl<T> Join for MaybeIter<T>
+impl<T, C> Join for MaybeIter<C, T>
 where
-    T: Iterator,
-    T::Item: StorageComponent,
+    C: IsEntry,
+    T: Iterator<Item = C>,
 {
     type Iter = Self;
 
@@ -149,13 +135,12 @@ where
     }
 }
 
-impl<A: Join> Join for (A,)
+impl<A> Join for (A,)
 where
-    A::Iter: Iterator,
-    <A::Iter as Iterator>::Item: StorageComponent,
+    A: Join,
+    <A::Iter as Iterator>::Item: IsEntry,
 {
     type Iter = JoinedIter<(A::Iter,)>;
-
     fn join(self) -> Self::Iter {
         JoinedIter((self.0.join(),))
     }
@@ -165,10 +150,8 @@ impl<A, B> Join for (A, B)
 where
     A: Join,
     B: Join,
-    A::Iter: Iterator,
-    B::Iter: Iterator,
-    <A::Iter as Iterator>::Item: StorageComponent,
-    <B::Iter as Iterator>::Item: StorageComponent,
+    <A::Iter as Iterator>::Item: IsEntry,
+    <B::Iter as Iterator>::Item: IsEntry,
 {
     type Iter = JoinedIter<(A::Iter, B::Iter)>;
     fn join(self) -> Self::Iter {
@@ -176,23 +159,32 @@ where
     }
 }
 
+impl<A> Iterator for JoinedIter<(A,)>
+where
+    A: Iterator,
+    A::Item: IsEntry,
+{
+    type Item = A::Item;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0 .0.next()
+    }
+}
+
 impl<A, B> Iterator for JoinedIter<(A, B)>
 where
     A: Iterator,
+    A::Item: IsEntry,
     B: Iterator,
-    <A as Iterator>::Item: StorageComponent,
-    <B as Iterator>::Item: StorageComponent,
+    B::Item: IsEntry,
 {
-    type Item = (
-        usize,
-        <<A as Iterator>::Item as StorageComponent>::Component,
-        <<B as Iterator>::Item as StorageComponent>::Component,
-    );
+    type Item = (A::Item, B::Item);
+
     fn next(&mut self) -> Option<Self::Item> {
         let mut next_0 = self.0 .0.next()?;
         let mut next_1 = self.0 .1.next()?;
         sync(&mut self.0 .0, &mut next_0, &mut self.0 .1, &mut next_1)?;
-        Some((next_0.id(), next_0.value(), next_1.value()))
+        Some((next_0, next_1))
     }
 }
 
@@ -211,6 +203,8 @@ apecs_derive::impl_join_tuple!((A, B, C, D, E, F, G, H, I, J, K, L, M, N));
 
 #[cfg(test)]
 mod test {
+    use std::ops::Deref;
+
     use crate::join::*;
 
     #[test]
@@ -237,7 +231,7 @@ mod test {
 
         let result = (&store_a, &store_b, &store_c)
             .par_join()
-            .map(|(a, b, c)| (*a, *b, *c))
+            .map(|(a, b, c)| (*a.deref(), *b.deref(), *c.deref()))
             .collect::<Vec<_>>();
 
         assert_eq!(check, result);
@@ -249,7 +243,7 @@ mod test {
     fn can_join_entities() {
         let entities = Entities::default();
         let abc_store: VecStorage<String> = VecStorage::default();
-        for (_, _, _) in (&entities, &abc_store).join() {}
+        for (_, _) in (&entities, &abc_store).join() {}
     }
 
     #[test]
@@ -258,7 +252,10 @@ mod test {
         let vs_246 = crate::storage::test::make_2468_vecstorage();
 
         let mut joined = (&vs_abc, !&vs_246).join();
-        assert_eq!(joined.next(), Some((1, &"def".to_string(), ())));
+        let (s, _) = joined.next().unwrap();
+        assert_eq!(s.id(), 1);
+        assert_eq!(s.as_str(), "def");
+
         assert_eq!(joined.next(), None);
 
         let mut vs_a: VecStorage<&str> = VecStorage::default();
@@ -268,7 +265,7 @@ mod test {
         vs_a.insert(4, "a4");
         vs_a.insert(8, "a8");
 
-        let withouts = (!&vs_a,).join().take(5).map(|e| e.0).collect::<Vec<_>>();
+        let withouts = (!&vs_a,).join().take(5).map(|e| e.id()).collect::<Vec<_>>();
         assert_eq!(&withouts, &[2, 5, 6, 7, 9]);
     }
 
@@ -280,7 +277,11 @@ mod test {
         vs.insert(3, "3");
         vs.insert(6, "6");
 
-        let maybes = (vs.maybe(),).join().take(7).collect::<Vec<_>>();
+        let maybes = (vs.maybe(),)
+            .join()
+            .take(7)
+            .map(|Maybe { key, inner }| (key, inner.map(|e| e.value())))
+            .collect::<Vec<_>>();
         assert_eq!(
             &maybes,
             &[

@@ -48,7 +48,7 @@ async fn move_system(mut facade: Facade) -> anyhow::Result<()> {
             mut positions,
             mut velocities,
         } = facade.fetch::<MoveSystemData>().await?;
-        for (_, position, velocity) in (&mut positions, &mut velocities).join() {
+        for (position, velocity) in (&mut positions, &mut velocities).join() {
             position.x += velocity.x;
             if position.x >= 79.0 {
                 velocity.x = -1.0;
@@ -63,7 +63,7 @@ async fn print_system(mut facade: Facade) -> anyhow::Result<()> {
     loop {
         let positions = facade.fetch::<Read<VecStorage<Position>>>().await?;
         let mut line = vec![" "; 80];
-        for (_, position) in (&positions,).join() {
+        for position in (&positions,).join() {
             anyhow::ensure!(
                 position.x >= 0.0 && position.x <= 79.0,
                 "{} is an invalid position",

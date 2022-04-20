@@ -63,8 +63,8 @@ mod fetch;
 pub use fetch::*;
 
 use crate::{
-    storage::{CanReadStorage, CanWriteStorage},
     schedule::Borrow,
+    storage::{CanReadStorage, CanWriteStorage, ParallelStorage},
 };
 
 pub trait IsResource: Any + Send + Sync + 'static {}
@@ -220,7 +220,7 @@ impl<T: IsResource + CanReadStorage> CanReadStorage for Write<T> {
         self.fetched.iter()
     }
 
-    fn last(&self) -> Option<crate::storage::Entry<&Self::Component>> {
+    fn last(&self) -> Option<&crate::storage::Entry<Self::Component>> {
         self.fetched.last()
     }
 }
@@ -244,6 +244,32 @@ impl<T: IsResource + CanWriteStorage> CanWriteStorage for Write<T> {
 
     fn iter_mut(&mut self) -> Self::IterMut<'_> {
         self.fetched.iter_mut()
+    }
+}
+
+impl<S: IsResource + ParallelStorage> ParallelStorage for Write<S> {
+    type ParIter<'a> = S::ParIter<'a>
+    where
+        Self: 'a;
+
+    type IntoParIter<'a> = S::IntoParIter<'a>
+    where
+        Self: 'a;
+
+    type ParIterMut<'a> = S::ParIterMut<'a>
+    where
+        Self: 'a;
+
+    type IntoParIterMut<'a> = S::IntoParIterMut<'a>
+    where
+        Self: 'a;
+
+    fn par_iter(&self) -> Self::IntoParIter<'_> {
+        self.fetched.par_iter()
+    }
+
+    fn par_iter_mut(&mut self) -> Self::IntoParIterMut<'_> {
+        self.fetched.par_iter_mut()
     }
 }
 
@@ -276,7 +302,7 @@ impl<T: IsResource + CanReadStorage> CanReadStorage for Read<T> {
         self.deref().iter()
     }
 
-    fn last(&self) -> Option<crate::storage::Entry<&Self::Component>> {
+    fn last(&self) -> Option<&crate::storage::Entry<Self::Component>> {
         self.deref().last()
     }
 }

@@ -179,8 +179,8 @@ pub fn impl_join_tuple(input: proc_macro::TokenStream) -> proc_macro::TokenStrea
             })
             .collect::<Vec<_>>();
         let result = nexts.iter().fold(
-            quote! {#next_a.id(), #next_a.value()},
-            |acc, (name, _)| quote! {#acc, #name.value()},
+            quote! {#next_a},
+            |acc, (name, _)| quote! {#acc, #name},
         );
         quote! {
             while!(#checks) {
@@ -200,11 +200,10 @@ pub fn impl_join_tuple(input: proc_macro::TokenStream) -> proc_macro::TokenStrea
         impl <#(#tys),*> Iterator for JoinedIter<#tuple>
         where
             #(#tys: Iterator,)*
-            #(<#tys as Iterator>::Item: StorageComponent,)*
+            #(#tys::Item: IsEntry,)*
         {
             type Item = (
-                usize,
-                #(<<#tys as Iterator>::Item as StorageComponent>::Component),*
+                #(#tys::Item),*
             );
 
             fn next(&mut self) -> Option<Self::Item> {
@@ -215,11 +214,10 @@ pub fn impl_join_tuple(input: proc_macro::TokenStream) -> proc_macro::TokenStrea
     };
 
     let join_for_tuple = quote! {
-        impl <#(#tys),*> Join for #tuple
+        impl <#(#tys),* > Join for #tuple
         where
             #(#tys: Join,)*
-            #(#tys::Iter: Iterator,)*
-            #(<#tys::Iter as Iterator>::Item: StorageComponent,)*
+            #(<#tys::Iter as Iterator>::Item: IsEntry,)*
         {
             type Iter = JoinedIter<( #(#tys::Iter),* )>;
 

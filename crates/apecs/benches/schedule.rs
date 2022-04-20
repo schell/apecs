@@ -13,7 +13,7 @@ struct ABSystemData {
 }
 
 fn ab_system(mut data: ABSystemData) -> anyhow::Result<ShouldContinue> {
-    for (_, a, b) in (&mut data.a_store, &mut data.b_store).join() {
+    for (a, b) in (&mut data.a_store, &mut data.b_store).join() {
         std::mem::swap(&mut a.0, &mut b.0);
     }
 
@@ -27,7 +27,7 @@ struct CDSystemData {
 }
 
 fn cd_system(mut data: CDSystemData) -> anyhow::Result<ShouldContinue> {
-    for (_, c, d) in (&mut data.c_store, &mut data.d_store).join() {
+    for (c, d) in (&mut data.c_store, &mut data.d_store).join() {
         std::mem::swap(&mut c.0, &mut d.0);
     }
 
@@ -41,7 +41,7 @@ struct CESystemData {
 }
 
 fn ce_system(mut data: CESystemData) -> anyhow::Result<ShouldContinue> {
-    for (_, c, e) in (&mut data.c_store, &mut data.e_store).join() {
+    for (c, e) in (&mut data.c_store, &mut data.e_store).join() {
         std::mem::swap(&mut c.0, &mut e.0);
     }
 

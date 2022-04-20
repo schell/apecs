@@ -74,7 +74,7 @@ fn move_system(
     velocities: &mut impl CanWriteStorage<Component = Velocity>,
     ticks: &mut usize,
 ) {
-    for (_, mut position, mut velocity) in (positions, velocities).join() {
+    for (position, velocity) in (positions, velocities).join() {
         position.x += velocity.x;
         if position.x >= 79.0 {
             velocity.x = -1.0;
@@ -104,7 +104,7 @@ fn sync_move_system(mut data: MoveSystemData) -> anyhow::Result<ShouldContinue> 
 
 fn print_system(positions: &impl CanReadStorage<Component = Position>) -> anyhow::Result<()> {
     let mut line = vec![" "; 80];
-    for (_, position) in (positions,).join() {
+    for position in (positions,).join() {
         anyhow::ensure!(
             position.x >= 0.0 && position.x <= 79.0,
             "{} is an invalid position",

@@ -124,8 +124,8 @@ mod test {
         }
 
         fn my_system(mut data: MyData) -> anyhow::Result<ShouldContinue> {
-            for (_, _, n) in (&data.strings, &mut data.numbers).join() {
-                *n += 1;
+            for (_, n) in (&data.strings, &mut data.numbers).join() {
+                n.set_value(n.value() + 1);
             }
 
             ok()

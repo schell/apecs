@@ -1,4 +1,6 @@
-use apecs::{anyhow, entities::*, join::*, storage::*, system::*, world::*, Write};
+use std::ops::DerefMut;
+
+use apecs::{entities::*, storage::*};
 
 macro_rules! create_entities {
     ($store:expr; $datas:ident; $entities:ident; $( $variants:ident ),*) => {
@@ -19,7 +21,7 @@ pub struct Data(f32);
 
 pub fn tick<S: CanWriteStorage<Component = Data> + Send + Sync + 'static>(data_storage: &mut S) {
     for data in data_storage.iter_mut() {
-        data.value.0 *= 2.0;
+        data.deref_mut().0 *= 2.0;
     }
 }
 
