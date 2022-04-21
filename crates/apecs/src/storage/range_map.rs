@@ -11,7 +11,7 @@ use rayon::iter::{
     IndexedParallelIterator, IntoParallelIterator, ParallelIterator,
 };
 
-use super::{CanReadStorage, CanWriteStorage, Entry, ParallelStorage, WorldStorage, Without};
+use super::{CanReadStorage, CanWriteStorage, Entry, Without, WorldStorage};
 
 pub struct MissingRange<'a, T>(usize, PhantomData<&'a T>);
 
@@ -197,7 +197,7 @@ where
         impl<'a, I> Producer for RangeStoreProducer<I>
         where
             I: Splittable + Send + Sync,
-            I::Item: Send + Sync
+            I::Item: Send + Sync,
         {
             type Item = Option<I::Item>;
 
@@ -576,12 +576,30 @@ impl<T> RangeStore<T> {
     }
 }
 
-impl<T> CanReadStorage for RangeStore<T> {
+impl<T: Send + Sync> CanReadStorage for RangeStore<T> {
     type Component = T;
 
     type Iter<'a> = RangeStoreIter<'a, T>
     where
         Self: 'a;
+    type ParIter<'a> = RangeStoreParIter<std::slice::Iter<'a, Entry<T>>>
+    where
+        Self: 'a;
+
+    fn par_iter(&self) -> Self::ParIter<'_> {
+        let mut next_id = 0;
+        let mut groups = vec![];
+        for ((start, end), group) in self.groups.iter().zip(self.elements.iter()) {
+            if next_id < *start {
+                groups.push(ParGroupIter::Missing(start - next_id));
+            }
+
+            groups.push(ParGroupIter::Present(group.iter()));
+            next_id = *end + 1;
+        }
+
+        RangeStoreParIter(groups)
+    }
 
     fn last(&self) -> Option<&super::Entry<Self::Component>> {
         let group = self.elements.last()?;
@@ -597,10 +615,29 @@ impl<T> CanReadStorage for RangeStore<T> {
     }
 }
 
-impl<T> CanWriteStorage for RangeStore<T> {
+impl<T: Send + Sync> CanWriteStorage for RangeStore<T> {
     type IterMut<'a> = RangeStoreIterMut<'a, T>
     where
         Self: 'a;
+
+    type ParIterMut<'a> = RangeStoreParIter<std::slice::IterMut<'a, Entry<T>>>
+    where
+        Self: 'a;
+
+    fn par_iter_mut(&mut self) -> Self::ParIterMut<'_> {
+        let mut next_id = 0;
+        let mut groups = vec![];
+        for ((start, end), group) in self.groups.iter().zip(self.elements.iter_mut()) {
+            if next_id < *start {
+                groups.push(ParGroupIter::Missing(start - next_id));
+            }
+
+            groups.push(ParGroupIter::Present(group.iter_mut()));
+            next_id = *end + 1;
+        }
+
+        RangeStoreParIter(groups)
+    }
 
     fn get_mut(&mut self, id: usize) -> Option<&mut Self::Component> {
         RangeStore::get_mut(self, id)
@@ -616,54 +653,6 @@ impl<T> CanWriteStorage for RangeStore<T> {
 
     fn iter_mut(&mut self) -> Self::IterMut<'_> {
         RangeStore::iter_mut(self)
-    }
-}
-
-impl<T: Send + Sync + 'static> ParallelStorage for RangeStore<T> {
-    type ParIter<'a> = RangeStoreParIter<std::slice::Iter<'a, Entry<T>>>
-    where
-        Self: 'a;
-
-    type IntoParIter<'a> = RangeStoreParIter<std::slice::Iter<'a, Entry<T>>>
-    where
-        Self: 'a;
-
-    type ParIterMut<'a> = RangeStoreParIter<std::slice::IterMut<'a, Entry<T>>>
-    where
-        Self: 'a;
-
-    type IntoParIterMut<'a> = RangeStoreParIter<std::slice::IterMut<'a, Entry<T>>>
-    where
-        Self: 'a;
-
-    fn par_iter(&self) -> Self::IntoParIter<'_> {
-        let mut next_id = 0;
-        let mut groups = vec![];
-        for ((start, end), group) in self.groups.iter().zip(self.elements.iter()) {
-            if next_id < *start {
-                groups.push(ParGroupIter::Missing(start - next_id));
-            }
-
-            groups.push(ParGroupIter::Present(group.iter()));
-            next_id = *end + 1;
-        }
-
-        RangeStoreParIter(groups)
-    }
-
-    fn par_iter_mut(&mut self) -> Self::IntoParIterMut<'_> {
-        let mut next_id = 0;
-        let mut groups = vec![];
-        for ((start, end), group) in self.groups.iter().zip(self.elements.iter_mut()) {
-            if next_id < *start {
-                groups.push(ParGroupIter::Missing(start - next_id));
-            }
-
-            groups.push(ParGroupIter::Present(group.iter_mut()));
-            next_id = *end + 1;
-        }
-
-        RangeStoreParIter(groups)
     }
 }
 

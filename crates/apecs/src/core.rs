@@ -64,7 +64,7 @@ pub use fetch::*;
 
 use crate::{
     schedule::Borrow,
-    storage::{CanReadStorage, CanWriteStorage, ParallelStorage},
+    storage::{CanReadStorage, CanWriteStorage},
 };
 
 pub trait IsResource: Any + Send + Sync + 'static {}
@@ -212,12 +212,20 @@ impl<T: IsResource + CanReadStorage> CanReadStorage for Write<T> {
     where
         Self: 'a;
 
+    type ParIter<'a> = T::ParIter<'a>
+    where
+        Self: 'a;
+
     fn get(&self, id: usize) -> Option<&Self::Component> {
         self.fetched.get(id)
     }
 
     fn iter(&self) -> Self::Iter<'_> {
         self.fetched.iter()
+    }
+
+    fn par_iter(&self) -> Self::ParIter<'_> {
+        self.fetched.par_iter()
     }
 
     fn last(&self) -> Option<&crate::storage::Entry<Self::Component>> {
@@ -227,6 +235,10 @@ impl<T: IsResource + CanReadStorage> CanReadStorage for Write<T> {
 
 impl<T: IsResource + CanWriteStorage> CanWriteStorage for Write<T> {
     type IterMut<'a> = T::IterMut<'a>
+    where
+        Self: 'a;
+
+    type ParIterMut<'a> = T::ParIterMut<'a>
     where
         Self: 'a;
 
@@ -245,30 +257,8 @@ impl<T: IsResource + CanWriteStorage> CanWriteStorage for Write<T> {
     fn iter_mut(&mut self) -> Self::IterMut<'_> {
         self.fetched.iter_mut()
     }
-}
 
-impl<S: IsResource + ParallelStorage> ParallelStorage for Write<S> {
-    type ParIter<'a> = S::ParIter<'a>
-    where
-        Self: 'a;
-
-    type IntoParIter<'a> = S::IntoParIter<'a>
-    where
-        Self: 'a;
-
-    type ParIterMut<'a> = S::ParIterMut<'a>
-    where
-        Self: 'a;
-
-    type IntoParIterMut<'a> = S::IntoParIterMut<'a>
-    where
-        Self: 'a;
-
-    fn par_iter(&self) -> Self::IntoParIter<'_> {
-        self.fetched.par_iter()
-    }
-
-    fn par_iter_mut(&mut self) -> Self::IntoParIterMut<'_> {
+    fn par_iter_mut(&mut self) -> Self::ParIterMut<'_> {
         self.fetched.par_iter_mut()
     }
 }
@@ -294,6 +284,14 @@ impl<T: IsResource + CanReadStorage> CanReadStorage for Read<T> {
     where
         Self: 'a;
 
+    type ParIter<'a> = T::ParIter<'a>
+    where
+        Self: 'a;
+
+    fn last(&self) -> Option<&crate::storage::Entry<Self::Component>> {
+        self.deref().last()
+    }
+
     fn get(&self, id: usize) -> Option<&Self::Component> {
         self.deref().get(id)
     }
@@ -302,8 +300,8 @@ impl<T: IsResource + CanReadStorage> CanReadStorage for Read<T> {
         self.deref().iter()
     }
 
-    fn last(&self) -> Option<&crate::storage::Entry<Self::Component>> {
-        self.deref().last()
+    fn par_iter(&self) -> Self::ParIter<'_> {
+        self.deref().par_iter()
     }
 }
 

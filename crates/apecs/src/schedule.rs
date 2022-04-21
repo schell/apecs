@@ -5,7 +5,7 @@ use rayon::{iter::Either, prelude::*};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::{collections::VecDeque, iter::FlatMap, slice::Iter, sync::Arc};
 
-use crate::{mpsc, system::ShouldContinue, world, FetchReadyResource, Resource, ResourceId, storage::SYSTEM_ITERATION};
+use crate::{mpsc, system::ShouldContinue, world, FetchReadyResource, Resource, ResourceId, storage::increment_current_iteration};
 
 pub(crate) trait IsBorrow: std::fmt::Debug {
     fn rez_id(&self) -> ResourceId;
@@ -283,10 +283,10 @@ pub(crate) trait IsSchedule: std::fmt::Debug {
     ) -> anyhow::Result<()> {
         let parallelize = self.get_should_parallelize();
         for batch in self.batches_mut() {
+            increment_current_iteration();
             // make the batch data
             let batch_data = batch.prepare_batch_data(resources, extra.clone())?;
             batch.run(parallelize, batch_data, resources, resources_from_system)?;
-            let _ = SYSTEM_ITERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
 
         Ok(())

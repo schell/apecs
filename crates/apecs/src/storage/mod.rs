@@ -19,14 +19,19 @@ pub mod bitset {
     pub use hibitset::*;
 }
 
-pub(crate) static SYSTEM_ITERATION: AtomicU64 = AtomicU64::new(0);
+static SYSTEM_ITERATION: AtomicU64 = AtomicU64::new(0);
 
-pub fn current_iteration() -> u64 {
-    SYSTEM_ITERATION.load(std::sync::atomic::Ordering::Relaxed)
+pub fn clear_iteration() {
+    SYSTEM_ITERATION.store(0, std::sync::atomic::Ordering::SeqCst)
 }
 
-pub(crate) fn increment_current_iteration() {
-    let _ = SYSTEM_ITERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+pub fn current_iteration() -> u64 {
+    SYSTEM_ITERATION.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Increment the system iteration counter, returning the previous value.
+pub fn increment_current_iteration() -> u64 {
+    SYSTEM_ITERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
 }
 
 pub trait IsEntry {
@@ -99,11 +104,15 @@ impl<T> Entry<T> {
     }
 
     fn mark_changed(&mut self) {
-        self.changed = SYSTEM_ITERATION.load(std::sync::atomic::Ordering::Relaxed);
+        self.changed = current_iteration();
     }
 
     pub fn has_changed_since(&self, iteration: u64) -> bool {
         self.changed > iteration
+    }
+
+    pub fn last_changed(&self) -> u64 {
+        self.changed
     }
 
     pub fn value(&self) -> &T {
@@ -137,7 +146,7 @@ pub struct Without<T>(pub T);
 
 impl<'a, T> IntoParallelIterator for Without<&'a T>
 where
-    T: ParallelStorage,
+    T: CanReadStorage,
     T::ParIter<'a>: Send + Sync,
 {
     type Iter = rayon::iter::Map<T::ParIter<'a>, fn(Option<&'a Entry<T::Component>>) -> Option<()>>;
@@ -284,10 +293,14 @@ impl<T: IntoParallelIterator> IntoParallelIterator for MaybeParIter<T> {
 }
 
 /// A storage that can only be read from
-pub trait CanReadStorage {
-    type Component;
+pub trait CanReadStorage: Send + Sync {
+    type Component: Send + Sync;
 
     type Iter<'a>: Iterator<Item = &'a Entry<Self::Component>>
+    where
+        Self: 'a;
+
+    type ParIter<'a>: IndexedParallelIterator<Item = Option<&'a Entry<Self::Component>>>
     where
         Self: 'a;
 
@@ -318,6 +331,12 @@ pub trait CanReadStorage {
     fn maybe(&self) -> MaybeIter<&Entry<Self::Component>, Self::Iter<'_>> {
         MaybeIter::new(self.iter())
     }
+
+    fn par_iter(&self) -> Self::ParIter<'_>;
+
+    fn maybe_par_iter(&self) -> MaybeParIter<Self::ParIter<'_>> {
+        MaybeParIter(self.par_iter())
+    }
 }
 
 impl<'a, S: CanReadStorage> CanReadStorage for &'a S {
@@ -338,6 +357,15 @@ impl<'a, S: CanReadStorage> CanReadStorage for &'a S {
     fn iter(&self) -> Self::Iter<'_> {
         <S as CanReadStorage>::iter(self)
     }
+
+    type ParIter<'b> = S::ParIter<'b>
+    where
+        Self: 'b;
+
+    fn par_iter(&self) -> Self::ParIter<'_> {
+        <S as CanReadStorage>::par_iter(self)
+    }
+
 }
 
 /// A storage that can be read and written
@@ -346,58 +374,52 @@ pub trait CanWriteStorage: CanReadStorage {
     where
         Self: 'a;
 
+    type ParIterMut<'a>: IndexedParallelIterator<Item = Option<&'a mut Entry<Self::Component>>>
+    where
+        Self: 'a;
+
+    /// Get a mutable reference to the component with the given id.
+    ///
+    /// ## NOTE
+    /// This will cause the component's entry to be marked as changed.
     fn get_mut(&mut self, id: usize) -> Option<&mut Self::Component>;
 
     fn insert(&mut self, id: usize, component: Self::Component) -> Option<Self::Component>;
 
     fn remove(&mut self, id: usize) -> Option<Self::Component>;
 
-    /// Return an iterator over entities, with the mutable components and their indices.
+    /// Return an iterator to all entries, mutably.
+    ///
+    /// ## NOTE
+    /// Iterating over the entries mutably will _not_ cause the entries to be marked as
+    /// changed. Only after mutating the underlying component through [`DerefMut`] or
+    /// [`Entry::set_value`], etc, will a change be reflected in the entry.
     fn iter_mut(&mut self) -> Self::IterMut<'_>;
+
+    /// Return a parallel iterator to all entries, mutably.
+    ///
+    /// ## NOTE
+    /// Iterating over the entries mutably will _not_ cause the entries to be marked as
+    /// changed. Only after mutating the underlying component through [`DerefMut`] or
+    /// [`Entry::set_value`], etc, will a change be reflected in the entry.
+    fn par_iter_mut(&mut self) -> Self::ParIterMut<'_>;
 
     /// Return an iterator over all contiguous entities, regardless
     /// of whether they reside in the storage. Uses mutable components.
     fn maybe_mut(&mut self) -> MaybeIter<&mut Entry<Self::Component>, Self::IterMut<'_>> {
         MaybeIter::new(self.iter_mut())
     }
-}
 
-pub trait ParallelStorage: CanReadStorage + CanWriteStorage + Send + Sync {
-    /// The indexed parallel iterator
-    type ParIter<'a>: IndexedParallelIterator<Item = Option<&'a Entry<Self::Component>>>
-    where
-        Self: 'a;
-    /// A helper type that can be turned into `Self::ParIter<'a>` above.
-    type IntoParIter<'a>: IntoParallelIterator<Iter = Self::ParIter<'a>>
-    where
-        Self: 'a;
-
-    /// The mutable indexed parallel iterator
-    type ParIterMut<'a>: IndexedParallelIterator<Item = Option<&'a mut Entry<Self::Component>>>
-    where
-        Self: 'a;
-    /// A helper type that can be turned into `Self::ParIterMut<'a>` above.
-    type IntoParIterMut<'a>: IntoParallelIterator<Iter = Self::ParIterMut<'a>>
-    where
-        Self: 'a;
-
-    fn par_iter(&self) -> Self::IntoParIter<'_>;
-
-    fn par_iter_mut(&mut self) -> Self::IntoParIterMut<'_>;
-
-    fn maybe_par_iter(&self) -> MaybeParIter<Self::IntoParIter<'_>> {
-        MaybeParIter(self.par_iter())
-    }
-
-    fn maybe_par_iter_mut(&mut self) -> MaybeParIter<Self::IntoParIterMut<'_>> {
+    fn maybe_par_iter_mut(&mut self) -> MaybeParIter<Self::ParIterMut<'_>> {
         MaybeParIter(self.par_iter_mut())
     }
 }
 
-impl<'a, S: ParallelStorage<Component = T> + 'static, T: Send + Sync + 'a> IntoParallelIterator
+
+impl<'a, S: CanReadStorage<Component = T> + 'static, T: Send + Sync + 'a> IntoParallelIterator
     for &'a Read<S>
 {
-    type Iter = <S as ParallelStorage>::ParIter<'a>;
+    type Iter = S::ParIter<'a>;
 
     type Item = Option<&'a Entry<T>>;
 
@@ -406,10 +428,10 @@ impl<'a, S: ParallelStorage<Component = T> + 'static, T: Send + Sync + 'a> IntoP
     }
 }
 
-impl<'a, S: ParallelStorage<Component = T> + 'static, T: Send + 'a> IntoParallelIterator
+impl<'a, S: CanWriteStorage<Component = T> + 'static, T: Send + 'a> IntoParallelIterator
     for &'a mut Write<S>
 {
-    type Iter = <S as ParallelStorage>::ParIterMut<'a>;
+    type Iter = S::ParIterMut<'a>;
 
     type Item = Option<&'a mut Entry<T>>;
 
@@ -418,10 +440,10 @@ impl<'a, S: ParallelStorage<Component = T> + 'static, T: Send + 'a> IntoParallel
     }
 }
 
-impl<'a, S: ParallelStorage<Component = T> + 'static, T: Send + Sync + 'a> IntoParallelIterator
+impl<'a, S: CanWriteStorage<Component = T> + 'static, T: Send + Sync + 'a> IntoParallelIterator
     for &'a Write<S>
 {
-    type Iter = <S as ParallelStorage>::ParIter<'a>;
+    type Iter = S::ParIter<'a>;
 
     type Item = Option<&'a Entry<T>>;
 
@@ -433,15 +455,15 @@ impl<'a, S: ParallelStorage<Component = T> + 'static, T: Send + Sync + 'a> IntoP
 /// Storages that can be read from, written to, joined in parallel, created by default
 /// and stored as a resource in the world.
 pub trait WorldStorage:
-    CanReadStorage + CanWriteStorage + ParallelStorage + Default + 'static
+    CanReadStorage + CanWriteStorage + Default + 'static
 {
     /// Create a new storage with a pre-allocated capacity
     fn new_with_capacity(cap: usize) -> Self;
 
-    /// Perform entity, defragmentation or any other upkeep on the storage.
+    /// Perform entity upkeep, defragmentation or any other upkeep on the storage.
     /// When the storage is added through [`WorldStorageExt::with_storage`]
     /// or [`WorldStorageExt::with_default_storage`], this function will be
-    /// called once per frame.
+    /// called once per frame, automatically.
     fn upkeep(&mut self, dead_ids: &[usize]) {
         for id in dead_ids {
             let _ = self.remove(*id);

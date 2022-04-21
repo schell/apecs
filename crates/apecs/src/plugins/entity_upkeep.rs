@@ -5,7 +5,7 @@
 use std::marker::PhantomData;
 
 use crate as apecs;
-use crate::storage::WorldStorage;
+use crate::storage::{WorldStorage, Tracker};
 use crate::system::{ok, ShouldContinue};
 use crate::{entities::Entities, CanFetch, Read, Write};
 
@@ -54,6 +54,7 @@ impl<Storage: WorldStorage> From<PluginEntityUpkeep<Storage>> for Plugin {
             .with_resource(|| Entities::default())
             .with_resource(|| DestroyedIds(vec![]))
             .with_resource(|| Storage::default())
+            .with_resource(|| Tracker::<Storage>::default())
             .with_system("entity_pre_upkeep", pre_upkeep_system, &[])
             .with_system(
                 &format!("entity_upkeep_{}", std::any::type_name::<Storage>()),
