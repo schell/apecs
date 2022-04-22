@@ -13,7 +13,7 @@ pub use tracking::*;
 mod vec;
 pub use vec::*;
 
-use crate::{plugins::entity_upkeep::PluginEntityUpkeep, world::World, Read, Write};
+use crate::{plugins::entity_upkeep::PluginEntityUpkeep, world::World, Read, Write, ReadExpect, WriteExpect};
 
 pub mod bitset {
     pub use hibitset::*;
@@ -53,6 +53,7 @@ pub struct Entry<T> {
     pub(crate) key: usize,
     pub(crate) value: T,
     changed: u64,
+    added: bool,
 }
 
 impl<T> IsEntry for Entry<T> {
@@ -100,11 +101,13 @@ impl<T> Entry<T> {
             key: id,
             value,
             changed: 0,
+            added: true,
         }
     }
 
     fn mark_changed(&mut self) {
         self.changed = current_iteration();
+        self.added = false;
     }
 
     pub fn has_changed_since(&self, iteration: u64) -> bool {
@@ -205,6 +208,7 @@ where
             key: self.id,
             value: (),
             changed: 0,
+            added: false,
         };
         self.id += 1;
         Some(entry)
@@ -415,8 +419,19 @@ pub trait CanWriteStorage: CanReadStorage {
     }
 }
 
-
 impl<'a, S: CanReadStorage<Component = T> + 'static, T: Send + Sync + 'a> IntoParallelIterator
+    for &'a ReadExpect<S>
+{
+    type Iter = S::ParIter<'a>;
+
+    type Item = Option<&'a Entry<T>>;
+
+    fn into_par_iter(self) -> Self::Iter {
+        self.par_iter().into_par_iter()
+    }
+}
+
+impl<'a, S: Default + CanReadStorage<Component = T> + 'static, T: Send + Sync + 'a> IntoParallelIterator
     for &'a Read<S>
 {
     type Iter = S::ParIter<'a>;
@@ -429,7 +444,7 @@ impl<'a, S: CanReadStorage<Component = T> + 'static, T: Send + Sync + 'a> IntoPa
 }
 
 impl<'a, S: CanWriteStorage<Component = T> + 'static, T: Send + 'a> IntoParallelIterator
-    for &'a mut Write<S>
+    for &'a mut WriteExpect<S>
 {
     type Iter = S::ParIterMut<'a>;
 
@@ -441,6 +456,30 @@ impl<'a, S: CanWriteStorage<Component = T> + 'static, T: Send + 'a> IntoParallel
 }
 
 impl<'a, S: CanWriteStorage<Component = T> + 'static, T: Send + Sync + 'a> IntoParallelIterator
+    for &'a WriteExpect<S>
+{
+    type Iter = S::ParIter<'a>;
+
+    type Item = Option<&'a Entry<T>>;
+
+    fn into_par_iter(self) -> Self::Iter {
+        self.par_iter().into_par_iter()
+    }
+}
+
+impl<'a, S: Default + CanWriteStorage<Component = T> + 'static, T: Send + 'a> IntoParallelIterator
+    for &'a mut Write<S>
+{
+    type Iter = S::ParIterMut<'a>;
+
+    type Item = Option<&'a mut Entry<T>>;
+
+    fn into_par_iter(self) -> Self::Iter {
+        self.par_iter_mut().into_par_iter()
+    }
+}
+
+impl<'a, S: Default + CanWriteStorage<Component = T> + 'static, T: Send + Sync + 'a> IntoParallelIterator
     for &'a Write<S>
 {
     type Iter = S::ParIter<'a>;
@@ -492,16 +531,16 @@ impl WorldStorageExt for World {
         &mut self,
         store: T::StorageType,
     ) -> anyhow::Result<&mut Self> {
-        Ok(self
+        self
             .with_resource(store)?
-            .with_plugin(PluginEntityUpkeep::<T::StorageType>(PhantomData)))
+            .with_plugin(PluginEntityUpkeep::<T::StorageType>(PhantomData))
     }
 
     fn with_default_storage<T: StoredComponent>(&mut self) -> anyhow::Result<&mut Self> {
         let store = <T::StorageType>::default();
-        Ok(self
+        self
             .with_resource(store)?
-            .with_plugin(PluginEntityUpkeep::<T::StorageType>(PhantomData)))
+            .with_plugin(PluginEntityUpkeep::<T::StorageType>(PhantomData))
     }
 }
 
@@ -638,7 +677,7 @@ pub mod test {
                 .with_default_resource::<Entities>()?
                 .with_resource(A::new_with_capacity(1000))?
                 .with_resource(B::new_with_capacity(1000))?
-                .with_system("ab", system::<A, B, IS_PAR>);
+                .with_system("ab", system::<A, B, IS_PAR>)?;
 
             // build the world
             {

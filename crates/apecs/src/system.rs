@@ -324,11 +324,11 @@ impl<'a> IsBatch for AsyncBatch<'a> {
             Some("batch"),
             &resources_from_system.1,
             resources,
-            &mut data.loaned_resources,
+            &mut data.borrowed_resources,
         )?;
 
         anyhow::ensure!(
-            data.loaned_resources.is_empty(),
+            data.borrowed_resources.is_empty(),
             "shared batch resources are still in the wild"
         );
 

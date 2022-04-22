@@ -100,9 +100,14 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
 
             fn construct(
                 tx: apecs::mpsc::Sender<(apecs::ResourceId, apecs::Resource)>,
-                fields: &mut rustc_hash::FxHashMap<apecs::ResourceId, apecs::FetchReadyResource>,
+                fields: &mut apecs::FxHashMap<apecs::ResourceId, apecs::FetchReadyResource>,
             ) -> apecs::anyhow::Result<Self> {
                 Ok(#construct_return)
+            }
+
+            fn plugin() -> apecs::plugins::Plugin {
+                apecs::plugins::Plugin::default()
+                    #(.with_plugin(<#tys as apecs::CanFetch>::plugin()))*
             }
         }
     };
@@ -130,11 +135,16 @@ pub fn impl_canfetch_tuple(input: proc_macro::TokenStream) -> proc_macro::TokenS
 
             fn construct(
                 tx: apecs::mpsc::Sender<(apecs::ResourceId, apecs::Resource)>,
-                fields: &mut rustc_hash::FxHashMap<apecs::ResourceId, apecs::FetchReadyResource>,
+                fields: &mut apecs::FxHashMap<apecs::ResourceId, apecs::FetchReadyResource>,
             ) -> apecs::anyhow::Result<Self> {
                 Ok((
                     #(#tys::construct(tx.clone(), fields)?),*
                 ))
+            }
+
+            fn plugin() -> apecs::plugins::Plugin {
+                apecs::plugins::Plugin::default()
+                    #(.with_plugin(<#tys as apecs::CanFetch>::plugin()))*
             }
         }
     };

@@ -16,3 +16,5 @@ pub mod anyhow {
 }
 
 pub use crate::core::*;
+
+pub use rustc_hash::FxHashMap;

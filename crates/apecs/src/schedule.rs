@@ -5,7 +5,10 @@ use rayon::{iter::Either, prelude::*};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::{collections::VecDeque, iter::FlatMap, slice::Iter, sync::Arc};
 
-use crate::{mpsc, system::ShouldContinue, world, FetchReadyResource, Resource, ResourceId, storage::increment_current_iteration};
+use crate::{
+    mpsc, storage::increment_current_iteration, system::ShouldContinue, world, FetchReadyResource,
+    Resource, ResourceId,
+};
 
 pub(crate) trait IsBorrow: std::fmt::Debug {
     fn rez_id(&self) -> ResourceId;
@@ -45,7 +48,7 @@ pub(crate) trait IsSystem: std::fmt::Debug {
 #[derive(Debug)]
 pub(crate) struct BatchData<T> {
     pub resources: VecDeque<FxHashMap<ResourceId, FetchReadyResource>>,
-    pub loaned_resources: FxHashMap<ResourceId, Arc<Resource>>,
+    pub borrowed_resources: FxHashMap<ResourceId, Arc<Resource>>,
     pub extra: T,
 }
 
@@ -53,7 +56,7 @@ impl<T> BatchData<T> {
     pub fn new(extra: T) -> Self {
         BatchData {
             resources: Default::default(),
-            loaned_resources: Default::default(),
+            borrowed_resources: Default::default(),
             extra,
         }
     }
@@ -108,10 +111,10 @@ pub(crate) trait IsBatch: std::fmt::Debug + Default {
     ) -> anyhow::Result<BatchData<Self::ExtraRunData>> {
         let mut data = BatchData::new(extra);
         for system in self.systems() {
-            let (ready_resources, loaned_resources) =
+            let (ready_resources, borrowed_resources) =
                 world::try_take_resources(resources, system.borrows().iter(), Some(system.name()))?;
             data.resources.push_back(ready_resources);
-            data.loaned_resources.extend(loaned_resources);
+            data.borrowed_resources.extend(borrowed_resources);
         }
 
         Ok(data)
@@ -177,11 +180,11 @@ pub(crate) trait IsBatch: std::fmt::Debug + Default {
             Some("batch"),
             &resources_from_system.1,
             resources,
-            &mut data.loaned_resources,
+            &mut data.borrowed_resources,
         )?;
 
         anyhow::ensure!(
-            data.loaned_resources.is_empty(),
+            data.borrowed_resources.is_empty(),
             "shared batch resources are still in the wild"
         );
 

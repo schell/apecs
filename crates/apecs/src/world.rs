@@ -3,7 +3,7 @@
 use std::{future::Future, sync::Arc};
 
 use anyhow::Context;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
     mpsc,
@@ -14,7 +14,7 @@ use crate::{
         AsyncSchedule, AsyncSystem, AsyncSystemFuture, AsyncSystemRequest, ShouldContinue,
         SyncSchedule, SyncSystem,
     },
-    CanFetch, FetchReadyResource, IsResource, Request, Resource, ResourceId,
+    CanFetch, FetchReadyResource, IsResource, Request, Resource, ResourceId, ResourceRequirement,
 };
 
 pub struct Facade {
@@ -56,9 +56,8 @@ impl Facade {
 pub struct World {
     // world resources
     resources: FxHashMap<ResourceId, Resource>,
-    // resources loaned out to the owner of
-    // this world
-    loaned_resources: FxHashMap<ResourceId, Arc<Resource>>,
+    // resources loaned out by reference
+    borrowed_resources: FxHashMap<ResourceId, Arc<Resource>>,
     // outer resource channel (unbounded)
     resources_from_system: (
         mpsc::Sender<(ResourceId, Resource)>,
@@ -75,7 +74,7 @@ impl Default for World {
     fn default() -> Self {
         Self {
             resources: Default::default(),
-            loaned_resources: FxHashMap::default(),
+            borrowed_resources: FxHashMap::default(),
             resources_from_system: mpsc::unbounded(),
             sync_schedule: SyncSchedule::default(),
             async_systems: vec![],
@@ -89,7 +88,7 @@ pub(crate) fn clear_returned_resources(
     system_name: Option<&str>,
     resources_from_system_rx: &mpsc::Receiver<(ResourceId, Resource)>,
     resources: &mut FxHashMap<ResourceId, Resource>,
-    loaned_resources: &mut FxHashMap<ResourceId, Arc<Resource>>,
+    borrowed_resources: &mut FxHashMap<ResourceId, Arc<Resource>>,
 ) -> anyhow::Result<()> {
     while let Ok((rez_id, resource)) = resources_from_system_rx.try_recv() {
         // put the resources back, there should be nothing stored there currently
@@ -103,8 +102,8 @@ pub(crate) fn clear_returned_resources(
     }
 
     // put the borrowed resources back
-    if !loaned_resources.is_empty() {
-        for (id, rez) in std::mem::take(loaned_resources).into_iter() {
+    if !borrowed_resources.is_empty() {
+        for (id, rez) in std::mem::take(borrowed_resources).into_iter() {
             let rez = Arc::try_unwrap(rez)
                 .map_err(|_| anyhow::anyhow!("could not retreive borrowed resource"))?;
             resources.insert(id, rez);
@@ -212,15 +211,30 @@ impl World {
         Ok(self)
     }
 
-    pub fn with_plugin(&mut self, plugin: impl Into<Plugin>) -> &mut Self {
+    pub fn with_plugin(&mut self, plugin: impl Into<Plugin>) -> anyhow::Result<&mut Self> {
         let plugin = plugin.into();
 
-        for lazy_rez in plugin.resources.into_iter() {
-            if !self.resources.contains_key(lazy_rez.id()) {
-                let (id, resource) = lazy_rez.into();
-                let _ = self.resources.insert(id, resource);
+        let mut missing_required_resources = FxHashSet::default();
+        for req_rez in plugin.resources.into_iter() {
+            if !self.resources.contains_key(req_rez.id()) {
+                match req_rez {
+                    ResourceRequirement::ExpectedExisting(id) => {
+                        missing_required_resources.insert(id);
+                    }
+                    ResourceRequirement::LazyDefault(lazy_rez) => {
+                        let (id, resource) = lazy_rez.into();
+                        missing_required_resources.remove(&id);
+                        let _ = self.resources.insert(id, resource);
+                    }
+                }
             }
         }
+
+        anyhow::ensure!(
+            missing_required_resources.is_empty(),
+            "missing required resources:\n{:#?}",
+            missing_required_resources
+        );
 
         for system in plugin.sync_systems.into_iter() {
             if !self.sync_schedule.contains_system(&system.0.name) {
@@ -240,10 +254,18 @@ impl World {
             self.add_async_system_pack(sys, fut);
         }
 
-        self
+        Ok(self)
     }
 
-    pub fn with_system<T, F>(&mut self, name: impl AsRef<str>, sys_fn: F) -> &mut Self
+    pub fn with_data<T: CanFetch>(&mut self) -> anyhow::Result<&mut Self> {
+        self.with_plugin(T::plugin())
+    }
+
+    pub fn with_system<T, F>(
+        &mut self,
+        name: impl AsRef<str>,
+        sys_fn: F,
+    ) -> anyhow::Result<&mut Self>
     where
         F: FnMut(T) -> anyhow::Result<ShouldContinue> + Send + Sync + 'static,
         T: CanFetch,
@@ -256,16 +278,17 @@ impl World {
         name: impl AsRef<str>,
         deps: &[&str],
         sys_fn: F,
-    ) -> &mut Self
+    ) -> anyhow::Result<&mut Self>
     where
         F: FnMut(T) -> anyhow::Result<ShouldContinue> + Send + Sync + 'static,
         T: CanFetch,
     {
         let system = SyncSystem::new(name, sys_fn);
 
+        self.with_plugin(T::plugin())?;
         self.sync_schedule
             .add_system_with_dependecies(system, deps.iter());
-        self
+        Ok(self)
     }
 
     pub fn with_sync_systems_run_in_parallel(&mut self, parallelize: bool) -> &mut Self {
@@ -338,7 +361,7 @@ impl World {
             None,
             &self.resources_from_system.1,
             &mut self.resources,
-            &mut self.loaned_resources,
+            &mut self.borrowed_resources,
         )?;
 
         // run the scheduled sync systems
@@ -353,7 +376,7 @@ impl World {
             None,
             &self.resources_from_system.1,
             &mut self.resources,
-            &mut self.loaned_resources,
+            &mut self.borrowed_resources,
         )
         .unwrap();
 
@@ -403,12 +426,36 @@ impl World {
         Ok(())
     }
 
+    /// Attempt to get a reference to one resource.
+    pub fn resource_get<T: IsResource>(&self) -> anyhow::Result<&T> {
+        let id = ResourceId::new::<T>();
+        let box_t: &Resource = self
+            .resources
+            .get(&id)
+            .with_context(|| format!("resource {} is missing", id.name))?;
+        box_t
+            .downcast_ref()
+            .with_context(|| "could not downcast resource")
+    }
+
+    /// Attempt to get a mutable reference to one resource.
+    pub fn resource_get_mut<T: IsResource>(&mut self) -> anyhow::Result<&mut T> {
+        let id = ResourceId::new::<T>();
+        let box_t: &mut Resource = self
+            .resources
+            .get_mut(&id)
+            .with_context(|| format!("resource {} is missing", id.name))?;
+        box_t
+            .downcast_mut()
+            .with_context(|| "could not downcast resource")
+    }
+
     pub fn fetch<T: CanFetch>(&mut self) -> anyhow::Result<T> {
         clear_returned_resources(
             None,
             &self.resources_from_system.1,
             &mut self.resources,
-            &mut self.loaned_resources,
+            &mut self.borrowed_resources,
         )?;
 
         let reads = T::reads().into_iter().map(|id| Borrow {
@@ -422,7 +469,7 @@ impl World {
         let borrows = reads.chain(writes).collect::<Vec<_>>();
         let (mut rezs, staying_refs) =
             try_take_resources(&mut self.resources, borrows.iter(), None)?;
-        self.loaned_resources.extend(staying_refs);
+        self.borrowed_resources.extend(staying_refs);
         T::construct(self.resources_from_system.0.clone(), &mut rezs)
     }
 
@@ -485,8 +532,7 @@ mod test {
 
         let mut world = World::default();
         world
-            .with_resource(positions)?
-            .with_system("stateful", mk_stateful_system(tx));
+            .with_system("stateful", mk_stateful_system(tx))?;
 
         world.tick()?;
 
@@ -540,12 +586,8 @@ mod test {
         let (tx, rx) = spsc::bounded(1);
         let mut world = World::default();
         world
-            .with_default_resource::<Entities>()?
-            .with_default_resource::<VecStorage<String>>()?
-            .with_default_resource::<VecStorage<u32>>()?
-            .with_default_resource::<FxHashMap<String, u32>>()?
             .with_async_system("create", |facade| async move { create(tx, facade).await })
-            .with_system("maintain", maintain_map);
+            .with_system("maintain", maintain_map)?;
 
         // create system runs - sending on the channel and making the fetch request
         world.tick()?;

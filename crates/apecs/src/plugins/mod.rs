@@ -4,28 +4,10 @@ use std::future::Future;
 use crate::{
     system::{AsyncSystemFuture, ShouldContinue, SyncSystem},
     world::Facade,
-    CanFetch, IsResource, Resource, ResourceId,
+    CanFetch, IsResource, ResourceId, ResourceRequirement, LazyResource,
 };
 
 pub mod entity_upkeep;
-
-pub struct LazyResource(ResourceId, Box<dyn FnOnce() -> Resource>);
-
-impl LazyResource {
-    pub fn new<T: IsResource>(f: impl FnOnce() -> T + 'static) -> LazyResource {
-        LazyResource(ResourceId::new::<T>(), Box::new(move || Box::new(f())))
-    }
-
-    pub fn id(&self) -> &ResourceId {
-        &self.0
-    }
-}
-
-impl From<LazyResource> for (ResourceId, Resource) {
-    fn from(lazy_rez: LazyResource) -> Self {
-        (lazy_rez.0, lazy_rez.1())
-    }
-}
 
 pub struct SyncSystemWithDeps(pub SyncSystem, pub Vec<String>);
 
@@ -59,7 +41,7 @@ where
 
 #[derive(Default)]
 pub struct Plugin {
-    pub resources: Vec<LazyResource>,
+    pub resources: Vec<ResourceRequirement>,
     pub sync_systems: Vec<SyncSystemWithDeps>,
     pub async_systems: Vec<LazyAsyncSystem>,
 }
@@ -73,8 +55,22 @@ impl Plugin {
         self
     }
 
-    pub fn with_resource<T: IsResource>(mut self, mk_rez: impl FnOnce() -> T + 'static) -> Self {
-        self.resources.push(LazyResource::new(mk_rez));
+    /// Add a dependency on a resource that can be created with [`Default::default()`].
+    ///
+    /// If this resource does not already exist in the world at the time this plugin is instantiated,
+    /// it will be inserted into the [`World`].
+    pub fn with_default_resource<T: IsResource + Default>(mut self) -> Self {
+        self.resources.push(ResourceRequirement::LazyDefault(LazyResource::new(|| T::default())));
+        self
+    }
+
+    /// Add a dependency on a resource that must already exist in the [`World`] at the time of plugin
+    /// instantiation.
+    ///
+    /// If this resource does not already exist in the world at the time this plugin is instantiated,
+    /// adding the plugin will err.
+    pub fn with_expected_resource<T: IsResource>(mut self) -> Self {
+        self.resources.push(ResourceRequirement::ExpectedExisting(ResourceId::new::<T>()));
         self
     }
 
@@ -87,7 +83,7 @@ impl Plugin {
         let deps = if deps.is_empty() { None } else { Some(deps) };
         self.sync_systems
             .push(SyncSystemWithDeps::new(name, system, deps));
-        self
+        self.with_plugin(T::plugin())
     }
 
     pub fn with_async_system<Fut>(
@@ -115,7 +111,6 @@ mod test {
     #[test]
     fn sanity() {
         use apecs::{join::Join, storage::VecStorage, system::*, world::World, CanFetch, Write};
-        struct MyPlugin;
 
         #[derive(CanFetch)]
         struct MyData {
@@ -131,16 +126,12 @@ mod test {
             ok()
         }
 
-        impl From<MyPlugin> for Plugin {
-            fn from(_: MyPlugin) -> Plugin {
-                Plugin::default()
-                    .with_resource(|| VecStorage::<&'static str>::default())
-                    .with_resource(|| VecStorage::<usize>::default())
-                    .with_system("my_system", my_system, &[])
-            }
-        }
+        let plugin = MyData::plugin();
+        assert_eq!(2, plugin.resources.len());
 
         let mut world = World::default();
-        world.with_plugin(MyPlugin);
+        world.with_system("my_system", my_system).unwrap();
+
+        let _data = world.fetch::<MyData>().unwrap();
     }
 }

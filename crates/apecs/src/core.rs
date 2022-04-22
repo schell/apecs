@@ -1,13 +1,16 @@
 //! Core types and processes
+use crate::{
+    schedule::Borrow,
+    storage::{CanReadStorage, CanWriteStorage}, plugins::Plugin,
+};
+use anyhow::Context;
+use rustc_hash::FxHashMap;
 use std::{
     any::{Any, TypeId},
     marker::PhantomData,
     ops::{Deref, DerefMut},
     sync::Arc,
 };
-
-use anyhow::Context;
-use rustc_hash::FxHashMap;
 
 pub use apecs_derive::CanFetch;
 
@@ -61,11 +64,6 @@ pub mod mpmc {
 
 mod fetch;
 pub use fetch::*;
-
-use crate::{
-    schedule::Borrow,
-    storage::{CanReadStorage, CanWriteStorage},
-};
 
 pub trait IsResource: Any + Send + Sync + 'static {}
 impl<T: Any + Send + Sync + 'static> IsResource for T {}
@@ -187,25 +185,23 @@ impl<'a, T: IsResource> Drop for Fetched<T> {
     }
 }
 
-pub struct Write<T: IsResource> {
-    fetched: Fetched<T>,
-}
+pub struct Write<T: IsResource + Default>(Fetched<T>);
 
-impl<'a, T: IsResource> Deref for Write<T> {
+impl<T: IsResource + Default> Deref for Write<T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        self.fetched.inner.as_ref().unwrap()
+        self.0.inner.as_ref().unwrap()
     }
 }
 
-impl<'a, T: IsResource> DerefMut for Write<T> {
+impl<'a, T: IsResource + Default> DerefMut for Write<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.fetched.inner.as_mut().unwrap()
+        self.0.inner.as_mut().unwrap()
     }
 }
 
-impl<T: IsResource + CanReadStorage> CanReadStorage for Write<T> {
+impl<T: IsResource + Default + CanReadStorage> CanReadStorage for Write<T> {
     type Component = T::Component;
 
     type Iter<'a> = T::Iter<'a>
@@ -217,23 +213,97 @@ impl<T: IsResource + CanReadStorage> CanReadStorage for Write<T> {
         Self: 'a;
 
     fn get(&self, id: usize) -> Option<&Self::Component> {
-        self.fetched.get(id)
+        self.0.get(id)
     }
 
     fn iter(&self) -> Self::Iter<'_> {
-        self.fetched.iter()
+        self.0.iter()
     }
 
     fn par_iter(&self) -> Self::ParIter<'_> {
-        self.fetched.par_iter()
+        self.0.par_iter()
     }
 
     fn last(&self) -> Option<&crate::storage::Entry<Self::Component>> {
-        self.fetched.last()
+        self.0.last()
     }
 }
 
-impl<T: IsResource + CanWriteStorage> CanWriteStorage for Write<T> {
+impl<T: IsResource + Default + CanWriteStorage> CanWriteStorage for Write<T> {
+    type IterMut<'a> = T::IterMut<'a>
+         where
+             Self: 'a;
+
+    type ParIterMut<'a> = T::ParIterMut<'a>
+         where
+             Self: 'a;
+
+    fn get_mut(&mut self, id: usize) -> Option<&mut Self::Component> {
+        self.0.get_mut(id)
+    }
+
+    fn insert(&mut self, id: usize, component: Self::Component) -> Option<Self::Component> {
+        self.0.insert(id, component)
+    }
+
+    fn remove(&mut self, id: usize) -> Option<Self::Component> {
+        self.0.remove(id)
+    }
+
+    fn iter_mut(&mut self) -> Self::IterMut<'_> {
+        self.0.iter_mut()
+    }
+
+    fn par_iter_mut(&mut self) -> Self::ParIterMut<'_> {
+        self.0.par_iter_mut()
+    }
+}
+
+pub struct WriteExpect<T: IsResource>(Fetched<T>);
+
+impl<T: IsResource> Deref for WriteExpect<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.inner.as_ref().unwrap()
+    }
+}
+
+impl<'a, T: IsResource> DerefMut for WriteExpect<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0.inner.as_mut().unwrap()
+    }
+}
+
+impl<T: IsResource + CanReadStorage> CanReadStorage for WriteExpect<T> {
+    type Component = T::Component;
+
+    type Iter<'a> = T::Iter<'a>
+    where
+        Self: 'a;
+
+    type ParIter<'a> = T::ParIter<'a>
+    where
+        Self: 'a;
+
+    fn get(&self, id: usize) -> Option<&Self::Component> {
+        self.0.get(id)
+    }
+
+    fn iter(&self) -> Self::Iter<'_> {
+        self.0.iter()
+    }
+
+    fn par_iter(&self) -> Self::ParIter<'_> {
+        self.0.par_iter()
+    }
+
+    fn last(&self) -> Option<&crate::storage::Entry<Self::Component>> {
+        self.0.last()
+    }
+}
+
+impl<T: IsResource + CanWriteStorage> CanWriteStorage for WriteExpect<T> {
     type IterMut<'a> = T::IterMut<'a>
     where
         Self: 'a;
@@ -243,32 +313,32 @@ impl<T: IsResource + CanWriteStorage> CanWriteStorage for Write<T> {
         Self: 'a;
 
     fn get_mut(&mut self, id: usize) -> Option<&mut Self::Component> {
-        self.fetched.get_mut(id)
+        self.0.get_mut(id)
     }
 
     fn insert(&mut self, id: usize, component: Self::Component) -> Option<Self::Component> {
-        self.fetched.insert(id, component)
+        self.0.insert(id, component)
     }
 
     fn remove(&mut self, id: usize) -> Option<Self::Component> {
-        self.fetched.remove(id)
+        self.0.remove(id)
     }
 
     fn iter_mut(&mut self) -> Self::IterMut<'_> {
-        self.fetched.iter_mut()
+        self.0.iter_mut()
     }
 
     fn par_iter_mut(&mut self) -> Self::ParIterMut<'_> {
-        self.fetched.par_iter_mut()
+        self.0.par_iter_mut()
     }
 }
 
-pub struct Read<T: IsResource> {
+pub struct Read<T: IsResource + Default> {
     inner: Arc<Resource>,
     _phantom: PhantomData<T>,
 }
 
-impl<'a, T: IsResource> Deref for Read<T> {
+impl<'a, T: IsResource + Default> Deref for Read<T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -277,7 +347,49 @@ impl<'a, T: IsResource> Deref for Read<T> {
     }
 }
 
-impl<T: IsResource + CanReadStorage> CanReadStorage for Read<T> {
+impl<T: IsResource + Default + CanReadStorage> CanReadStorage for Read<T> {
+    type Component = T::Component;
+
+    type Iter<'a> = T::Iter<'a>
+    where
+        Self: 'a;
+
+    type ParIter<'a> = T::ParIter<'a>
+    where
+        Self: 'a;
+
+    fn last(&self) -> Option<&crate::storage::Entry<Self::Component>> {
+        self.deref().last()
+    }
+
+    fn get(&self, id: usize) -> Option<&Self::Component> {
+        self.deref().get(id)
+    }
+
+    fn iter(&self) -> Self::Iter<'_> {
+        self.deref().iter()
+    }
+
+    fn par_iter(&self) -> Self::ParIter<'_> {
+        self.deref().par_iter()
+    }
+}
+
+pub struct ReadExpect<T: IsResource> {
+    inner: Arc<Resource>,
+    _phantom: PhantomData<T>,
+}
+
+impl<'a, T: IsResource> Deref for ReadExpect<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        // I don't like this unwrap, but it works
+        self.inner.downcast_ref().unwrap()
+    }
+}
+
+impl<T: IsResource + CanReadStorage> CanReadStorage for ReadExpect<T> {
     type Component = T::Component;
 
     type Iter<'a> = T::Iter<'a>
@@ -310,16 +422,93 @@ pub struct Request {
     pub borrows: Vec<Borrow>,
 }
 
+pub struct LazyResource(ResourceId, Box<dyn FnOnce() -> Resource>);
+
+impl LazyResource {
+    pub fn new<T: IsResource>(f: impl FnOnce() -> T + 'static) -> LazyResource {
+        LazyResource(ResourceId::new::<T>(), Box::new(move || Box::new(f())))
+    }
+
+    pub fn id(&self) -> &ResourceId {
+        &self.0
+    }
+}
+
+impl From<LazyResource> for (ResourceId, Resource) {
+    fn from(lazy_rez: LazyResource) -> Self {
+        (lazy_rez.0, lazy_rez.1())
+    }
+}
+
+pub enum ResourceRequirement {
+    LazyDefault(LazyResource),
+    ExpectedExisting(ResourceId),
+}
+
+impl ResourceRequirement {
+    pub fn id(&self) -> &ResourceId {
+        match self {
+            ResourceRequirement::LazyDefault(lazy) => &lazy.0,
+            ResourceRequirement::ExpectedExisting(id) => &id,
+        }
+    }
+
+    pub fn is_lazy_default(&self) -> bool {
+        matches!(self, ResourceRequirement::LazyDefault(_))
+    }
+}
+
+/// Types that can be fetched from the [`World`].
 pub trait CanFetch: Sized {
     fn reads() -> Vec<ResourceId>;
+
     fn writes() -> Vec<ResourceId>;
+
     fn construct(
         resource_return_tx: mpsc::Sender<(ResourceId, Resource)>,
         fields: &mut FxHashMap<ResourceId, FetchReadyResource>,
     ) -> anyhow::Result<Self>;
+
+    fn all_resources() -> Vec<ResourceId> {
+        let mut rs = vec![];
+        rs.extend(Self::reads());
+        rs.extend(Self::writes());
+        rs
+    }
+
+    /// Return a plugin containing the systems and sub-resources required to create and use the type.
+    ///
+    /// This will be used by functions like [`World::with_plugin`] to ensure that a type's
+    /// resources have been created, and that the systems required for upkeep are included.
+    fn plugin() -> Plugin {
+        Plugin::default()
+    }
 }
 
-impl<'a, T: IsResource> CanFetch for Write<T> {
+impl<'a, T: IsResource + Default> CanFetch for Write<T> {
+    fn writes() -> Vec<ResourceId> {
+        vec![ResourceId::new::<T>()]
+    }
+
+    fn reads() -> Vec<ResourceId> {
+        vec![]
+    }
+
+    fn construct(
+        resource_return_tx: mpsc::Sender<(ResourceId, Resource)>,
+        fields: &mut FxHashMap<ResourceId, FetchReadyResource>,
+    ) -> anyhow::Result<Self> {
+        let WriteExpect(fetched) = WriteExpect::construct(resource_return_tx, fields)?;
+        Ok(Write(fetched))
+    }
+
+    fn plugin() -> Plugin {
+        Plugin::default()
+            .with_default_resource::<T>()
+    }
+}
+
+impl<'a, T: IsResource + Default> CanFetch for WriteExpect<T> {
     fn writes() -> Vec<ResourceId> {
         vec![ResourceId::new::<T>()]
     }
@@ -350,11 +539,42 @@ impl<'a, T: IsResource> CanFetch for Write<T> {
             resource_return_tx,
             inner,
         };
-        Ok(Write { fetched })
+        Ok(WriteExpect(fetched))
+    }
+
+    fn plugin() -> Plugin {
+        Plugin::default()
+            .with_expected_resource::<T>()
     }
 }
 
-impl<'a, T: IsResource> CanFetch for Read<T> {
+impl<'a, T: IsResource + Default> CanFetch for Read<T> {
+    fn writes() -> Vec<ResourceId> {
+        vec![]
+    }
+
+    fn reads() -> Vec<ResourceId> {
+        vec![ResourceId::new::<T>()]
+    }
+
+    fn construct(
+        resource_return_tx: mpsc::Sender<(ResourceId, Resource)>,
+        fields: &mut FxHashMap<ResourceId, FetchReadyResource>,
+    ) -> anyhow::Result<Self> {
+        let ReadExpect { inner, .. } = ReadExpect::<T>::construct(resource_return_tx, fields)?;
+        Ok(Read {
+            inner,
+            _phantom: PhantomData,
+        })
+    }
+
+    fn plugin() -> Plugin {
+        Plugin::default()
+            .with_default_resource::<T>()
+    }
+}
+
+impl<'a, T: IsResource> CanFetch for ReadExpect<T> {
     fn writes() -> Vec<ResourceId> {
         vec![]
     }
@@ -376,10 +596,15 @@ impl<'a, T: IsResource> CanFetch for Read<T> {
         })?;
         let inner = t.into_ref().context("resource is not borrowed")?;
 
-        Ok(Read {
+        Ok(ReadExpect {
             inner,
             _phantom: PhantomData,
         })
+    }
+
+    fn plugin() -> Plugin {
+        Plugin::default()
+            .with_expected_resource::<T>()
     }
 }
 

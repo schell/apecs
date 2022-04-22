@@ -5,12 +5,13 @@
 use std::marker::PhantomData;
 
 use crate as apecs;
-use crate::storage::{WorldStorage, Tracker};
+use crate::storage::WorldStorage;
 use crate::system::{ok, ShouldContinue};
 use crate::{entities::Entities, CanFetch, Read, Write};
 
 use super::Plugin;
 
+#[derive(Default)]
 pub struct DestroyedIds(Vec<usize>);
 
 #[derive(CanFetch)]
@@ -32,7 +33,7 @@ fn pre_upkeep_system(mut data: PreEntityUpkeepData) -> anyhow::Result<ShouldCont
 }
 
 #[derive(CanFetch)]
-pub struct EntityUpkeep<Storage: Send + Sync + 'static> {
+pub struct EntityUpkeep<Storage: Default + Send + Sync + 'static> {
     dead_ids: Read<DestroyedIds>,
     storage: Write<Storage>,
 }
@@ -51,10 +52,6 @@ pub struct PluginEntityUpkeep<Storage>(pub(crate) PhantomData<Storage>);
 impl<Storage: WorldStorage> From<PluginEntityUpkeep<Storage>> for Plugin {
     fn from(_: PluginEntityUpkeep<Storage>) -> Self {
         Plugin::default()
-            .with_resource(|| Entities::default())
-            .with_resource(|| DestroyedIds(vec![]))
-            .with_resource(|| Storage::default())
-            .with_resource(|| Tracker::<Storage>::default())
             .with_system("entity_pre_upkeep", pre_upkeep_system, &[])
             .with_system(
                 &format!("entity_upkeep_{}", std::any::type_name::<Storage>()),

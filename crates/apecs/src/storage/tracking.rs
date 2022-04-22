@@ -8,19 +8,59 @@ use crate::{CanFetch, IsResource, Read, Write};
 
 use super::{current_iteration, CanReadStorage, Entry};
 
-#[derive(Default)]
+/// Tracks changed components of `T` in a store with components
+/// of `T`.
+///
+/// ## WARNING
+/// Do not pass the store as `T`. `T` is the type of the component.
 pub struct Tracker<T> {
     last_changed: u64,
     _phantom: PhantomData<T>,
 }
 
+impl<T> Default for Tracker<T> {
+    fn default() -> Self {
+        Self {
+            last_changed: current_iteration(),
+            _phantom: Default::default(),
+        }
+    }
+}
+
+impl<T: Send + Sync + 'static> Tracker<T> {
+    pub fn changed_iter<'b>(
+        &self,
+        store: &'b impl CanReadStorage<Component = T>,
+    ) -> impl Iterator<Item = &'b Entry<T>> {
+        let last_changed = self.last_changed;
+        store
+            .iter()
+            .filter(move |e| e.has_changed_since(last_changed))
+    }
+
+    pub fn changed_par_iter<'b>(
+        &self,
+        store: &'b impl CanReadStorage<Component = T>,
+    ) -> impl ParallelIterator<Item = Option<&'b Entry<T>>> + IndexedParallelIterator {
+        let last_changed = self.last_changed;
+        store.par_iter().into_par_iter().map(move |me| {
+            let e = me?;
+            if e.has_changed_since(last_changed) {
+                Some(e)
+            } else {
+                None
+            }
+        })
+    }
+}
+
 #[derive(CanFetch)]
-pub struct Tracked<T: IsResource> {
-    tracker: Write<Tracker<T>>,
+pub struct Tracked<T: CanReadStorage + Default + IsResource> {
+    tracker: Write<Tracker<T::Component>>,
     storage: Read<T>,
 }
 
-impl<S: IsResource + CanReadStorage> CanReadStorage for Tracked<S> {
+impl<S: IsResource + Default + CanReadStorage> CanReadStorage for Tracked<S> {
     type Component = S::Component;
 
     type Iter<'b> = S::Iter<'b>
@@ -47,7 +87,7 @@ impl<S: IsResource + CanReadStorage> CanReadStorage for Tracked<S> {
     }
 }
 
-impl<'a, T: IsResource + CanReadStorage> IntoParallelIterator for &'a Tracked<T>
+impl<'a, T: IsResource + Default + CanReadStorage> IntoParallelIterator for &'a Tracked<T>
 where
     T::Component: Send + Sync,
 {
@@ -60,29 +100,17 @@ where
     }
 }
 
-impl<T: IsResource + CanReadStorage> Tracked<T> {
+impl<T: IsResource + Default + CanReadStorage> Tracked<T> {
     pub fn changed(&self) -> impl Iterator<Item = &Entry<T::Component>> {
-        let last_changed = self.tracker.last_changed;
-        self.storage
-            .iter()
-            .filter(move |e| e.has_changed_since(last_changed))
+        self.tracker.changed_iter(&self.storage)
     }
 
     pub fn changed_par(
         &self,
     ) -> impl ParallelIterator<Item = Option<&Entry<T::Component>>> + IndexedParallelIterator {
-        self.storage.par_iter().into_par_iter().map(|me| {
-            let e = me?;
-            if e.has_changed_since(self.tracker.last_changed) {
-                Some(e)
-            } else {
-                None
-            }
-        })
+        self.tracker.changed_par_iter(&self.storage)
     }
-}
 
-impl<T: IsResource> Tracked<T> {
     /// Clears modifications up to the current iteration.
     pub fn clear_changes(&mut self) {
         self.tracker.last_changed = current_iteration();
@@ -91,10 +119,7 @@ impl<T: IsResource> Tracked<T> {
 
 #[cfg(test)]
 mod test {
-    use crate as apecs;
-
     use crate::{
-        CanFetch,
         storage::*,
         system::{end, ok},
         world::*,
@@ -107,7 +132,7 @@ mod test {
         let mut world = World::default();
         world
             .with_default_resource::<VecStorage<f32>>()?
-            .with_default_resource::<Tracker<VecStorage<f32>>>()?;
+            .with_default_resource::<Tracker<f32>>()?;
 
         {
             let mut store = world.fetch::<Write<VecStorage<f32>>>()?;
@@ -188,18 +213,21 @@ mod test {
                 let _ = comps.insert(2, Component(0.0));
 
                 end()
-            })
-            .with_system_with_dependencies("modify", &["insert"], move |mut comps: WriteStore<Component>| {
-                if mutate {
-                    if let Some(c) = comps.get_mut(1) {
-                        c.0 += 1.0;
-                        mutate = false;
+            })?
+            .with_system_with_dependencies(
+                "modify",
+                &["insert"],
+                move |mut comps: WriteStore<Component>| {
+                    if mutate {
+                        if let Some(c) = comps.get_mut(1) {
+                            c.0 += 1.0;
+                            mutate = false;
+                        }
                     }
-                }
 
-                ok()
-            })
-            .with_default_resource::<Vec<usize>>()?
+                    ok()
+                },
+            )?
             .with_system_with_dependencies(
                 "check",
                 &["modify"],
@@ -212,7 +240,7 @@ mod test {
 
                     ok()
                 },
-            );
+            )?;
 
         world.tick_sync()?;
         assert_eq!(
