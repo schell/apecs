@@ -8,8 +8,7 @@ use crate::{CanFetch, IsResource, Read, Write};
 
 use super::{current_iteration, CanReadStorage, Entry};
 
-/// Tracks changed components of `T` in a store with components
-/// of `T`.
+/// Tracks changed components in a store with components of `T`.
 ///
 /// ## WARNING
 /// Do not pass the store as `T`. `T` is the type of the component.

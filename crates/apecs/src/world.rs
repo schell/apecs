@@ -508,15 +508,19 @@ mod test {
         fn mk_stateful_system(
             tx: spsc::Sender<(f32, f32)>,
         ) -> impl FnMut(StatefulSystemData) -> anyhow::Result<ShouldContinue> {
+            println!("making stateful system");
             let mut highest_pos: (f32, f32) = (0.0, f32::NEG_INFINITY);
 
             move |data: StatefulSystemData| {
+                println!("running stateful system: highest_pos:{:?}", highest_pos);
                 for pos in data.positions.iter() {
                     if pos.1 > highest_pos.1 {
                         highest_pos = *pos.value();
+                        println!("set new highest_pos: {:?}", highest_pos);
                     }
                 }
 
+                println!("sending highest_pos: {:?}", highest_pos);
                 tx.try_send(highest_pos)?;
 
                 ok()
@@ -532,6 +536,7 @@ mod test {
 
         let mut world = World::default();
         world
+            .with_resource(positions)?
             .with_system("stateful", mk_stateful_system(tx))?;
 
         world.tick()?;
@@ -586,6 +591,7 @@ mod test {
         let (tx, rx) = spsc::bounded(1);
         let mut world = World::default();
         world
+            .with_default_resource::<Entities>()?
             .with_async_system("create", |facade| async move { create(tx, facade).await })
             .with_system("maintain", maintain_map)?;
 
