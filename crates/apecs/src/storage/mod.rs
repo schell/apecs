@@ -1,7 +1,6 @@
 //! Entity component storage traits.
 use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 use std::{
-    marker::PhantomData,
     ops::{Deref, DerefMut},
     sync::atomic::AtomicU64,
 };
@@ -13,7 +12,7 @@ pub use tracking::*;
 mod vec;
 pub use vec::*;
 
-use crate::{plugins::entity_upkeep::PluginEntityUpkeep, world::World, Read, Write, ReadExpect, WriteExpect};
+use crate::{Read, Write, ReadExpect, WriteExpect};
 
 pub mod bitset {
     pub use hibitset::*;
@@ -516,33 +515,6 @@ pub trait StoredComponent: Send + Sync + 'static {
 
 pub type ReadStore<T> = Read<<T as StoredComponent>::StorageType>;
 pub type WriteStore<T> = Write<<T as StoredComponent>::StorageType>;
-
-pub trait WorldStorageExt {
-    fn with_storage<T: StoredComponent>(
-        &mut self,
-        store: T::StorageType,
-    ) -> anyhow::Result<&mut Self>;
-
-    fn with_default_storage<T: StoredComponent>(&mut self) -> anyhow::Result<&mut Self>;
-}
-
-impl WorldStorageExt for World {
-    fn with_storage<T: StoredComponent>(
-        &mut self,
-        store: T::StorageType,
-    ) -> anyhow::Result<&mut Self> {
-        self
-            .with_resource(store)?
-            .with_plugin(PluginEntityUpkeep::<T::StorageType>(PhantomData))
-    }
-
-    fn with_default_storage<T: StoredComponent>(&mut self) -> anyhow::Result<&mut Self> {
-        let store = <T::StorageType>::default();
-        self
-            .with_resource(store)?
-            .with_plugin(PluginEntityUpkeep::<T::StorageType>(PhantomData))
-    }
-}
 
 #[cfg(test)]
 pub mod test {

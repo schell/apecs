@@ -1,20 +1,23 @@
 //! The [`World`] contains resources and is responsible for ticking
 //! systems.
-use std::{future::Future, sync::Arc};
+use std::{future::Future, marker::PhantomData, sync::Arc};
 
 use anyhow::Context;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
+    entities::{Entities, Entity},
     mpsc,
-    plugins::Plugin,
+    plugins::{entity_upkeep::PluginEntityUpkeep, Plugin},
     schedule::{Borrow, IsBorrow, IsSchedule},
     spsc,
+    storage::{CanWriteStorage, StoredComponent, WorldStorage},
     system::{
         AsyncSchedule, AsyncSystem, AsyncSystemFuture, AsyncSystemRequest, ShouldContinue,
         SyncSchedule, SyncSystem,
     },
     CanFetch, FetchReadyResource, IsResource, Request, Resource, ResourceId, ResourceRequirement,
+    Write,
 };
 
 pub struct Facade {
@@ -50,6 +53,29 @@ impl Facade {
 
         T::construct(self.resources_from_system_tx.clone(), &mut resources)
             .with_context(|| format!("could not construct {}", std::any::type_name::<T>()))
+    }
+}
+
+pub struct EntityBuilder<'a> {
+    entity: Entity,
+    world: &'a mut World,
+}
+
+impl<'a> EntityBuilder<'a> {
+    pub fn with<C: StoredComponent>(self, component: C) -> anyhow::Result<Self>
+    where
+        C::StorageType: WorldStorage,
+    {
+        if !self.world.has_resource::<C::StorageType>() {
+            self.world.with_default_storage::<C>()?;
+        }
+        let mut storage: Write<C::StorageType> = self.world.fetch()?;
+        let _ = storage.insert(self.entity.id(), component);
+        Ok(self)
+    }
+
+    pub fn build(self) -> Entity {
+        self.entity
     }
 }
 
@@ -261,6 +287,32 @@ impl World {
         self.with_plugin(T::plugin())
     }
 
+    pub fn with_storage<T: StoredComponent>(
+        &mut self,
+        store: T::StorageType,
+    ) -> anyhow::Result<&mut Self> {
+        self.with_resource(store)?
+            .with_plugin(PluginEntityUpkeep::<T::StorageType>(PhantomData))
+    }
+
+    pub fn with_default_storage<T: StoredComponent>(&mut self) -> anyhow::Result<&mut Self> {
+        let store = <T::StorageType>::default();
+        self.with_resource(store)?
+            .with_plugin(PluginEntityUpkeep::<T::StorageType>(PhantomData))
+    }
+
+    pub fn entity(&mut self) -> anyhow::Result<EntityBuilder<'_>> {
+        if !self.has_resource::<Entities>() {
+            self.with_default_resource::<Entities>()?;
+        }
+        let mut entities = self.fetch::<Write<Entities>>()?;
+        let entity = entities.create();
+        Ok(EntityBuilder {
+            world: self,
+            entity,
+        })
+    }
+
     pub fn with_system<T, F>(
         &mut self,
         name: impl AsRef<str>,
@@ -340,6 +392,12 @@ impl World {
     ) -> &mut Self {
         self.spawn(future);
         self
+    }
+
+    /// Returns whether a resources of the given type exists in the world.
+    pub fn has_resource<T: IsResource>(&self) -> bool {
+        let rez_id = ResourceId::new::<T>();
+        self.resources.contains_key(&rez_id)
     }
 
     /// Spawn a non-system asynchronous task.
@@ -607,6 +665,24 @@ mod test {
         for n in 0..100 {
             assert_eq!(book.get(&format!("entity_{}", n)), Some(&n));
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn can_create_entities_and_build_convenience() -> anyhow::Result<()> {
+        struct DataA(f32);
+        impl StoredComponent for DataA {
+            type StorageType = VecStorage<Self>;
+        }
+
+        struct DataB(f32);
+        impl StoredComponent for DataB {
+            type StorageType = VecStorage<Self>;
+        }
+
+        let mut world = World::default();
+        let _entity = world.entity()?.with(DataA(0.0))?.with(DataB(0.0))?.build();
 
         Ok(())
     }

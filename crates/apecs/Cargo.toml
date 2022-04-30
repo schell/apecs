@@ -1,6 +1,6 @@
 [package]
 name = "apecs"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 keywords = ["gamedev", "ecs", "async"]
@@ -30,7 +30,6 @@ bench = false
 anyhow = "^1.0"
 apecs-derive = { version = "0.1.1", path = "../apecs-derive" }
 async-broadcast = "^0.4"
-#crossfire = "^0.1"
 hibitset = "^0.6"
 rayon = "^1.5"
 rustc-hash = "^1.1"
