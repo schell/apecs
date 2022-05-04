@@ -64,6 +64,15 @@ impl Plugin {
         self
     }
 
+    /// Add a dependency on a resource that can be created lazily with a closure.
+    ///
+    /// If a resource of this type does not already exist in the world at the time the plugin is instantiated,
+    /// it will be inserted into the [`World`].
+    pub fn with_lazy_resource<T: IsResource>(mut self, create: impl FnOnce() -> T + 'static) -> Self {
+        self.resources.push(ResourceRequirement::LazyDefault(LazyResource::new(create)));
+        self
+    }
+
     /// Add a dependency on a resource that must already exist in the [`World`] at the time of plugin
     /// instantiation.
     ///

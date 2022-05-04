@@ -102,6 +102,39 @@ impl<'a, T: CanReadStorage> Join for &'a T {
     }
 }
 
+impl<'a, T> Join for std::slice::Iter<'a, T>
+where
+    T: IsEntry,
+{
+    type Iter = Self;
+
+    fn join(self) -> Self::Iter {
+        self
+    }
+}
+
+impl<'a, T> Join for std::slice::IterMut<'a, T>
+where
+    T: IsEntry,
+{
+    type Iter = Self;
+
+    fn join(self) -> Self::Iter {
+        self
+    }
+}
+
+impl<T> Join for Vec<T>
+where
+    T: IsEntry,
+{
+    type Iter = std::vec::IntoIter<T>;
+
+    fn join(self) -> Self::Iter {
+        self.into_iter()
+    }
+}
+
 impl<'a> Join for &'a Entities {
     type Iter = Map<BitIter<&'a BitSet>, fn(u32) -> usize>;
 

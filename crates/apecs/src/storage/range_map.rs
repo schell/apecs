@@ -15,50 +15,51 @@ use super::{CanReadStorage, CanWriteStorage, Entry, Without, WorldStorage};
 
 pub struct MissingRange<'a, T>(usize, PhantomData<&'a T>);
 
-pub struct RangeStoreIter<'a, T> {
-    group: Option<(usize, &'a [Entry<T>])>,
-    // RangeStore elements, sorted backwards
-    groups: Vec<(usize, &'a [Entry<T>])>,
+//pub struct RangeStoreIter<'a, T> {
+//    group: Option<(usize, &'a [Entry<T>])>,
+//    // RangeStore elements, sorted backwards
+//    groups: Vec<(usize, &'a [Entry<T>])>,
+//}
+
+//impl<'a, T> Iterator for RangeStoreIter<'a, T> {
+//    type Item = &'a Entry<T>;
+//
+//    fn next(&mut self) -> Option<Self::Item> {
+//        #[inline]
+//        fn next_in_group<'a, T>(
+//            index: &mut usize,
+//            group: &mut &'a [Entry<T>],
+//        ) -> Option<&'a Entry<T>> {
+//            match std::mem::replace(group, &[]) {
+//                [entry, rest @ ..] => {
+//                    *index += 1;
+//                    *group = rest;
+//                    Some(entry)
+//                }
+//                [] => None,
+//            }
+//        }
+//
+//        if let Some((index, group)) = self.group.as_mut() {
+//            next_in_group(index, group)
+//        } else {
+//            let (mut start, mut next_group) = self.groups.pop()?;
+//            let entry = next_in_group(&mut start, &mut next_group);
+//            self.group = Some((start, next_group));
+//            entry
+//        }
+//    }
+//}
+
+pub struct RangeStoreIter<I> {
+    group: Option<I>,
+    // vector of element iterators, the vector is sorted backwards
+    // for efficient pop
+    groups: Vec<I>,
 }
 
-impl<'a, T> Iterator for RangeStoreIter<'a, T> {
-    type Item = &'a Entry<T>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        #[inline]
-        fn next_in_group<'a, T>(
-            index: &mut usize,
-            group: &mut &'a [Entry<T>],
-        ) -> Option<&'a Entry<T>> {
-            match std::mem::replace(group, &[]) {
-                [entry, rest @ ..] => {
-                    *index += 1;
-                    *group = rest;
-                    Some(entry)
-                }
-                [] => None,
-            }
-        }
-
-        if let Some((index, group)) = self.group.as_mut() {
-            next_in_group(index, group)
-        } else {
-            let (mut start, mut next_group) = self.groups.pop()?;
-            let entry = next_in_group(&mut start, &mut next_group);
-            self.group = Some((start, next_group));
-            entry
-        }
-    }
-}
-
-pub struct RangeStoreIterMut<'a, T> {
-    group: Option<std::slice::IterMut<'a, Entry<T>>>,
-    // RangeStore elements, sorted backwards
-    groups: Vec<std::slice::IterMut<'a, Entry<T>>>,
-}
-
-impl<'a, T> Iterator for RangeStoreIterMut<'a, T> {
-    type Item = &'a mut Entry<T>;
+impl<I: Iterator> Iterator for RangeStoreIter<I> {
+    type Item = I::Item;
 
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(group) = self.group.as_mut() {
@@ -550,21 +551,20 @@ impl<T> RangeStore<T> {
         Some(())
     }
 
-    pub fn iter<'a>(&'a self) -> RangeStoreIter<'a, T> {
+    pub fn iter<'a>(&'a self) -> RangeStoreIter<std::slice::Iter<'a, Entry<T>>> {
         RangeStoreIter {
             group: None,
             groups: self
-                .groups
+                .elements
                 .iter()
-                .zip(self.elements.iter())
-                .map(|((start, _), g)| (*start, g.as_slice()))
+                .map(|group| group.iter())
                 .rev()
                 .collect::<Vec<_>>(),
         }
     }
 
-    pub fn iter_mut<'a>(&'a mut self) -> RangeStoreIterMut<'a, T> {
-        RangeStoreIterMut {
+    pub fn iter_mut<'a>(&'a mut self) -> RangeStoreIter<std::slice::IterMut<'a, Entry<T>>> {
+        RangeStoreIter {
             group: None,
             groups: self
                 .elements
@@ -576,10 +576,26 @@ impl<T> RangeStore<T> {
     }
 }
 
+impl<T: Clone> RangeStore<T> {
+    /// Handy for debugging.
+    pub fn groups(&self) -> Vec<((usize, usize), Vec<T>)> {
+        self.groups
+            .iter()
+            .map(|(s, e)| (*s, *e))
+            .zip(
+                self.elements
+                    .iter()
+                    .map(|vs| vs.iter().map(|e| e.value.clone()).collect::<Vec<_>>())
+                    .collect::<Vec<_>>(),
+            )
+            .collect::<Vec<_>>()
+    }
+}
+
 impl<T: Send + Sync> CanReadStorage for RangeStore<T> {
     type Component = T;
 
-    type Iter<'a> = RangeStoreIter<'a, T>
+    type Iter<'a> = RangeStoreIter<std::slice::Iter<'a, Entry<T>>>
     where
         Self: 'a;
     type ParIter<'a> = RangeStoreParIter<std::slice::Iter<'a, Entry<T>>>
@@ -616,7 +632,7 @@ impl<T: Send + Sync> CanReadStorage for RangeStore<T> {
 }
 
 impl<T: Send + Sync> CanWriteStorage for RangeStore<T> {
-    type IterMut<'a> = RangeStoreIterMut<'a, T>
+    type IterMut<'a> = RangeStoreIter<std::slice::IterMut<'a, Entry<T>>>
     where
         Self: 'a;
 
@@ -703,7 +719,7 @@ mod test {
     use super::*;
 
     #[test]
-    fn range_store_sanity() {
+    fn sanity() {
         let mut store = RangeStore::<usize>::default();
         store.insert(0, 0);
         assert_eq!(store.get(0), Some(&0));
@@ -738,28 +754,13 @@ mod test {
         assert_eq!(11, removed.unwrap());
         assert_eq!(4, store.groups.len());
 
-        fn collect(store: &RangeStore<usize>) -> Vec<((usize, usize), Vec<usize>)> {
-            store
-                .groups
-                .iter()
-                .map(|(s, e)| (*s, *e))
-                .zip(
-                    store
-                        .elements
-                        .iter()
-                        .map(|vs| vs.iter().map(|e| e.value).collect::<Vec<_>>())
-                        .collect::<Vec<_>>(),
-                )
-                .collect::<Vec<_>>()
-        }
-
         let expected: Vec<((usize, usize), Vec<usize>)> = vec![
             ((0, 2), vec![0, 1, 2]),
             ((5, 5), vec![5]),
             ((9, 10), vec![9, 10]),
             ((12, 12), vec![12]),
         ];
-        assert_eq!(expected, collect(&store));
+        assert_eq!(expected, store.groups());
 
         store.remove(5);
         assert_eq!(
@@ -768,7 +769,7 @@ mod test {
                 ((9, 10), vec![9, 10]),
                 ((12, 12), vec![12]),
             ],
-            collect(&store)
+            store.groups()
         );
 
         store.remove(0);
@@ -778,7 +779,7 @@ mod test {
                 ((9, 10), vec![9, 10]),
                 ((12, 12), vec![12]),
             ],
-            collect(&store)
+            store.groups()
         );
 
         store.remove(10);
@@ -788,7 +789,7 @@ mod test {
                 ((9, 9), vec![9]),
                 ((12, 12), vec![12]),
             ],
-            collect(&store)
+            store.groups()
         );
 
         store.insert(4, 4);
@@ -799,7 +800,7 @@ mod test {
                 ((9, 9), vec![9]),
                 ((12, 12), vec![12]),
             ],
-            collect(&store)
+            store.groups()
         );
 
         store.insert(3, 3);
@@ -810,7 +811,7 @@ mod test {
                 ((9, 9), vec![9]),
                 ((12, 12), vec![12]),
             ],
-            collect(&store)
+            store.groups()
         );
 
         store.defrag();
@@ -820,15 +821,32 @@ mod test {
                 ((9, 9), vec![9]),
                 ((12, 12), vec![12]),
             ],
-            collect(&store)
+            store.groups()
         );
+
+        store.remove(3);
+        store.remove(4);
+        store.remove(9);
+        store.remove(12);
+        store.insert(0, 0);
+        assert_eq!(vec![((0, 2), vec![0, 1, 2]),], store.groups());
+
+        store.remove(1);
+        assert_eq!(vec![((0, 0), vec![0]), ((2, 2), vec![2]),], store.groups());
     }
 
     #[test]
-    fn range_sanity() {
-        let end_prev = 2;
-        let start = 3;
-        let range = (end_prev + 1)..start;
-        assert_eq!(range.len(), 0);
+    fn can_remove() {
+        let mut store = RangeStore::<u32>::default();
+        store.insert(0, 0);
+        store.insert(1, 1);
+        store.insert(2, 2);
+        assert_eq!(vec![((0, 2), vec![0, 1, 2])], store.groups());
+        store.remove(1);
+        assert_eq!(vec![((0, 0), vec![0]), ((2, 2), vec![2]),], store.groups());
+        assert_eq!(
+            vec![0, 2],
+            store.iter_mut().map(|e| e.id()).collect::<Vec<_>>()
+        )
     }
 }

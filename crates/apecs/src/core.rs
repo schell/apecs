@@ -508,7 +508,7 @@ impl<'a, T: IsResource + Default> CanFetch for Write<T> {
     }
 }
 
-impl<'a, T: IsResource + Default> CanFetch for WriteExpect<T> {
+impl<'a, T: IsResource> CanFetch for WriteExpect<T> {
     fn writes() -> Vec<ResourceId> {
         vec![ResourceId::new::<T>()]
     }

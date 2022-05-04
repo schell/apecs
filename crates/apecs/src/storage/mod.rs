@@ -34,15 +34,22 @@ pub fn increment_current_iteration() -> u64 {
 }
 
 pub trait IsEntry {
-    type Component;
+    type Value<'a>
+        where Self: 'a;
 
     fn id(&self) -> usize;
+
+    fn value(&self) -> Self::Value<'_>;
 }
 
 impl IsEntry for usize {
-    type Component = usize;
+    type Value<'a> = usize;
 
     fn id(&self) -> usize {
+        *self
+    }
+
+    fn value(&self) -> Self {
         *self
     }
 }
@@ -56,26 +63,41 @@ pub struct Entry<T> {
 }
 
 impl<T> IsEntry for Entry<T> {
-    type Component = T;
+    type Value<'a> = &'a T
+        where T: 'a;
 
     fn id(&self) -> usize {
         self.id()
     }
+
+    fn value(&self) -> &T {
+        Entry::value(self)
+    }
 }
 
 impl<'a, T> IsEntry for &'a Entry<T> {
-    type Component = T;
+    type Value<'b> = &'b T
+        where 'a: 'b;
 
     fn id(&self) -> usize {
         self.key
     }
+
+    fn value(&self) -> &T {
+        Entry::value(self)
+    }
 }
 
 impl<'a, T> IsEntry for &'a mut Entry<T> {
-    type Component = T;
+    type Value<'b> = &'b T
+        where 'a: 'b;
 
     fn id(&self) -> usize {
         self.key
+    }
+
+    fn value(&self) -> &T {
+        Entry::value(self)
     }
 }
 
@@ -99,7 +121,7 @@ impl<T> Entry<T> {
         Entry {
             key: id,
             value,
-            changed: 0,
+            changed: current_iteration(),
             added: true,
         }
     }
@@ -110,7 +132,15 @@ impl<T> Entry<T> {
     }
 
     pub fn has_changed_since(&self, iteration: u64) -> bool {
-        self.changed > iteration
+        self.changed >= iteration
+    }
+
+    pub fn was_added_since(&self, iteration: u64) -> bool {
+        self.changed >= iteration && self.added
+    }
+
+    pub fn was_modified_since(&self, iteration: u64) -> bool {
+        self.changed >= iteration && !self.added
     }
 
     pub fn last_changed(&self) -> u64 {
@@ -220,11 +250,16 @@ pub struct Maybe<T> {
     pub inner: Option<T>,
 }
 
-impl<T> IsEntry for Maybe<T> {
-    type Component = T;
+impl<T: IsEntry> IsEntry for Maybe<T> {
+    type Value<'a> = Option<T::Value<'a>>
+        where T: 'a;
 
     fn id(&self) -> usize {
         self.key
+    }
+
+    fn value(&self) -> Option<T::Value<'_>> {
+        self.inner.as_ref().map(IsEntry::value)
     }
 }
 
