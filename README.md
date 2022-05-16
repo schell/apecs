@@ -30,5 +30,5 @@ short-lived systems.
 ## Roadmap
 - schedule: local thread systems (maybe not necessary?)
 - wasm
-- make btree storage faster
+- make range storage faster
 - archtypal storage (why should an ecs only have one or the other?)

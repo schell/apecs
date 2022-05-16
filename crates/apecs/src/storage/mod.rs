@@ -561,6 +561,7 @@ pub mod test {
         system::{ok, ShouldContinue},
         world::World,
         CanFetch,
+        StoredComponent_Range, StoredComponent_Vec,
     };
 
     #[test]
@@ -833,5 +834,19 @@ pub mod test {
         let max = u64::MAX as f32;
         let years: f32 = max / (1000.0 * 60.0 * 60.0 * 60.0 * 24.0 * 365.0);
         assert!(1.0 <= years, "{} years", years);
+    }
+
+    #[test]
+    fn can_derive_storedcomponent() {
+        #[derive(Debug, StoredComponent_Vec)]
+        struct MyComponent(f32);
+
+        let _store: <MyComponent as StoredComponent>::StorageType = Default::default();
+
+        #[derive(Debug, StoredComponent_Range)]
+        struct OtherComponent(f32);
+
+        let _store: <OtherComponent as StoredComponent>::StorageType = Default::default();
+
     }
 }

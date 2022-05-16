@@ -115,6 +115,40 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     output.into()
 }
 
+#[proc_macro_derive(StoredComponent_Vec)]
+pub fn derive_stored_component_vec(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    let input: DeriveInput = parse_macro_input!(input);
+
+    let name = input.ident;
+    let generics = input.generics;
+    let (impl_generics, ty_generics, _) = generics.split_for_impl();
+
+    let output = quote! {
+        impl #impl_generics apecs::storage::StoredComponent for #name #ty_generics {
+            type StorageType = apecs::storage::VecStorage<Self>;
+        }
+    };
+
+    output.into()
+}
+
+#[proc_macro_derive(StoredComponent_Range)]
+pub fn derive_stored_component_range(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    let input: DeriveInput = parse_macro_input!(input);
+
+    let name = input.ident;
+    let generics = input.generics;
+    let (impl_generics, ty_generics, _) = generics.split_for_impl();
+
+    let output = quote! {
+        impl #impl_generics apecs::storage::StoredComponent for #name #ty_generics {
+            type StorageType = apecs::storage::RangeStore<Self>;
+        }
+    };
+
+    output.into()
+}
+
 #[proc_macro]
 pub fn impl_canfetch_tuple(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let tuple: TypeTuple = parse_macro_input!(input);
