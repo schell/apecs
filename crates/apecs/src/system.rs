@@ -11,6 +11,7 @@ use crate::{
     CanFetch, FetchReadyResource, Request, Resource, ResourceId,
 };
 
+/// A future representing an async system.
 pub type AsyncSystemFuture =
     Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + Sync + 'static>>;
 
