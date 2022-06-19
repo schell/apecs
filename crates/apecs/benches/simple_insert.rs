@@ -1,9 +1,8 @@
 use std::marker::PhantomData;
 
 use apecs::{
-    entities::*,
     storage::{CanWriteStorage, WorldStorage},
-    world::World,
+    world::*,
     Write,
 };
 use cgmath::*;
@@ -41,8 +40,6 @@ where
     pub fn run(&mut self) {
         let mut world = World::default();
         world
-            .with_default_resource::<Entities>()
-            .unwrap()
             .with_resource(T::new_with_capacity(10000))
             .unwrap()
             .with_resource(P::new_with_capacity(10000))

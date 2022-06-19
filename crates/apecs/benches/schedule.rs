@@ -1,4 +1,4 @@
-use apecs::{anyhow, entities::*, join::*, storage::*, world::*, system::*, CanFetch, Write};
+use apecs::{anyhow, join::*, storage::*, world::*, system::*, CanFetch, Write};
 
 struct A(f32);
 struct B(f32);
@@ -101,8 +101,11 @@ impl Benchmark {
             .with_resource(e_store)
             .unwrap()
             .with_system("ab", ab_system)
+            .unwrap()
             .with_system("cd", cd_system)
+            .unwrap()
             .with_system("ce", ce_system)
+            .unwrap()
             .with_sync_systems_run_in_parallel(true);
 
         Self(world)

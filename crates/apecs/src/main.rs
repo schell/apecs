@@ -1,4 +1,6 @@
-use apecs::{entities::Entities, join::*, storage::*, CanFetch, world::Facade, Read, Write};
+use apecs::{
+    join::*, storage::*, world::Entities, world::Facade, CanFetch, Read, Write, WriteExpect,
+};
 use tracing::Level;
 
 #[derive(Clone)]
@@ -13,7 +15,7 @@ pub struct Velocity {
 
 #[derive(CanFetch)]
 struct CreateSystemData {
-    entities: Write<Entities>,
+    entities: WriteExpect<Entities>,
     positions: Write<VecStorage<Position>>,
     velocities: Write<VecStorage<Velocity>>,
 }
@@ -84,7 +86,6 @@ fn main() -> anyhow::Result<()> {
 
     let mut world = apecs::world::World::default();
     world
-        .with_default_resource::<Entities>()?
         .with_default_resource::<VecStorage<Position>>()?
         .with_default_resource::<VecStorage<Velocity>>()?
         .with_async_system("create", create_system)

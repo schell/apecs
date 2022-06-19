@@ -1,14 +1,16 @@
 //! The [`World`] contains resources and is responsible for ticking
 //! systems.
-use std::{future::Future, marker::PhantomData, sync::Arc};
+use std::{future::Future, sync::Arc};
+use std::{iter::Map, ops::Deref};
 
 use anyhow::Context;
+use hibitset::{BitIter, BitSet, BitSetLike};
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use crate::WriteExpect;
 use crate::{
-    entities::{Entities, Entity},
     mpsc,
-    plugins::{entity_upkeep::PluginEntityUpkeep, Plugin},
+    plugins::{entity_upkeep, Plugin},
     schedule::{Borrow, IsBorrow, IsSchedule},
     spsc,
     storage::{CanWriteStorage, StoredComponent, WorldStorage},
@@ -56,16 +58,110 @@ impl Facade {
     }
 }
 
+pub struct Lazy(mpsc::Sender<LazyOp>);
+
+impl Lazy {
+    pub fn exec_mut(
+        &self,
+        op: impl FnOnce(&mut World) -> anyhow::Result<()> + Send + Sync + 'static,
+    ) -> anyhow::Result<()> {
+        self.0
+            .try_send(LazyOp(Box::new(op)))
+            .context("could not send lazy op")?;
+        Ok(())
+    }
+}
+
+pub struct LazyOp(Box<dyn FnOnce(&mut World) -> anyhow::Result<()> + Send + Sync + 'static>);
+
+#[derive(Clone)]
+pub struct Entity {
+    id: usize,
+    gen: usize,
+    op_sender: mpsc::Sender<LazyOp>,
+}
+
+impl Deref for Entity {
+    type Target = usize;
+
+    fn deref(&self) -> &Self::Target {
+        &self.id
+    }
+}
+
+impl Entity {
+    pub fn id(&self) -> usize {
+        self.id
+    }
+
+    /// Lazily add a component.
+    ///
+    /// This entity will have the associated component after the next tick.
+    pub fn lazy_with<C: StoredComponent>(self, component: C) -> anyhow::Result<Self>
+    where
+        C::StorageType: WorldStorage,
+    {
+        let id = self.id;
+        let op = Box::new(move |world: &mut World| -> anyhow::Result<()> {
+            if !world.has_resource::<C::StorageType>() {
+                world.with_default_storage::<C>()?;
+            }
+            let mut storage: Write<C::StorageType> = world.fetch()?;
+            let _ = storage.insert(id, component);
+            Ok(())
+        });
+        self.op_sender
+            .try_send(LazyOp(op))
+            .context("could not send entity op")?;
+        Ok(self)
+    }
+
+    /// Lazily add a component and return a future that completes after the
+    /// component has been added.
+    pub fn lazy_add<C: StoredComponent>(
+        &self,
+        component: C,
+    ) -> anyhow::Result<impl Future<Output = ()>>
+    where
+        C::StorageType: WorldStorage,
+    {
+        let (tx, rx) = spsc::bounded(1);
+        let id = self.id;
+        let op = LazyOp(Box::new(move |world: &mut World| -> anyhow::Result<()> {
+            if !world.has_resource::<C::StorageType>() {
+                world.with_default_storage::<C>()?;
+            }
+            let mut storage: Write<C::StorageType> = world.fetch()?;
+            let _ = storage.insert(id, component);
+            tx.try_send(())
+                .context("could not send component add confirmation")?;
+            Ok(())
+        }));
+        self.op_sender
+            .try_send(op)
+            .context("could not send entity op")?;
+        Ok(async move {
+            rx.recv().await.unwrap();
+        })
+    }
+}
+
 pub struct EntityBuilder<'a> {
     entity: Entity,
     world: &'a mut World,
 }
 
 impl<'a> EntityBuilder<'a> {
-    pub fn with<C: StoredComponent>(self, component: C) -> anyhow::Result<Self>
-    where
-        C::StorageType: WorldStorage,
-    {
+    /// Adds a component immediately.
+    pub fn with<C: StoredComponent>(self, component: C) -> anyhow::Result<Self> {
+        clear_returned_resources(
+            Some("EntityBuilder::with"),
+            &self.world.resources_from_system.1,
+            &mut self.world.resources,
+            &mut self.world.borrowed_resources,
+        )
+        .unwrap();
+
         if !self.world.has_resource::<C::StorageType>() {
             self.world.with_default_storage::<C>()?;
         }
@@ -74,31 +170,101 @@ impl<'a> EntityBuilder<'a> {
         Ok(self)
     }
 
+    /// Build and return the entity
     pub fn build(self) -> Entity {
         self.entity
     }
 }
 
+pub struct Entities {
+    pub next_k: usize,
+    pub alive_set: BitSet,
+    pub dead: Vec<Entity>,
+    pub recycle: Vec<Entity>,
+    pub lazy_op_sender: mpsc::Sender<LazyOp>,
+}
+
+impl Default for Entities {
+    fn default() -> Self {
+        Self {
+            next_k: Default::default(),
+            alive_set: Default::default(),
+            dead: Default::default(),
+            recycle: Default::default(),
+            lazy_op_sender: mpsc::unbounded().0,
+        }
+    }
+}
+
+impl Entities {
+    pub fn new(lazy_op_sender: mpsc::Sender<LazyOp>) -> Self {
+        Self {
+            next_k: 0,
+            alive_set: BitSet::new(),
+            dead: Default::default(),
+            recycle: Default::default(),
+            lazy_op_sender,
+        }
+    }
+
+    pub fn create(&mut self) -> Entity {
+        let entity = if self.recycle.is_empty() {
+            let id = self.next_k;
+            self.next_k += 1;
+            Entity {
+                id,
+                gen: 0,
+                op_sender: self.lazy_op_sender.clone(),
+            }
+        } else {
+            self.recycle.pop().unwrap()
+        };
+
+        self.alive_set.add(entity.id.try_into().unwrap());
+        entity
+    }
+
+    pub fn destroy(&mut self, entity: Entity) {
+        self.alive_set.remove(entity.id.try_into().unwrap());
+        self.dead.push(entity);
+    }
+
+    pub fn iter(&self) -> Map<BitIter<&BitSet>, fn(u32) -> usize> {
+        (&self.alive_set).iter().map(|id| id as usize)
+    }
+
+    pub fn recycle_dead(&mut self) {
+        for mut dead in std::mem::take(&mut self.dead).into_iter() {
+            dead.gen += 1;
+            self.recycle.push(dead);
+        }
+    }
+}
+
 pub struct World {
     // world resources
-    resources: FxHashMap<ResourceId, Resource>,
+    pub resources: FxHashMap<ResourceId, Resource>,
     // resources loaned out by reference
-    borrowed_resources: FxHashMap<ResourceId, Arc<Resource>>,
+    pub borrowed_resources: FxHashMap<ResourceId, Arc<Resource>>,
     // outer resource channel (unbounded)
-    resources_from_system: (
+    pub resources_from_system: (
         mpsc::Sender<(ResourceId, Resource)>,
         mpsc::Receiver<(ResourceId, Resource)>,
     ),
-    sync_schedule: SyncSchedule,
-    async_systems: Vec<AsyncSystem>,
-    async_system_executor: smol::Executor<'static>,
+    pub sync_schedule: SyncSchedule,
+    pub async_systems: Vec<AsyncSystem>,
+    pub async_system_executor: smol::Executor<'static>,
     // executor for non-system futures
-    async_task_executor: smol::Executor<'static>,
+    pub async_task_executor: smol::Executor<'static>,
+    pub lazy_ops: (mpsc::Sender<LazyOp>, mpsc::Receiver<LazyOp>),
 }
 
 impl Default for World {
     fn default() -> Self {
-        Self {
+        let lazy_ops = mpsc::unbounded();
+        let lazy = Lazy(lazy_ops.0.clone());
+        let entities = Entities::new(lazy_ops.0.clone());
+        let mut world = Self {
             resources: Default::default(),
             borrowed_resources: FxHashMap::default(),
             resources_from_system: mpsc::unbounded(),
@@ -106,7 +272,14 @@ impl Default for World {
             async_systems: vec![],
             async_system_executor: Default::default(),
             async_task_executor: Default::default(),
-        }
+            lazy_ops,
+        };
+        world
+            .with_resource(lazy)
+            .unwrap()
+            .with_resource(entities)
+            .unwrap();
+        world
     }
 }
 
@@ -139,47 +312,61 @@ pub(crate) fn clear_returned_resources(
     Ok(())
 }
 
+/// Take requested resources from owned and previously borrowed resource maps,
+/// putting them into a target resource map.
 pub(crate) fn try_take_resources<'a>(
     resources: &mut FxHashMap<ResourceId, Resource>,
+    already_borrowed_resources: &mut FxHashMap<ResourceId, Arc<Resource>>,
+    target_resources: &mut FxHashMap<ResourceId, FetchReadyResource>,
     borrows: impl Iterator<Item = &'a (impl IsBorrow + 'a)>,
     system_name: Option<&str>,
-) -> anyhow::Result<(
-    FxHashMap<ResourceId, FetchReadyResource>,
-    FxHashMap<ResourceId, Arc<Resource>>,
-)> {
-    // get only the requested resources
-    let mut ready_resources: FxHashMap<ResourceId, FetchReadyResource> = FxHashMap::default();
-    let mut stay_resources: FxHashMap<ResourceId, Arc<Resource>> = FxHashMap::default();
+) -> anyhow::Result<()> {
     for borrow in borrows {
-        let rez: Resource = resources.remove(&borrow.rez_id()).with_context(|| {
+        let missing_msg = |extra: &str| {
             format!(
-                r#"system '{}' requested missing resource "{}" encountered while building request for {:?}"#,
-                system_name.unwrap_or("world"),
+                r#"system '{}' requested missing resource "{}" encountered while building request\n{}
+"#,
+                system_name.unwrap_or("unknown"),
                 borrow.rez_id().name,
-                resources
-                    .keys()
-                    .map(|k| k.name)
-                    .collect::<Vec<_>>(),
+                extra
             )
-        })?;
-
-        let ready_rez = if borrow.is_exclusive() {
-            FetchReadyResource::Owned(rez)
-        } else {
-            let stay_rez = Arc::new(rez);
-            let ready_rez = FetchReadyResource::Ref(stay_rez.clone());
-            let _ = stay_resources.insert(borrow.rez_id().clone(), stay_rez);
-            ready_rez
         };
-        let prev_inserted_rez = ready_resources.insert(borrow.rez_id(), ready_rez);
-        assert!(
+
+        let rez_id = borrow.rez_id();
+        let ready_rez: FetchReadyResource = match resources.remove(&rez_id) {
+            Some(rez) => {
+                if borrow.is_exclusive() {
+                    FetchReadyResource::Owned(rez)
+                } else {
+                    // borrow this resource as an arc and stick it in the already borrowed map
+                    let rez = Arc::new(rez);
+                    let _ = already_borrowed_resources.insert(rez_id, rez.clone());
+                    FetchReadyResource::Ref(rez)
+                }
+            }
+            None => {
+                // it's not in the main map, so maybe it was previously borrowed
+                if borrow.is_exclusive() {
+                    anyhow::bail!(missing_msg(""))
+                } else {
+                    let rez: Arc<Resource> = already_borrowed_resources
+                        .get(&rez_id)
+                        .context(missing_msg("the borrow is not exclusive but the resource is missing from previously borrowed resources"))?
+                        .clone();
+                    FetchReadyResource::Ref(rez)
+                }
+            }
+        };
+
+        let prev_inserted_rez = target_resources.insert(borrow.rez_id(), ready_rez);
+        anyhow::ensure!(
             prev_inserted_rez.is_none(),
             "cannot request multiple resources of the same type: '{:?}'",
             borrow.rez_id()
         );
     }
 
-    Ok((ready_resources, stay_resources))
+    Ok(())
 }
 
 pub(crate) fn make_async_system_pack<F, Fut>(
@@ -292,20 +479,17 @@ impl World {
         store: T::StorageType,
     ) -> anyhow::Result<&mut Self> {
         self.with_resource(store)?
-            .with_plugin(PluginEntityUpkeep::<T::StorageType>(PhantomData))
+            .with_plugin(entity_upkeep::plugin::<T::StorageType>())
     }
 
     pub fn with_default_storage<T: StoredComponent>(&mut self) -> anyhow::Result<&mut Self> {
         let store = <T::StorageType>::default();
         self.with_resource(store)?
-            .with_plugin(PluginEntityUpkeep::<T::StorageType>(PhantomData))
+            .with_plugin(entity_upkeep::plugin::<T::StorageType>())
     }
 
     pub fn entity(&mut self) -> anyhow::Result<EntityBuilder<'_>> {
-        if !self.has_resource::<Entities>() {
-            self.with_default_resource::<Entities>()?;
-        }
-        let mut entities = self.fetch::<Write<Entities>>()?;
+        let mut entities = self.fetch::<WriteExpect<Entities>>()?;
         let entity = entities.create();
         Ok(EntityBuilder {
             world: self,
@@ -406,15 +590,22 @@ impl World {
         task.detach();
     }
 
-    /// Conduct a world tick but use an explicit context.
-    /// If no context is given, async systems and futures will not be ticked.
+    /// Conduct a world tick.
+    ///
+    /// Calls `World::tick_async`, then `World::tick_sync`, then `World::tick_lazy`.
     pub fn tick(&mut self) -> anyhow::Result<()> {
+        tracing::trace!("calling tick_async");
         self.tick_async()?;
-        self.tick_sync()
+        tracing::trace!("calling tick_sync");
+        self.tick_sync()?;
+        tracing::trace!("calling tick_lazy");
+        self.tick_lazy()?;
+        Ok(())
     }
 
     /// Just tick the synchronous systems.
     pub fn tick_sync(&mut self) -> anyhow::Result<()> {
+        tracing::trace!("tick sync");
         clear_returned_resources(
             None,
             &self.resources_from_system.1,
@@ -424,12 +615,16 @@ impl World {
 
         // run the scheduled sync systems
         self.sync_schedule
-            .run((), &mut self.resources, &self.resources_from_system)
+            .run((), &mut self.resources, &self.resources_from_system)?;
+
+        tracing::trace!("finished tick sync");
+        Ok(())
     }
 
     /// Just tick the async futures, including sending resources to async
     /// systems.
     pub fn tick_async(&mut self) -> anyhow::Result<()> {
+        tracing::trace!("tick async");
         clear_returned_resources(
             None,
             &self.resources_from_system.1,
@@ -479,7 +674,30 @@ impl World {
         }
 
         // lastly tick all our non-system tasks
-        while self.async_task_executor.try_tick() {}
+        let mut ticks = 0;
+        while self.async_task_executor.try_tick() {
+            ticks += 1;
+        }
+        tracing::trace!("ticked {} futures", ticks);
+
+        Ok(())
+    }
+
+    /// Applies lazy world updates.
+    pub fn tick_lazy(&mut self) -> anyhow::Result<()> {
+        tracing::trace!("tick lazy");
+
+        while let Ok(LazyOp(op)) = self.lazy_ops.1.try_recv() {
+            clear_returned_resources(
+                None,
+                &self.resources_from_system.1,
+                &mut self.resources,
+                &mut self.borrowed_resources,
+            )
+            .unwrap();
+
+            (op)(self)?;
+        }
 
         Ok(())
     }
@@ -525,10 +743,17 @@ impl World {
             is_exclusive: true,
         });
         let borrows = reads.chain(writes).collect::<Vec<_>>();
-        let (mut rezs, staying_refs) =
-            try_take_resources(&mut self.resources, borrows.iter(), None)?;
-        self.borrowed_resources.extend(staying_refs);
-        T::construct(self.resources_from_system.0.clone(), &mut rezs)
+        let mut owned_rezs = FxHashMap::default();
+        let mut borrowed_rezs = FxHashMap::default();
+        try_take_resources(
+            &mut self.resources,
+            &mut borrowed_rezs,
+            &mut owned_rezs,
+            borrows.iter(),
+            Some("World::fetch"),
+        )?;
+        self.borrowed_resources.extend(borrowed_rezs);
+        T::construct(self.resources_from_system.0.clone(), &mut owned_rezs)
     }
 
     /// Run all system and non-system futures until they have all finished or one
@@ -554,7 +779,7 @@ impl World {
 #[cfg(test)]
 mod test {
     use crate as apecs;
-    use apecs::{anyhow, entities::*, join::*, spsc, storage::*, system::*, world::*, Read, Write};
+    use apecs::{anyhow, join::*, spsc, storage::*, system::*, world::*, Read, Write, WriteExpect};
 
     #[test]
     fn can_closure_system() -> anyhow::Result<()> {
@@ -611,7 +836,7 @@ mod test {
             println!("create running");
             tx.try_send(()).unwrap();
             let (mut entities, mut names, mut numbers): (
-                Write<Entities>,
+                WriteExpect<Entities>,
                 Write<VecStorage<String>>,
                 Write<VecStorage<u32>>,
             ) = facade.fetch().await?;
@@ -649,7 +874,6 @@ mod test {
         let (tx, rx) = spsc::bounded(1);
         let mut world = World::default();
         world
-            .with_default_resource::<Entities>()?
             .with_async_system("create", |facade| async move { create(tx, facade).await })
             .with_system("maintain", maintain_map)?;
 
@@ -682,7 +906,15 @@ mod test {
         }
 
         let mut world = World::default();
-        let _entity = world.entity()?.with(DataA(0.0))?.with(DataB(0.0))?.build();
+        assert!(world.has_resource::<Entities>(), "missing entities");
+        let _entity = world
+            .entity()
+            .unwrap()
+            .with(DataA(0.0))
+            .unwrap()
+            .with(DataB(0.0))
+            .unwrap()
+            .build();
 
         Ok(())
     }

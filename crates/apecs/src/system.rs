@@ -301,6 +301,7 @@ impl<'a> IsBatch for AsyncBatch<'a> {
             // sometimes a system doesn't request resources every frame
             if !data.is_empty() {
                 // send the resources off, if need be
+                tracing::debug!("sending resources to async '{}'", system.name());
                 system
                     .0
                     .resources_to_system_tx

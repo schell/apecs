@@ -4,7 +4,6 @@
 #![allow(clippy::type_complexity)]
 mod core;
 pub mod system;
-pub mod entities;
 pub mod join;
 pub mod schedule;
 pub mod storage;

@@ -1,6 +1,6 @@
 use std::marker::PhantomData;
 
-use apecs::{entities::*, storage::*, world::World, Write};
+use apecs::{storage::*, world::*, Write};
 
 // TODO: Remove clone constraint
 #[derive(Clone)]
@@ -23,8 +23,6 @@ where
     pub fn new() -> Self {
         let mut world = World::default();
         world
-            .with_default_resource::<Entities>()
-            .unwrap()
             .with_resource(S1::default())
             .unwrap()
             .with_resource(S2::default())

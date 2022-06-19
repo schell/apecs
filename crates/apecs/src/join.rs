@@ -6,7 +6,7 @@ pub use rayon::iter::{
 };
 
 use crate as apecs;
-use crate::{entities::*, storage::*};
+use crate::{world::Entities, storage::*};
 
 pub trait ParJoin {
     type Iter: ParallelIterator;

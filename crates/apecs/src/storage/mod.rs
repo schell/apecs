@@ -555,11 +555,10 @@ pub type WriteStore<T> = Write<<T as StoredComponent>::StorageType>;
 pub mod test {
     use crate::{
         self as apecs,
-        entities::*,
         join::*,
         storage::*,
         system::{ok, ShouldContinue},
-        world::World,
+        world::*,
         CanFetch,
         StoredComponent_Range, StoredComponent_Vec,
     };
@@ -613,7 +612,7 @@ pub mod test {
 
     #[test]
     fn can_thruple_join() {
-        let mut entities = Entities::new();
+        let mut entities = Entities::default();
         let mut strings: VecStorage<String> = VecStorage::default();
         let mut numbers: VecStorage<u32> = VecStorage::default();
 
@@ -682,7 +681,6 @@ pub mod test {
 
             let mut world = World::default();
             world
-                .with_default_resource::<Entities>()?
                 .with_resource(A::new_with_capacity(1000))?
                 .with_resource(B::new_with_capacity(1000))?
                 .with_system("ab", system::<A, B, IS_PAR>)?;

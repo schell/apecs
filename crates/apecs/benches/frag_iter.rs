@@ -1,6 +1,6 @@
 use std::ops::DerefMut;
 
-use apecs::{entities::*, storage::*};
+use apecs::{storage::*, world::*};
 
 macro_rules! create_entities {
     ($store:expr; $datas:ident; $entities:ident; $( $variants:ident ),*) => {

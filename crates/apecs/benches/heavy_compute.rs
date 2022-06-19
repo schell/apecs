@@ -1,6 +1,6 @@
 use std::marker::PhantomData;
 
-use apecs::{anyhow, entities::*, join::*, storage::*, world::*, system::*, CanFetch, IsResource, Write};
+use apecs::{anyhow, join::*, storage::*, world::*, system::*, CanFetch, IsResource, Write};
 use cgmath::*;
 
 #[derive(Copy, Clone)]
@@ -16,7 +16,7 @@ pub struct Rotation(Vector3<f32>);
 pub struct Velocity(Vector3<f32>);
 
 #[derive(CanFetch)]
-struct HeavyComputeData<P: IsResource, T: IsResource> {
+struct HeavyComputeData<P: Default + IsResource, T: Default + IsResource> {
     positions: Write<P>,
     transforms: Write<T>,
 }

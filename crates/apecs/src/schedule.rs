@@ -10,7 +10,7 @@ use crate::{
     Resource, ResourceId,
 };
 
-pub(crate) trait IsBorrow: std::fmt::Debug {
+pub trait IsBorrow: std::fmt::Debug {
     fn rez_id(&self) -> ResourceId;
 
     fn name(&self) -> &str;
@@ -18,7 +18,7 @@ pub(crate) trait IsBorrow: std::fmt::Debug {
     fn is_exclusive(&self) -> bool;
 }
 
-pub(crate) trait IsSystem: std::fmt::Debug {
+pub trait IsSystem: std::fmt::Debug {
     type Borrow: IsBorrow;
 
     fn name(&self) -> &str;
@@ -46,9 +46,12 @@ pub(crate) trait IsSystem: std::fmt::Debug {
 }
 
 #[derive(Debug)]
-pub(crate) struct BatchData<T> {
+pub struct BatchData<T> {
+    // exclusive resources borrowed by at most one system in the batch
     pub resources: VecDeque<FxHashMap<ResourceId, FetchReadyResource>>,
+    // unexclusive resources borrowed by at least one system in the batch
     pub borrowed_resources: FxHashMap<ResourceId, Arc<Resource>>,
+    // any extra data needed by the batch to run
     pub extra: T,
 }
 
@@ -64,7 +67,7 @@ impl<T> BatchData<T> {
 
 /// A batch of systems that can run in parallel (because their borrows
 /// don't conflict).
-pub(crate) trait IsBatch: std::fmt::Debug + Default {
+pub trait IsBatch: std::fmt::Debug + Default {
     type System: IsSystem + Send + Sync;
     type ExtraRunData: Clone;
 
@@ -111,10 +114,15 @@ pub(crate) trait IsBatch: std::fmt::Debug + Default {
     ) -> anyhow::Result<BatchData<Self::ExtraRunData>> {
         let mut data = BatchData::new(extra);
         for system in self.systems() {
-            let (ready_resources, borrowed_resources) =
-                world::try_take_resources(resources, system.borrows().iter(), Some(system.name()))?;
-            data.resources.push_back(ready_resources);
-            data.borrowed_resources.extend(borrowed_resources);
+            let mut system_resources = FxHashMap::default();
+            world::try_take_resources(
+                resources,
+                &mut data.borrowed_resources,
+                &mut system_resources,
+                system.borrows().iter(),
+                Some(system.name()),
+            )?;
+            data.resources.push_back(system_resources);
         }
 
         Ok(data)
@@ -141,6 +149,7 @@ pub(crate) trait IsBatch: std::fmt::Debug + Default {
                 .into_par_iter()
                 .zip(data.resources.into_par_iter())
                 .filter_map(|(mut system, data)| {
+                    tracing::trace!("running par system '{}'", system.name());
                     match system.run(resources_from_system.0.clone(), data) {
                         Ok(ShouldContinue::Yes) => Some(Either::Left(system)),
                         Ok(ShouldContinue::No) => None,
@@ -155,6 +164,7 @@ pub(crate) trait IsBatch: std::fmt::Debug + Default {
                 .into_iter()
                 .zip(data.resources.into_iter())
                 .for_each(|(mut system, data)| {
+                    tracing::trace!("running system '{}'", system.name());
                     match system.run(resources_from_system.0.clone(), data) {
                         Ok(ShouldContinue::Yes) => {
                             remaining_systems.push(system);
@@ -192,7 +202,7 @@ pub(crate) trait IsBatch: std::fmt::Debug + Default {
     }
 }
 
-pub(crate) trait IsSchedule: std::fmt::Debug {
+pub trait IsSchedule: std::fmt::Debug {
     type System: IsSystem;
     type Batch: IsBatch<System = Self::System>;
 
@@ -293,6 +303,19 @@ pub(crate) trait IsSchedule: std::fmt::Debug {
         }
 
         Ok(())
+    }
+
+    fn get_execution_order(&self) -> Vec<&str> {
+        self.batches()
+            .iter()
+            .flat_map(|batch| {
+                batch
+                    .systems()
+                    .iter()
+                    .map(IsSystem::name)
+                    .chain(vec!["---"])
+            })
+            .collect::<Vec<_>>()
     }
 }
 

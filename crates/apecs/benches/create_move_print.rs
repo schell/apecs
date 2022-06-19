@@ -1,10 +1,9 @@
 use anyhow::Context;
 use apecs::{
-    entities::*,
     join::*,
     storage::*,
     system::*,
-    world::{Facade, World},
+    world::{Facade, World, Entities},
     CanFetch, Read, Write,
 };
 
@@ -146,7 +145,6 @@ impl Benchmark {
         let size = self.size;
         let mut world = World::default();
         world
-            .with_default_resource::<Entities>()?
             .with_resource::<VecStorage<Position>>(VecStorage::new_with_capacity(size))?
             .with_resource::<VecStorage<Velocity>>(VecStorage::new_with_capacity(size))?;
 
@@ -158,8 +156,11 @@ impl Benchmark {
         } else {
             world
                 .with_system("create", move |data| sync_create_n_system(data, size))
+                .unwrap()
                 .with_system("move", sync_move_system)
-                .with_system("print", sync_print_system);
+                .unwrap()
+                .with_system("print", sync_print_system)
+                .unwrap();
         }
 
         for _ in 0..1000 {

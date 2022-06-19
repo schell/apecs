@@ -2,12 +2,10 @@
 //!
 //! Makes sure that destroyed entities have their components removed from
 //! storages.
-use std::marker::PhantomData;
-
-use crate as apecs;
+use crate::{self as apecs, WriteExpect};
 use crate::storage::WorldStorage;
 use crate::system::{ok, ShouldContinue};
-use crate::{entities::Entities, CanFetch, Read, Write};
+use crate::{world::Entities, CanFetch, Read, Write};
 
 use super::Plugin;
 
@@ -16,7 +14,7 @@ pub struct DestroyedIds(Vec<usize>);
 
 #[derive(CanFetch)]
 pub struct PreEntityUpkeepData {
-    entities: Write<Entities>,
+    entities: WriteExpect<Entities>,
     destroyed_ids: Write<DestroyedIds>,
 }
 
@@ -46,24 +44,20 @@ where
     ok()
 }
 
-/// The entity upkeep plugin.
-pub struct PluginEntityUpkeep<Storage>(pub(crate) PhantomData<Storage>);
-
-impl<Storage: WorldStorage> From<PluginEntityUpkeep<Storage>> for Plugin {
-    fn from(_: PluginEntityUpkeep<Storage>) -> Self {
-        Plugin::default()
-            .with_system("entity_pre_upkeep", pre_upkeep_system, &[])
-            .with_system(
-                &format!("entity_upkeep_{}", std::any::type_name::<Storage>()),
-                upkeep_system::<Storage>,
-                &["entity_pre_upkeep"],
-            )
-    }
+/// The upkeep plugin for a component storage
+pub fn plugin<Storage: WorldStorage>() -> Plugin {
+    Plugin::default()
+        .with_system("entity_pre_upkeep", pre_upkeep_system, &[])
+        .with_system(
+            &format!("entity_upkeep_{}", std::any::type_name::<Storage>()),
+            upkeep_system::<Storage>,
+            &["entity_pre_upkeep"],
+        )
 }
 
 #[cfg(test)]
 mod test {
-    use crate::{entities::Entities, storage::*, world::World, Write};
+    use crate::{world::Entities, storage::*, world::World, Write};
 
     #[test]
     fn can_run_storage_upkeep() {
@@ -81,7 +75,7 @@ mod test {
             let a = entities.create();
             let b = entities.create();
             let c = entities.create();
-            for (ent, i) in vec![a, b, c].into_iter().zip(0..) {
+            for (ent, i) in vec![a, b, c.clone()].into_iter().zip(0..) {
                 abc.insert(ent.id(), i);
             }
 
@@ -97,7 +91,7 @@ mod test {
 
         {
             let mut entities: Write<Entities> = world.fetch().unwrap();
-            entities.destroy(c);
+            entities.destroy(c.clone());
         }
 
         world.tick().unwrap();
