@@ -34,7 +34,6 @@ fn main() -> anyhow::Result<()> {
         2 => Level::DEBUG,
         _ => Level::TRACE,
     };
-    // use the verbosity level later when we build TVM
     let subscriber = FmtSubscriber::builder().with_max_level(level).finish();
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 

@@ -1,6 +1,6 @@
 [package]
 name = "apecs"
-version = "0.1.4"
+version = "0.2.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 keywords = ["gamedev", "ecs", "async"]
@@ -21,21 +21,16 @@ name = "apecs"
 path = "src/lib.rs"
 bench = false
 
-[[bin]]
-name = "apecs_example"
-path = "src/main.rs"
-bench = false
-
 [dependencies]
 anyhow = "^1.0"
 apecs-derive = { version = "0.1.3", path = "../apecs-derive" }
 async-broadcast = "^0.4"
+async-channel = "^1.6"
+async-executor = "^1.4"
 hibitset = "^0.6"
 rayon = "^1.5"
 rustc-hash = "^1.1"
-smol = "^1.2"
-tracing = "^0.1"
-tracing-subscriber = "^0.3"
+log = "^0.4"
 
 [dev-dependencies]
 bevy_ecs = "0.5.0"
@@ -48,6 +43,7 @@ planck_ecs = { version = "1.1.0", features = ["parallel"] }
 shipyard = "0.5.0"
 specs = {version = "0.16.1", features = ["serde"] }
 specs-derive = "0.4.1"
+wasm-bindgen-test = "^0.3"
 
 [[bench]]
 name = "benchmark"

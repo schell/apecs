@@ -76,7 +76,7 @@ where
             .with_resource(positions)?
             .with_resource(rotations)?
             .with_resource(velocities)?
-            .with_system("heavy_compute", system::<P, T>);
+            .with_system("heavy_compute", system::<P, T>)?;
 
         Ok(Self {
             world,

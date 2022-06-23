@@ -238,7 +238,7 @@ impl<'a> IsSystem for AsyncSystemRequest<'a> {
             .try_send(resources)
             .context(format!(
                 "could not send resources to async system '{}'",
-                self.0.name
+                self.name()
             ))?;
         ok()
     }
@@ -249,7 +249,7 @@ pub struct AsyncBatch<'a>(Vec<AsyncSystemRequest<'a>>);
 
 impl<'a> IsBatch for AsyncBatch<'a> {
     type System = AsyncSystemRequest<'a>;
-    type ExtraRunData = &'a smol::Executor<'static>;
+    type ExtraRunData = &'a async_executor::Executor<'static>;
 
 
     fn systems(&self) -> &[Self::System] {
@@ -301,7 +301,7 @@ impl<'a> IsBatch for AsyncBatch<'a> {
             // sometimes a system doesn't request resources every frame
             if !data.is_empty() {
                 // send the resources off, if need be
-                tracing::debug!("sending resources to async '{}'", system.name());
+                log::trace!("sending resources to async '{}'", system.name());
                 system
                     .0
                     .resources_to_system_tx

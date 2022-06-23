@@ -15,11 +15,11 @@ use std::{
 pub use apecs_derive::{CanFetch, StoredComponent_Range, StoredComponent_Vec};
 
 pub mod mpsc {
-    pub use smol::channel::*;
+    pub use async_channel::*;
 }
 
 pub mod spsc {
-    pub use smol::channel::*;
+    pub use async_channel::*;
 }
 
 pub mod mpmc {
@@ -616,7 +616,7 @@ mod tests {
     fn unbounded_channel_doesnt_yield_on_send_and_await() {
         let (tx, rx) = mpsc::unbounded::<u32>();
 
-        let executor = smol::Executor::new();
+        let executor = async_executor::Executor::new();
         let _t = executor.spawn(async move {
             for i in 0..5u32 {
                 tx.send(i).await.unwrap();
@@ -637,7 +637,7 @@ mod tests {
     fn smol_executor_sanity() {
         let (tx, rx) = mpsc::bounded::<String>(1);
 
-        let executor = smol::Executor::new();
+        let executor = async_executor::Executor::new();
         let tx_t = tx.clone();
         let _t = executor.spawn(async move {
             let mut n = 0;

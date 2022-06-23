@@ -88,8 +88,6 @@ impl Benchmark {
 
         let mut world = World::default();
         world
-            .with_resource(entities)
-            .unwrap()
             .with_resource(a_store)
             .unwrap()
             .with_resource(b_store)

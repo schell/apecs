@@ -253,9 +253,9 @@ pub struct World {
     ),
     pub sync_schedule: SyncSchedule,
     pub async_systems: Vec<AsyncSystem>,
-    pub async_system_executor: smol::Executor<'static>,
+    pub async_system_executor: async_executor::Executor<'static>,
     // executor for non-system futures
-    pub async_task_executor: smol::Executor<'static>,
+    pub async_task_executor: async_executor::Executor<'static>,
     pub lazy_ops: (mpsc::Sender<LazyOp>, mpsc::Receiver<LazyOp>),
 }
 
@@ -545,7 +545,7 @@ impl World {
                         .map(|err| format!("{}", err))
                         .collect::<Vec<_>>()
                         .join("\n  ");
-                    tracing::error!("async system '{}' erred: {}", name, msg);
+                    log::error!("async system '{}' erred: {}", name, msg);
                 }
             }
         };
@@ -594,18 +594,15 @@ impl World {
     ///
     /// Calls `World::tick_async`, then `World::tick_sync`, then `World::tick_lazy`.
     pub fn tick(&mut self) -> anyhow::Result<()> {
-        tracing::trace!("calling tick_async");
         self.tick_async()?;
-        tracing::trace!("calling tick_sync");
         self.tick_sync()?;
-        tracing::trace!("calling tick_lazy");
         self.tick_lazy()?;
         Ok(())
     }
 
     /// Just tick the synchronous systems.
     pub fn tick_sync(&mut self) -> anyhow::Result<()> {
-        tracing::trace!("tick sync");
+        log::trace!("tick sync");
         clear_returned_resources(
             None,
             &self.resources_from_system.1,
@@ -616,15 +613,13 @@ impl World {
         // run the scheduled sync systems
         self.sync_schedule
             .run((), &mut self.resources, &self.resources_from_system)?;
-
-        tracing::trace!("finished tick sync");
         Ok(())
     }
 
     /// Just tick the async futures, including sending resources to async
     /// systems.
     pub fn tick_async(&mut self) -> anyhow::Result<()> {
-        tracing::trace!("tick async");
+        log::trace!("tick async");
         clear_returned_resources(
             None,
             &self.resources_from_system.1,
@@ -655,10 +650,10 @@ impl World {
                         Ok(request) => AsyncSystemRequest(&system, request),
                         Err(err) => match err {
                             // return an async system that requests nothing
-                            smol::channel::TryRecvError::Empty => {
+                            async_channel::TryRecvError::Empty => {
                                 AsyncSystemRequest(&system, Request::default())
                             }
-                            smol::channel::TryRecvError::Closed => unreachable!(),
+                            async_channel::TryRecvError::Closed => unreachable!(),
                         },
                     };
                     schedule.add_system(async_request);
@@ -674,22 +669,24 @@ impl World {
         }
 
         // lastly tick all our non-system tasks
-        let mut ticks = 0;
-        while self.async_task_executor.try_tick() {
-            ticks += 1;
+        if !self.async_task_executor.is_empty() {
+            let mut ticks = 0;
+            while self.async_task_executor.try_tick() {
+                ticks += 1;
+            }
+            log::trace!("ticked {} futures", ticks);
         }
-        tracing::trace!("ticked {} futures", ticks);
 
         Ok(())
     }
 
     /// Applies lazy world updates.
     pub fn tick_lazy(&mut self) -> anyhow::Result<()> {
-        tracing::trace!("tick lazy");
+        log::trace!("tick lazy");
 
         while let Ok(LazyOp(op)) = self.lazy_ops.1.try_recv() {
             clear_returned_resources(
-                None,
+                Some("World::tick_lazy"),
                 &self.resources_from_system.1,
                 &mut self.resources,
                 &mut self.borrowed_resources,
@@ -758,12 +755,13 @@ impl World {
 
     /// Run all system and non-system futures until they have all finished or one
     /// system has erred, whichever comes first.
-    ///
-    /// This will return even if there are general non-system futures in progress.
     pub fn run(&mut self) -> anyhow::Result<&mut Self> {
         loop {
             self.tick()?;
-            if self.async_systems.is_empty() && self.sync_schedule.is_empty() {
+            if self.async_systems.is_empty()
+                && self.sync_schedule.is_empty()
+                && self.async_task_executor.is_empty()
+            {
                 break;
             }
         }
@@ -866,9 +864,9 @@ mod test {
         }
 
         let subscriber = tracing_subscriber::FmtSubscriber::builder()
-            .with_max_level(tracing::Level::TRACE)
+            .with_max_level(log::Level::TRACE)
             .finish();
-        tracing::subscriber::set_global_default(subscriber)
+        log::subscriber::set_global_default(subscriber)
             .expect("setting default subscriber failed");
 
         let (tx, rx) = spsc::bounded(1);

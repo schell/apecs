@@ -112,7 +112,7 @@ fn print_system(positions: &impl CanReadStorage<Component = Position>) -> anyhow
         line[position.x.floor() as usize] = "x";
     }
 
-    tracing::debug!("{}", line.concat());
+    log::debug!("{}", line.concat());
     Ok(())
 }
 

@@ -1,7 +1,9 @@
 use apecs::{
+    anyhow,
     join::*, storage::*, world::Entities, world::Facade, CanFetch, Read, Write, WriteExpect,
 };
 use tracing::Level;
+use tracing_subscriber::FmtSubscriber;
 
 #[derive(Clone)]
 pub struct Position {
@@ -79,9 +81,7 @@ async fn print_system(mut facade: Facade) -> anyhow::Result<()> {
 }
 
 fn main() -> anyhow::Result<()> {
-    let subscriber = tracing_subscriber::FmtSubscriber::builder()
-        .with_max_level(Level::DEBUG)
-        .finish();
+    let subscriber = FmtSubscriber::builder().with_max_level(Level::DEBUG).finish();
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
     let mut world = apecs::world::World::default();
@@ -99,8 +99,8 @@ fn main() -> anyhow::Result<()> {
     world.run()?;
 
     //let elapsed = start.elapsed().as_secs_f32();
-    //tracing::info!("finished 1000 frames in {:.2}seconds", elapsed);
-    //tracing::info!("average {}fps", 1000.0 / elapsed);
+    //log::info!("finished 1000 frames in {:.2}seconds", elapsed);
+    //log::info!("average {}fps", 1000.0 / elapsed);
 
     Ok(())
 }

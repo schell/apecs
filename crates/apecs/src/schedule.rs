@@ -149,7 +149,7 @@ pub trait IsBatch: std::fmt::Debug + Default {
                 .into_par_iter()
                 .zip(data.resources.into_par_iter())
                 .filter_map(|(mut system, data)| {
-                    tracing::trace!("running par system '{}'", system.name());
+                    log::trace!("running par system '{}'", system.name());
                     match system.run(resources_from_system.0.clone(), data) {
                         Ok(ShouldContinue::Yes) => Some(Either::Left(system)),
                         Ok(ShouldContinue::No) => None,
@@ -164,7 +164,7 @@ pub trait IsBatch: std::fmt::Debug + Default {
                 .into_iter()
                 .zip(data.resources.into_iter())
                 .for_each(|(mut system, data)| {
-                    tracing::trace!("running system '{}'", system.name());
+                    log::trace!("running system '{}'", system.name());
                     match system.run(resources_from_system.0.clone(), data) {
                         Ok(ShouldContinue::Yes) => {
                             remaining_systems.push(system);
