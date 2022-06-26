@@ -91,18 +91,26 @@ impl std::fmt::Debug for FetchReadyResource {
 }
 
 impl FetchReadyResource {
-    fn into_owned(self) -> Option<Resource> {
+    pub fn into_owned(self) -> Option<Resource> {
         match self {
             FetchReadyResource::Owned(r) => Some(r),
             FetchReadyResource::Ref(_) => None,
         }
     }
 
-    fn into_ref(self) -> Option<Arc<Resource>> {
+    pub fn into_ref(self) -> Option<Arc<Resource>> {
         match self {
             FetchReadyResource::Owned(_) => None,
             FetchReadyResource::Ref(r) => Some(r),
         }
+    }
+
+    pub fn is_owned(&self) -> bool {
+        matches!(self, FetchReadyResource::Owned(_))
+    }
+
+    pub fn is_ref(&self) -> bool {
+        !self.is_owned()
     }
 }
 
@@ -524,14 +532,14 @@ impl<'a, T: IsResource> CanFetch for WriteExpect<T> {
         let id = ResourceId::new::<T>();
         let t: FetchReadyResource = fields.remove(&id).with_context(|| {
             format!(
-                "Write::construct could not find '{}' in resources",
+                "WriteExpect::construct could not find '{}' in resources",
                 std::any::type_name::<T>(),
             )
         })?;
         let t = t.into_owned().context("resource is not owned")?;
         let inner: Option<Box<T>> = Some(t.downcast::<T>().map_err(|_| {
             anyhow::anyhow!(
-                "Write::construct could not cast resource as '{}'",
+                "WriteExpect::construct could not cast resource as '{}'",
                 std::any::type_name::<T>(),
             )
         })?);
@@ -590,7 +598,7 @@ impl<'a, T: IsResource> CanFetch for ReadExpect<T> {
         let id = ResourceId::new::<T>();
         let t: FetchReadyResource = fields.remove(&id).with_context(|| {
             format!(
-                "Read::construct could not find '{}' in resources",
+                "ReadExpect::construct could not find '{}' in resources",
                 std::any::type_name::<T>(),
             )
         })?;
@@ -634,7 +642,7 @@ mod tests {
     }
 
     #[test]
-    fn smol_executor_sanity() {
+    fn executor_sanity() {
         let (tx, rx) = mpsc::bounded::<String>(1);
 
         let executor = async_executor::Executor::new();
@@ -676,4 +684,5 @@ mod tests {
             ]
         );
     }
+
 }

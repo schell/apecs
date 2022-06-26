@@ -33,10 +33,12 @@ rustc-hash = "^1.1"
 log = "^0.4"
 
 [dev-dependencies]
+async-timer = "^0.7"
 bevy_ecs = "0.5.0"
 bevy_tasks = "0.5.0"
 cgmath = { version = "0.17", features = ["serde"] }
 criterion = "^0.3"
+env_logger = "^0.9"
 hecs = { version = "0.5", features = ["column-serialize", "row-serialize"] }
 legion = "0.3"
 planck_ecs = { version = "1.1.0", features = ["parallel"] }

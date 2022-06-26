@@ -5,9 +5,11 @@ use rustc_hash::FxHashMap;
 
 use crate::{
     mpsc,
+    resource_manager::ResourceManager,
     schedule::{BatchData, Borrow, IsBatch, IsSchedule, IsSystem},
     spsc,
-    world::{self, Facade},
+    storage::increment_current_iteration,
+    world::Facade,
     CanFetch, FetchReadyResource, Request, Resource, ResourceId,
 };
 
@@ -42,7 +44,7 @@ pub struct AsyncSystem {
 /// Whether or not a system should continue execution.
 pub enum ShouldContinue {
     Yes,
-    No
+    No,
 }
 
 /// Everything is ok, the system should continue.
@@ -87,13 +89,11 @@ impl std::fmt::Debug for SyncSystem {
 }
 
 impl IsSystem for SyncSystem {
-    type Borrow = Borrow;
-
     fn name(&self) -> &str {
         self.name.as_str()
     }
 
-    fn borrows(&self) -> &[Self::Borrow] {
+    fn borrows(&self) -> &[Borrow] {
         &self.borrows
     }
 
@@ -218,13 +218,11 @@ pub struct AsyncSystemRequest<'a>(pub &'a AsyncSystem, pub Request);
 
 /// In terms of system resource scheduling a request is a system.
 impl<'a> IsSystem for AsyncSystemRequest<'a> {
-    type Borrow = Borrow;
-
     fn name(&self) -> &str {
         &self.0.name
     }
 
-    fn borrows(&self) -> &[Self::Borrow] {
+    fn borrows(&self) -> &[Borrow] {
         &self.1.borrows
     }
 
@@ -250,7 +248,6 @@ pub struct AsyncBatch<'a>(Vec<AsyncSystemRequest<'a>>);
 impl<'a> IsBatch for AsyncBatch<'a> {
     type System = AsyncSystemRequest<'a>;
     type ExtraRunData = &'a async_executor::Executor<'static>;
-
 
     fn systems(&self) -> &[Self::System] {
         self.0.as_slice()
@@ -286,15 +283,12 @@ impl<'a> IsBatch for AsyncBatch<'a> {
         &mut self,
         _: bool,
         mut data: BatchData<Self::ExtraRunData>,
-        resources: &mut FxHashMap<ResourceId, Resource>,
-        resources_from_system: &(
-            mpsc::Sender<(ResourceId, Resource)>,
-            mpsc::Receiver<(ResourceId, Resource)>,
-        ),
+        resource_manager: &mut ResourceManager,
     ) -> anyhow::Result<()> {
         let mut systems = self.take_systems();
         systems.retain(|system| {
-            let data = data.resources.pop_front().unwrap();
+            let data: rustc_hash::FxHashMap<ResourceId, FetchReadyResource> =
+                data.resources.pop_front().unwrap();
             if system.0.resource_request_rx.is_closed() {
                 return false;
             }
@@ -302,6 +296,15 @@ impl<'a> IsBatch for AsyncBatch<'a> {
             if !data.is_empty() {
                 // send the resources off, if need be
                 log::trace!("sending resources to async '{}'", system.name());
+                if cfg!(feature = "debug-async") {
+                    for (rez_id, rez) in data.iter() {
+                        log::trace!(
+                            "    - {} {}",
+                            if rez.is_owned() { " " } else { "&" },
+                            rez_id.name
+                        );
+                    }
+                }
                 system
                     .0
                     .resources_to_system_tx
@@ -319,20 +322,19 @@ impl<'a> IsBatch for AsyncBatch<'a> {
 
         self.set_systems(systems);
 
-        // tick the executor
-        while data.extra.try_tick() {}
-
-        world::clear_returned_resources(
-            Some("batch"),
-            &resources_from_system.1,
-            resources,
-            &mut data.borrowed_resources,
-        )?;
-
-        anyhow::ensure!(
-            data.borrowed_resources.is_empty(),
-            "shared batch resources are still in the wild"
-        );
+        // tick the executor until the loaned resources have been returned
+        loop {
+            while data.extra.try_tick() {
+                let _ = increment_current_iteration();
+            }
+            let resources_still_loaned = resource_manager.try_unify_resources("async batch")?;
+            if resources_still_loaned {
+                log::warn!("system in the batch is holding on to resources over an await point!");
+            } else {
+                log::trace!("all resources returned");
+                break;
+            }
+        }
 
         Ok(())
     }

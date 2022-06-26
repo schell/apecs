@@ -61,6 +61,11 @@ mod test {
 
     #[test]
     fn can_run_storage_upkeep() {
+        let _ = env_logger::builder()
+            .is_test(true)
+            .filter_level(log::LevelFilter::Trace)
+            .try_init();
+
         impl StoredComponent for usize {
             type StorageType = VecStorage<Self>;
         }

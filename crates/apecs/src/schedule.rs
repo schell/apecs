@@ -6,24 +6,14 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::{collections::VecDeque, iter::FlatMap, slice::Iter, sync::Arc};
 
 use crate::{
-    mpsc, storage::increment_current_iteration, system::ShouldContinue, world, FetchReadyResource,
-    Resource, ResourceId,
+    mpsc, resource_manager::ResourceManager, storage::increment_current_iteration,
+    system::ShouldContinue, FetchReadyResource, Resource, ResourceId,
 };
 
-pub trait IsBorrow: std::fmt::Debug {
-    fn rez_id(&self) -> ResourceId;
-
-    fn name(&self) -> &str;
-
-    fn is_exclusive(&self) -> bool;
-}
-
 pub trait IsSystem: std::fmt::Debug {
-    type Borrow: IsBorrow;
-
     fn name(&self) -> &str;
 
-    fn borrows(&self) -> &[Self::Borrow];
+    fn borrows(&self) -> &[Borrow];
 
     fn conflicts_with(&self, other: &impl IsSystem) -> bool {
         for borrow_here in self.borrows().iter() {
@@ -91,8 +81,8 @@ pub trait IsBatch: std::fmt::Debug + Default {
         &self,
     ) -> FlatMap<
         Iter<Self::System>,
-        &[<Self::System as IsSystem>::Borrow],
-        fn(&Self::System) -> &[<Self::System as IsSystem>::Borrow],
+        &[Borrow],
+        fn(&Self::System) -> &[Borrow],
     > {
         self.systems().iter().flat_map(|s| s.borrows())
     }
@@ -109,18 +99,21 @@ pub trait IsBatch: std::fmt::Debug + Default {
     /// current world resources and previously loaned resources.
     fn prepare_batch_data(
         &self,
-        resources: &mut FxHashMap<ResourceId, Resource>,
+        resource_manager: &mut ResourceManager,
         extra: Self::ExtraRunData,
     ) -> anyhow::Result<BatchData<Self::ExtraRunData>> {
+        resource_manager.unify_resources(&format!(
+            "{}::prepare_batch_data",
+            std::any::type_name::<Self>()
+        ))?;
+
         let mut data = BatchData::new(extra);
         for system in self.systems() {
             let mut system_resources = FxHashMap::default();
-            world::try_take_resources(
-                resources,
-                &mut data.borrowed_resources,
+            resource_manager.try_loan_resources(
+                system.name(),
                 &mut system_resources,
                 system.borrows().iter(),
-                Some(system.name()),
             )?;
             data.resources.push_back(system_resources);
         }
@@ -137,12 +130,8 @@ pub trait IsBatch: std::fmt::Debug + Default {
     fn run(
         &mut self,
         parallelize: bool,
-        mut data: BatchData<Self::ExtraRunData>,
-        resources: &mut FxHashMap<ResourceId, Resource>,
-        resources_from_system: &(
-            mpsc::Sender<(ResourceId, Resource)>,
-            mpsc::Receiver<(ResourceId, Resource)>,
-        ),
+        data: BatchData<Self::ExtraRunData>,
+        resource_manager: &mut ResourceManager,
     ) -> anyhow::Result<()> {
         let (remaining_systems, errs): (Vec<_>, Vec<_>) = if parallelize {
             self.take_systems()
@@ -150,7 +139,8 @@ pub trait IsBatch: std::fmt::Debug + Default {
                 .zip(data.resources.into_par_iter())
                 .filter_map(|(mut system, data)| {
                     log::trace!("running par system '{}'", system.name());
-                    match system.run(resources_from_system.0.clone(), data) {
+                    let _ = increment_current_iteration();
+                    match system.run(resource_manager.exclusive_resource_return_sender(), data) {
                         Ok(ShouldContinue::Yes) => Some(Either::Left(system)),
                         Ok(ShouldContinue::No) => None,
                         Err(err) => Some(Either::Right(err)),
@@ -165,7 +155,8 @@ pub trait IsBatch: std::fmt::Debug + Default {
                 .zip(data.resources.into_iter())
                 .for_each(|(mut system, data)| {
                     log::trace!("running system '{}'", system.name());
-                    match system.run(resources_from_system.0.clone(), data) {
+                    let _ = increment_current_iteration();
+                    match system.run(resource_manager.exclusive_resource_return_sender(), data) {
                         Ok(ShouldContinue::Yes) => {
                             remaining_systems.push(system);
                         }
@@ -185,13 +176,6 @@ pub trait IsBatch: std::fmt::Debug + Default {
                 Ok(()) => Err(err),
                 Err(prev) => Err(prev.context(format!("and {}", err))),
             })?;
-
-        world::clear_returned_resources(
-            Some("batch"),
-            &resources_from_system.1,
-            resources,
-            &mut data.borrowed_resources,
-        )?;
 
         anyhow::ensure!(
             data.borrowed_resources.is_empty(),
@@ -288,18 +272,18 @@ pub trait IsSchedule: std::fmt::Debug {
     fn run(
         &mut self,
         extra: <Self::Batch as IsBatch>::ExtraRunData,
-        resources: &mut FxHashMap<ResourceId, Resource>,
-        resources_from_system: &(
-            mpsc::Sender<(ResourceId, Resource)>,
-            mpsc::Receiver<(ResourceId, Resource)>,
-        ),
+        resource_manager: &mut ResourceManager,
     ) -> anyhow::Result<()> {
         let parallelize = self.get_should_parallelize();
         for batch in self.batches_mut() {
-            increment_current_iteration();
             // make the batch data
-            let batch_data = batch.prepare_batch_data(resources, extra.clone())?;
-            batch.run(parallelize, batch_data, resources, resources_from_system)?;
+            // TODO: move making batch data down into IsBatch::run
+            let batch_data = batch.prepare_batch_data(resource_manager, extra.clone())?;
+            batch.run(
+                parallelize,
+                batch_data,
+                resource_manager,
+            )?;
         }
 
         Ok(())
@@ -325,16 +309,16 @@ pub struct Borrow {
     pub is_exclusive: bool,
 }
 
-impl IsBorrow for Borrow {
-    fn rez_id(&self) -> ResourceId {
+impl Borrow {
+    pub fn rez_id(&self) -> ResourceId {
         self.id.clone()
     }
 
-    fn name(&self) -> &str {
+    pub fn name(&self) -> &str {
         self.id.name
     }
 
-    fn is_exclusive(&self) -> bool {
+    pub fn is_exclusive(&self) -> bool {
         self.is_exclusive
     }
 }
@@ -389,9 +373,8 @@ mod test {
         assert_eq!(batches[0].systems()[1].name(), "two");
         assert_eq!(batches[0].systems()[2].name(), "three");
 
-        let mut resources = FxHashMap::default();
-        let chan = mpsc::unbounded();
-        schedule.run((), &mut resources, &chan).unwrap();
+        let mut manager = ResourceManager::new();
+        schedule.run((), &mut manager).unwrap();
 
         let batches = schedule.batches();
         assert_eq!(batches.len(), 1);

@@ -5,6 +5,7 @@
 mod core;
 pub mod system;
 pub mod join;
+pub mod resource_manager;
 pub mod schedule;
 pub mod storage;
 pub mod world;

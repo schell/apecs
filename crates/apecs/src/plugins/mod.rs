@@ -114,12 +114,14 @@ impl Plugin {
 #[cfg(test)]
 mod test {
     use crate as apecs;
-
-    use super::*;
+    use apecs::{join::Join, storage::VecStorage, system::*, world::World, CanFetch, Write};
 
     #[test]
     fn sanity() {
-        use apecs::{join::Join, storage::VecStorage, system::*, world::World, CanFetch, Write};
+        let _ = env_logger::builder()
+            .is_test(true)
+            .filter_level(log::LevelFilter::Trace)
+            .try_init();
 
         #[derive(CanFetch)]
         struct MyData {
