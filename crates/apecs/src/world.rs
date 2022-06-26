@@ -504,6 +504,8 @@ impl World {
         log::trace!("tick sync");
         // run the scheduled sync systems
         self.sync_schedule.run((), &mut self.resource_manager)?;
+
+        self.resource_manager.unify_resources("tick sync")?;
         Ok(())
     }
 
@@ -566,6 +568,7 @@ impl World {
             log::trace!("ticked {} futures", ticks);
         }
 
+        self.resource_manager.unify_resources("tick async")?;
         Ok(())
     }
 
