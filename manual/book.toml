@@ -1,0 +1,6 @@
+[book]
+authors = ["Schell Carl Scivally"]
+language = "en"
+multilingual = false
+src = "src"
+title = "The APECS Manual"
