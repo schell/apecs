@@ -4,11 +4,12 @@ use std::future::Future;
 use std::{iter::Map, ops::Deref};
 
 use anyhow::Context;
+use async_oneshot::oneshot;
 use hibitset::{BitIter, BitSet, BitSetLike};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::resource_manager::ResourceManager;
-use crate::WriteExpect;
+use crate::{WriteExpect, oneshot};
 use crate::{
     mpsc,
     plugins::{entity_upkeep, Plugin},
@@ -65,21 +66,37 @@ impl Lazy {
     pub fn exec_mut(
         &self,
         op: impl FnOnce(&mut World) -> anyhow::Result<()> + Send + Sync + 'static,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<impl Future<Output = anyhow::Result<()>>> {
+        let (tx, rx) = oneshot();
         self.0
-            .try_send(LazyOp(Box::new(op)))
+            .try_send(LazyOp(Box::new(op), tx))
             .context("could not send lazy op")?;
-        Ok(())
+        Ok(async move {
+            rx.await.map_err(|_| anyhow::anyhow!("lazy exec_mut oneshot is closed"))
+        })
     }
 }
 
-pub struct LazyOp(Box<dyn FnOnce(&mut World) -> anyhow::Result<()> + Send + Sync + 'static>);
+pub struct LazyOp(Box<dyn FnOnce(&mut World) -> anyhow::Result<()> + Send + Sync + 'static>, oneshot::Sender<()>);
 
-#[derive(Clone)]
 pub struct Entity {
     id: usize,
     gen: usize,
     op_sender: mpsc::Sender<LazyOp>,
+    op_receivers: Vec<oneshot::Receiver<()>>,
+}
+
+/// You may clone entities, but each one does its own lazy updates,
+/// separate from all other clones.
+impl Clone for Entity {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id.clone(),
+            gen: self.gen.clone(),
+            op_sender: self.op_sender.clone(),
+            op_receivers: vec![]
+        }
+    }
 }
 
 impl Deref for Entity {
@@ -98,11 +115,12 @@ impl Entity {
     /// Lazily add a component.
     ///
     /// This entity will have the associated component after the next tick.
-    pub fn lazy_with<C: StoredComponent>(self, component: C) -> anyhow::Result<Self>
+    pub fn lazy_with<C: StoredComponent>(mut self, component: C) -> anyhow::Result<Self>
     where
         C::StorageType: WorldStorage,
     {
         let id = self.id;
+        let (tx, rx) = oneshot();
         let op = Box::new(move |world: &mut World| -> anyhow::Result<()> {
             if !world.has_resource::<C::StorageType>() {
                 world.with_default_storage::<C>()?;
@@ -112,38 +130,45 @@ impl Entity {
             Ok(())
         });
         self.op_sender
-            .try_send(LazyOp(op))
+            .try_send(LazyOp(op, tx))
             .context("could not send entity op")?;
+        self.op_receivers.push(rx);
         Ok(self)
     }
 
     /// Lazily add a component and return a future that completes after the
     /// component has been added.
     pub fn lazy_add<C: StoredComponent>(
-        &self,
+        &mut self,
         component: C,
-    ) -> anyhow::Result<impl Future<Output = ()>>
+    ) -> anyhow::Result<()>
     where
         C::StorageType: WorldStorage,
     {
-        let (tx, rx) = spsc::bounded(1);
         let id = self.id;
+        let (tx, rx) = oneshot();
         let op = LazyOp(Box::new(move |world: &mut World| -> anyhow::Result<()> {
             if !world.has_resource::<C::StorageType>() {
                 world.with_default_storage::<C>()?;
             }
             let mut storage: Write<C::StorageType> = world.fetch()?;
             let _ = storage.insert(id, component);
-            tx.try_send(())
-                .context("could not send component add confirmation")?;
             Ok(())
-        }));
+        }), tx);
         self.op_sender
             .try_send(op)
             .context("could not send entity op")?;
-        Ok(async move {
-            rx.recv().await.unwrap();
-        })
+        self.op_receivers.push(rx);
+        Ok(())
+    }
+
+    /// Await a future that completes after all lazy updates have been performed.
+    pub async fn updates(&mut self) -> anyhow::Result<()> {
+        let updates: Vec<oneshot::Receiver<()>> = std::mem::take(&mut self.op_receivers);
+        for update in updates.into_iter() {
+            update.await.map_err(|_| anyhow::anyhow!("updates oneshot is closed"))?;
+        }
+        Ok(())
     }
 }
 
@@ -212,6 +237,7 @@ impl Entities {
                 id,
                 gen: 0,
                 op_sender: self.lazy_op_sender.clone(),
+                op_receivers: vec![],
             }
         } else {
             self.recycle.pop().unwrap()
@@ -221,7 +247,8 @@ impl Entities {
         entity
     }
 
-    pub fn destroy(&mut self, entity: Entity) {
+    pub fn destroy(&mut self, mut entity: Entity) {
+        entity.op_receivers = vec![];
         self.alive_set.remove(entity.id.try_into().unwrap());
         self.dead.push(entity);
     }
@@ -576,9 +603,10 @@ impl World {
     pub fn tick_lazy(&mut self) -> anyhow::Result<()> {
         log::trace!("tick lazy");
 
-        while let Ok(LazyOp(op)) = self.lazy_ops.1.try_recv() {
+        while let Ok(LazyOp(op, mut tx)) = self.lazy_ops.1.try_recv() {
             self.resource_manager.unify_resources("World::tick_lazy")?;
             (op)(self)?;
+            let _ = tx.send(());
         }
 
         Ok(())
@@ -804,7 +832,7 @@ mod test {
     }
 
     #[test]
-    fn can_create_entities_and_build_convenience() -> anyhow::Result<()> {
+    fn can_create_entities_and_build_convenience() {
         struct DataA(f32);
         impl StoredComponent for DataA {
             type StorageType = VecStorage<Self>;
@@ -817,7 +845,7 @@ mod test {
 
         let mut world = World::default();
         assert!(world.has_resource::<Entities>(), "missing entities");
-        let _entity = world
+        let e = world
             .entity()
             .unwrap()
             .with(DataA(0.0))
@@ -825,8 +853,30 @@ mod test {
             .with(DataB(0.0))
             .unwrap()
             .build();
+        let id = e.id();
 
-        Ok(())
+        world.with_async(async move {
+            println!("updating entity");
+            e.lazy_with(DataA(666.0))
+                .unwrap()
+                .lazy_with(DataB(666.0))
+                .unwrap()
+                .updates()
+                .await
+                .unwrap();
+            println!("done!");
+        });
+
+        while !world.async_task_executor.is_empty() {
+            world.tick().unwrap();
+        }
+
+        let (a_store, b_store): (ReadStore<DataA>, ReadStore<DataB>) = world.fetch().unwrap();
+        let a = a_store.get(id).unwrap();
+        assert_eq!(a.0, 666.0);
+
+        let b = b_store.get(id).unwrap();
+        assert_eq!(b.0, 666.0);
     }
 
     #[test]

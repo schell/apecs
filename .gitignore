@@ -2,3 +2,4 @@
 Cargo.lock
 *~undo-tree~
 flamegraph.svg
+.#*

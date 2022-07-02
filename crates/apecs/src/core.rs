@@ -14,6 +14,10 @@ use std::{
 
 pub use apecs_derive::{CanFetch, StoredComponent_Range, StoredComponent_Vec};
 
+pub mod oneshot {
+    pub use async_oneshot::*;
+}
+
 pub mod mpsc {
     pub use async_channel::*;
 }
