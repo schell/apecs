@@ -1,4 +1,4 @@
-use std::{future::Future, pin::Pin};
+use std::{future::Future, pin::Pin, sync::atomic::AtomicU64};
 
 use anyhow::Context;
 use rustc_hash::FxHashMap;
@@ -8,10 +8,24 @@ use crate::{
     resource_manager::ResourceManager,
     schedule::{BatchData, Borrow, IsBatch, IsSchedule, IsSystem},
     spsc,
-    storage::increment_current_iteration,
     world::Facade,
     CanFetch, FetchReadyResource, Request, Resource, ResourceId,
 };
+
+static SYSTEM_ITERATION: AtomicU64 = AtomicU64::new(0);
+
+pub fn clear_iteration() {
+    SYSTEM_ITERATION.store(0, std::sync::atomic::Ordering::SeqCst)
+}
+
+pub fn current_iteration() -> u64 {
+    SYSTEM_ITERATION.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Increment the system iteration counter, returning the previous value.
+pub fn increment_current_iteration() -> u64 {
+    SYSTEM_ITERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+}
 
 /// A future representing an async system.
 pub type AsyncSystemFuture =

@@ -11,14 +11,12 @@ use hibitset::{BitIter, BitSet, BitSetLike};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::resource_manager::ResourceManager;
-use crate::storage::{ReadStore, CanReadStorage};
 use crate::{WriteExpect, oneshot, Read};
 use crate::{
     mpsc,
-    plugins::{entity_upkeep, Plugin},
+    plugins::Plugin,
     schedule::{Borrow, IsSchedule},
     spsc,
-    storage::{CanWriteStorage, StoredComponent, WorldStorage},
     system::{
         AsyncSchedule, AsyncSystem, AsyncSystemFuture, AsyncSystemRequest, ShouldContinue,
         SyncSchedule, SyncSystem,
@@ -131,60 +129,60 @@ impl Entity {
         self.id
     }
 
-    /// Lazily add a component.
-    ///
-    /// This entity will have the associated component after the next tick.
-    pub fn lazy_with<C: StoredComponent>(mut self, component: C) -> anyhow::Result<Self>
-    where
-        C::StorageType: WorldStorage,
-    {
-        let id = self.id;
-        let (tx, rx) = oneshot();
-        let op = Box::new(move |world: &mut World| {
-            if !world.has_resource::<C::StorageType>() {
-                world.with_default_storage::<C>()?;
-            }
-            let mut storage: Write<C::StorageType> = world.fetch()?;
-            let _ = storage.insert(id, component);
-            Ok(Arc::new(()) as Arc<dyn Any + Send + Sync>)
-        });
-        self.op_sender
-            .try_send(LazyOp {
-                op, tx
-            })
-            .context("could not send entity op")?;
-        self.op_receivers.push(rx);
-        Ok(self)
-    }
+    ///// Lazily add a component.
+    /////
+    ///// This entity will have the associated component after the next tick.
+    //pub fn lazy_with<C: StoredComponent>(mut self, component: C) -> anyhow::Result<Self>
+    //where
+    //    C::StorageType: WorldStorage,
+    //{
+    //    let id = self.id;
+    //    let (tx, rx) = oneshot();
+    //    let op = Box::new(move |world: &mut World| {
+    //        if !world.has_resource::<C::StorageType>() {
+    //            world.with_default_storage::<C>()?;
+    //        }
+    //        let mut storage: Write<C::StorageType> = world.fetch()?;
+    //        let _ = storage.insert(id, component);
+    //        Ok(Arc::new(()) as Arc<dyn Any + Send + Sync>)
+    //    });
+    //    self.op_sender
+    //        .try_send(LazyOp {
+    //            op, tx
+    //        })
+    //        .context("could not send entity op")?;
+    //    self.op_receivers.push(rx);
+    //    Ok(self)
+    //}
 
-    /// Lazily add a component and return a future that completes after the
-    /// component has been added.
-    pub fn lazy_add<C: StoredComponent>(
-        &mut self,
-        component: C,
-    ) -> anyhow::Result<()>
-    where
-        C::StorageType: WorldStorage,
-    {
-        let id = self.id;
-        let (tx, rx) = oneshot();
-        let op = LazyOp{
-            op: Box::new(move |world: &mut World| {
-                if !world.has_resource::<C::StorageType>() {
-                    world.with_default_storage::<C>()?;
-                }
-                let mut storage: Write<C::StorageType> = world.fetch()?;
-                let _ = storage.insert(id, component);
-                Ok(Arc::new(()) as Arc<dyn Any + Send + Sync>)
-            }),
-            tx
-        };
-        self.op_sender
-            .try_send(op)
-            .context("could not send entity op")?;
-        self.op_receivers.push(rx);
-        Ok(())
-    }
+    ///// Lazily add a component and return a future that completes after the
+    ///// component has been added.
+    //pub fn lazy_add<C: StoredComponent>(
+    //    &mut self,
+    //    component: C,
+    //) -> anyhow::Result<()>
+    //where
+    //    C::StorageType: WorldStorage,
+    //{
+    //    let id = self.id;
+    //    let (tx, rx) = oneshot();
+    //    let op = LazyOp{
+    //        op: Box::new(move |world: &mut World| {
+    //            if !world.has_resource::<C::StorageType>() {
+    //                world.with_default_storage::<C>()?;
+    //            }
+    //            let mut storage: Write<C::StorageType> = world.fetch()?;
+    //            let _ = storage.insert(id, component);
+    //            Ok(Arc::new(()) as Arc<dyn Any + Send + Sync>)
+    //        }),
+    //        tx
+    //    };
+    //    self.op_sender
+    //        .try_send(op)
+    //        .context("could not send entity op")?;
+    //    self.op_receivers.push(rx);
+    //    Ok(())
+    //}
 
     /// Await a future that completes after all lazy updates have been performed.
     pub async fn updates(&mut self) -> anyhow::Result<()> {
@@ -195,31 +193,31 @@ impl Entity {
         Ok(())
     }
 
-    /// Get the value of a specific component, if it exists.
-    pub async fn lazy_get<C>(&self) -> anyhow::Result<Option<C>>
-        where
-        C: StoredComponent + Clone,
-        C::StorageType: CanReadStorage
-    {
-        let id = self.id();
-        let (tx, rx) = oneshot();
-        self.op_sender
-            .try_send(LazyOp {
-                op: Box::new(move |world: &mut World| {
-                    if !world.has_resource::<C::StorageType>() {
-                        world.with_default_storage::<C>()?;
-                    }
-                    let storage: ReadStore<C> = world.fetch()?;
-                    Ok(Arc::new(storage.get(id).map(Clone::clone)) as Arc<dyn Any + Send + Sync>)
-                }),
-                tx,
-            })
-            .context("could not send entity op")?;
-        let arc: Arc<dyn Any + Send + Sync> = rx.await.map_err(|_| anyhow::anyhow!("could not receive get request"))?;
-        let arc_c: Arc<Option<C>> = arc.downcast().map_err(|_| anyhow::anyhow!("could not downcast"))?;
-        let c: Option<C> = Arc::try_unwrap(arc_c).map_err(|_| anyhow::anyhow!("could not unwrap"))?;
-        Ok(c)
-    }
+    ///// Get the value of a specific component, if it exists.
+    //pub async fn lazy_get<C>(&self) -> anyhow::Result<Option<C>>
+    //    where
+    //    C: StoredComponent + Clone,
+    //    C::StorageType: CanReadStorage
+    //{
+    //    let id = self.id();
+    //    let (tx, rx) = oneshot();
+    //    self.op_sender
+    //        .try_send(LazyOp {
+    //            op: Box::new(move |world: &mut World| {
+    //                if !world.has_resource::<C::StorageType>() {
+    //                    world.with_default_storage::<C>()?;
+    //                }
+    //                let storage: ReadStore<C> = world.fetch()?;
+    //                Ok(Arc::new(storage.get(id).map(Clone::clone)) as Arc<dyn Any + Send + Sync>)
+    //            }),
+    //            tx,
+    //        })
+    //        .context("could not send entity op")?;
+    //    let arc: Arc<dyn Any + Send + Sync> = rx.await.map_err(|_| anyhow::anyhow!("could not receive get request"))?;
+    //    let arc_c: Arc<Option<C>> = arc.downcast().map_err(|_| anyhow::anyhow!("could not downcast"))?;
+    //    let c: Option<C> = Arc::try_unwrap(arc_c).map_err(|_| anyhow::anyhow!("could not unwrap"))?;
+    //    Ok(c)
+    //}
 }
 
 pub struct EntityBuilder<'a> {
@@ -228,19 +226,19 @@ pub struct EntityBuilder<'a> {
 }
 
 impl<'a> EntityBuilder<'a> {
-    /// Adds a component immediately.
-    pub fn with<C: StoredComponent>(self, component: C) -> anyhow::Result<Self> {
-        self.world
-            .resource_manager
-            .unify_resources("EntityBuilder::with")?;
+    ///// Adds a component immediately.
+    //pub fn with<C: StoredComponent>(self, component: C) -> anyhow::Result<Self> {
+    //    self.world
+    //        .resource_manager
+    //        .unify_resources("EntityBuilder::with")?;
 
-        if !self.world.has_resource::<C::StorageType>() {
-            self.world.with_default_storage::<C>()?;
-        }
-        let mut storage: Write<C::StorageType> = self.world.fetch()?;
-        let _ = storage.insert(self.entity.id(), component);
-        Ok(self)
-    }
+    //    if !self.world.has_resource::<C::StorageType>() {
+    //        self.world.with_default_storage::<C>()?;
+    //    }
+    //    let mut storage: Write<C::StorageType> = self.world.fetch()?;
+    //    let _ = storage.insert(self.entity.id(), component);
+    //    Ok(self)
+    //}
 
     /// Build and return the entity
     pub fn build(self) -> Entity {
@@ -450,19 +448,19 @@ impl World {
         self.with_plugin(T::plugin())
     }
 
-    pub fn with_storage<T: StoredComponent>(
-        &mut self,
-        store: T::StorageType,
-    ) -> anyhow::Result<&mut Self> {
-        self.with_resource(store)?
-            .with_plugin(entity_upkeep::plugin::<T::StorageType>())
-    }
+    //pub fn with_storage<T: StoredComponent>(
+    //    &mut self,
+    //    store: T::StorageType,
+    //) -> anyhow::Result<&mut Self> {
+    //    self.with_resource(store)?
+    //        .with_plugin(entity_upkeep::plugin::<T::StorageType>())
+    //}
 
-    pub fn with_default_storage<T: StoredComponent>(&mut self) -> anyhow::Result<&mut Self> {
-        let store = <T::StorageType>::default();
-        self.with_resource(store)?
-            .with_plugin(entity_upkeep::plugin::<T::StorageType>())
-    }
+    //pub fn with_default_storage<T: StoredComponent>(&mut self) -> anyhow::Result<&mut Self> {
+    //    let store = <T::StorageType>::default();
+    //    self.with_resource(store)?
+    //        .with_plugin(entity_upkeep::plugin::<T::StorageType>())
+    //}
 
     pub fn entity(&mut self) -> anyhow::Result<EntityBuilder<'_>> {
         let mut entities = self.fetch::<WriteExpect<Entities>>()?;
@@ -728,113 +726,113 @@ mod test {
     use std::sync::Mutex;
 
     use crate as apecs;
-    use apecs::{anyhow, join::*, spsc, storage::*, system::*, world::*, Read, Write, WriteExpect};
+    use apecs::{anyhow, spsc, system::*, world::*, Read, Write, WriteExpect};
 
-    #[test]
-    fn can_closure_system() -> anyhow::Result<()> {
-        #[derive(CanFetch)]
-        struct StatefulSystemData {
-            positions: Read<VecStorage<(f32, f32)>>,
-        }
+    //#[test]
+    //fn can_closure_system() -> anyhow::Result<()> {
+    //    #[derive(CanFetch)]
+    //    struct StatefulSystemData {
+    //        positions: Read<VecStorage<(f32, f32)>>,
+    //    }
 
-        fn mk_stateful_system(
-            tx: spsc::Sender<(f32, f32)>,
-        ) -> impl FnMut(StatefulSystemData) -> anyhow::Result<ShouldContinue> {
-            println!("making stateful system");
-            let mut highest_pos: (f32, f32) = (0.0, f32::NEG_INFINITY);
+    //    fn mk_stateful_system(
+    //        tx: spsc::Sender<(f32, f32)>,
+    //    ) -> impl FnMut(StatefulSystemData) -> anyhow::Result<ShouldContinue> {
+    //        println!("making stateful system");
+    //        let mut highest_pos: (f32, f32) = (0.0, f32::NEG_INFINITY);
 
-            move |data: StatefulSystemData| {
-                println!("running stateful system: highest_pos:{:?}", highest_pos);
-                for pos in data.positions.iter() {
-                    if pos.1 > highest_pos.1 {
-                        highest_pos = *pos.value();
-                        println!("set new highest_pos: {:?}", highest_pos);
-                    }
-                }
+    //        move |data: StatefulSystemData| {
+    //            println!("running stateful system: highest_pos:{:?}", highest_pos);
+    //            for pos in data.positions.iter() {
+    //                if pos.1 > highest_pos.1 {
+    //                    highest_pos = *pos.value();
+    //                    println!("set new highest_pos: {:?}", highest_pos);
+    //                }
+    //            }
 
-                println!("sending highest_pos: {:?}", highest_pos);
-                tx.try_send(highest_pos)?;
+    //            println!("sending highest_pos: {:?}", highest_pos);
+    //            tx.try_send(highest_pos)?;
 
-                ok()
-            }
-        }
+    //            ok()
+    //        }
+    //    }
 
-        let mut positions: VecStorage<(f32, f32)> = VecStorage::default();
-        positions.insert(0, (20.0, 30.0));
-        positions.insert(1, (0.0, 0.0));
-        positions.insert(2, (100.0, 100.0));
+    //    let mut positions: VecStorage<(f32, f32)> = VecStorage::default();
+    //    positions.insert(0, (20.0, 30.0));
+    //    positions.insert(1, (0.0, 0.0));
+    //    positions.insert(2, (100.0, 100.0));
 
-        let (tx, rx) = spsc::bounded(1);
+    //    let (tx, rx) = spsc::bounded(1);
 
-        let mut world = World::default();
-        world
-            .with_resource(positions)?
-            .with_system("stateful", mk_stateful_system(tx))?;
+    //    let mut world = World::default();
+    //    world
+    //        .with_resource(positions)?
+    //        .with_system("stateful", mk_stateful_system(tx))?;
 
-        world.tick()?;
+    //    world.tick()?;
 
-        let highest = rx.try_recv()?;
-        assert_eq!(highest, (100.0, 100.0));
+    //    let highest = rx.try_recv()?;
+    //    assert_eq!(highest, (100.0, 100.0));
 
-        Ok(())
-    }
+    //    Ok(())
+    //}
 
-    #[test]
-    fn async_systems_run_and_return_resources() -> anyhow::Result<()> {
-        async fn create(tx: spsc::Sender<()>, mut facade: Facade) -> anyhow::Result<()> {
-            println!("create running");
-            tx.try_send(()).unwrap();
-            let (mut entities, mut names, mut numbers): (
-                WriteExpect<Entities>,
-                Write<VecStorage<String>>,
-                Write<VecStorage<u32>>,
-            ) = facade.fetch().await?;
-            for n in 0..100 {
-                let e = entities.create();
-                let _ = names.insert(e.id(), format!("entity_{}", n));
-                let _ = numbers.insert(e.id(), n);
-            }
+    //#[test]
+    //fn async_systems_run_and_return_resources() -> anyhow::Result<()> {
+    //    async fn create(tx: spsc::Sender<()>, mut facade: Facade) -> anyhow::Result<()> {
+    //        println!("create running");
+    //        tx.try_send(()).unwrap();
+    //        let (mut entities, mut names, mut numbers): (
+    //            WriteExpect<Entities>,
+    //            Write<VecStorage<String>>,
+    //            Write<VecStorage<u32>>,
+    //        ) = facade.fetch().await?;
+    //        for n in 0..100 {
+    //            let e = entities.create();
+    //            let _ = names.insert(e.id(), format!("entity_{}", n));
+    //            let _ = numbers.insert(e.id(), n);
+    //        }
 
-            Ok(())
-        }
+    //        Ok(())
+    //    }
 
-        fn maintain_map(
-            mut data: (
-                Read<VecStorage<String>>,
-                Read<VecStorage<u32>>,
-                Write<FxHashMap<String, u32>>,
-            ),
-        ) -> anyhow::Result<ShouldContinue> {
-            for (name, number) in (&data.0, &data.1).join() {
-                if !data.2.contains_key(name.value()) {
-                    let _ = data.2.insert(name.to_string(), *number.value());
-                }
-            }
+    //    fn maintain_map(
+    //        mut data: (
+    //            Read<VecStorage<String>>,
+    //            Read<VecStorage<u32>>,
+    //            Write<FxHashMap<String, u32>>,
+    //        ),
+    //    ) -> anyhow::Result<ShouldContinue> {
+    //        for (name, number) in (&data.0, &data.1).join() {
+    //            if !data.2.contains_key(name.value()) {
+    //                let _ = data.2.insert(name.to_string(), *number.value());
+    //            }
+    //        }
 
-            ok()
-        }
+    //        ok()
+    //    }
 
-        let (tx, rx) = spsc::bounded(1);
-        let mut world = World::default();
-        world
-            .with_async_system("create", |facade| async move { create(tx, facade).await })
-            .with_system("maintain", maintain_map)?;
+    //    let (tx, rx) = spsc::bounded(1);
+    //    let mut world = World::default();
+    //    world
+    //        .with_async_system("create", |facade| async move { create(tx, facade).await })
+    //        .with_system("maintain", maintain_map)?;
 
-        // create system runs - sending on the channel and making the fetch request
-        world.tick()?;
-        rx.try_recv().unwrap();
+    //    // create system runs - sending on the channel and making the fetch request
+    //    world.tick()?;
+    //    rx.try_recv().unwrap();
 
-        // world sends resources to the create system which makes
-        // entities+components, then the maintain system updates the book
-        world.tick()?;
+    //    // world sends resources to the create system which makes
+    //    // entities+components, then the maintain system updates the book
+    //    world.tick()?;
 
-        let book = world.fetch::<Read<FxHashMap<String, u32>>>()?;
-        for n in 0..100 {
-            assert_eq!(book.get(&format!("entity_{}", n)), Some(&n));
-        }
+    //    let book = world.fetch::<Read<FxHashMap<String, u32>>>()?;
+    //    for n in 0..100 {
+    //        assert_eq!(book.get(&format!("entity_{}", n)), Some(&n));
+    //    }
 
-        Ok(())
-    }
+    //    Ok(())
+    //}
 
     #[test]
     fn can_run_async_systems_that_both_borrow_reads() {
@@ -883,109 +881,109 @@ mod test {
         assert_eq!(Some(1), rx.try_recv().ok());
     }
 
-    #[test]
-    fn can_create_entities_and_build_convenience() {
-        struct DataA(f32);
-        impl StoredComponent for DataA {
-            type StorageType = VecStorage<Self>;
-        }
+    //#[test]
+    //fn can_create_entities_and_build_convenience() {
+    //    struct DataA(f32);
+    //    impl StoredComponent for DataA {
+    //        type StorageType = VecStorage<Self>;
+    //    }
 
-        struct DataB(f32);
-        impl StoredComponent for DataB {
-            type StorageType = VecStorage<Self>;
-        }
+    //    struct DataB(f32);
+    //    impl StoredComponent for DataB {
+    //        type StorageType = VecStorage<Self>;
+    //    }
 
-        let mut world = World::default();
-        assert!(world.has_resource::<Entities>(), "missing entities");
-        let e = world
-            .entity()
-            .unwrap()
-            .with(DataA(0.0))
-            .unwrap()
-            .with(DataB(0.0))
-            .unwrap()
-            .build();
-        let id = e.id();
+    //    let mut world = World::default();
+    //    assert!(world.has_resource::<Entities>(), "missing entities");
+    //    let e = world
+    //        .entity()
+    //        .unwrap()
+    //        .with(DataA(0.0))
+    //        .unwrap()
+    //        .with(DataB(0.0))
+    //        .unwrap()
+    //        .build();
+    //    let id = e.id();
 
-        world.with_async(async move {
-            println!("updating entity");
-            e.lazy_with(DataA(666.0))
-                .unwrap()
-                .lazy_with(DataB(666.0))
-                .unwrap()
-                .updates()
-                .await
-                .unwrap();
-            println!("done!");
-        });
+    //    world.with_async(async move {
+    //        println!("updating entity");
+    //        e.lazy_with(DataA(666.0))
+    //            .unwrap()
+    //            .lazy_with(DataB(666.0))
+    //            .unwrap()
+    //            .updates()
+    //            .await
+    //            .unwrap();
+    //        println!("done!");
+    //    });
 
-        while !world.async_task_executor.is_empty() {
-            world.tick().unwrap();
-        }
+    //    while !world.async_task_executor.is_empty() {
+    //        world.tick().unwrap();
+    //    }
 
-        let (a_store, b_store): (ReadStore<DataA>, ReadStore<DataB>) = world.fetch().unwrap();
-        let a = a_store.get(id).unwrap();
-        assert_eq!(a.0, 666.0);
+    //    let (a_store, b_store): (ReadStore<DataA>, ReadStore<DataB>) = world.fetch().unwrap();
+    //    let a = a_store.get(id).unwrap();
+    //    assert_eq!(a.0, 666.0);
 
-        let b = b_store.get(id).unwrap();
-        assert_eq!(b.0, 666.0);
-    }
+    //    let b = b_store.get(id).unwrap();
+    //    assert_eq!(b.0, 666.0);
+    //}
 
-    #[test]
-    fn entities_can_lazy_add_and_get() {
-        #[derive(Debug, Clone, PartialEq)]
-        struct Name(&'static str);
-        impl StoredComponent for Name {
-            type StorageType = VecStorage<Self>;
-        }
+    //#[test]
+    //fn entities_can_lazy_add_and_get() {
+    //    #[derive(Debug, Clone, PartialEq)]
+    //    struct Name(&'static str);
+    //    impl StoredComponent for Name {
+    //        type StorageType = VecStorage<Self>;
+    //    }
 
-        #[derive(Debug, Clone, PartialEq)]
-        struct Age(u32);
-        impl StoredComponent for Age {
-            type StorageType = VecStorage<Self>;
-        }
+    //    #[derive(Debug, Clone, PartialEq)]
+    //    struct Age(u32);
+    //    impl StoredComponent for Age {
+    //        type StorageType = VecStorage<Self>;
+    //    }
 
-        // this tests that we can use an Entity to set components and
-        // await those component updates, as well as that ticking the
-        // world advances tho async system up to exactly one await
-        // point per tick.
-        let await_points = Arc::new(Mutex::new(vec![]));
-        let awaits = await_points.clone();
-        let mut world = World::default();
-        world.with_async_system("test", |mut facade| async move {
-            await_points.lock().unwrap().push(1);
-            let mut e = {
-                let mut entities: Write<Entities> = facade.fetch().await?;
-                await_points.lock().unwrap().push(2);
-                entities.create()
-            };
+    //    // this tests that we can use an Entity to set components and
+    //    // await those component updates, as well as that ticking the
+    //    // world advances tho async system up to exactly one await
+    //    // point per tick.
+    //    let await_points = Arc::new(Mutex::new(vec![]));
+    //    let awaits = await_points.clone();
+    //    let mut world = World::default();
+    //    world.with_async_system("test", |mut facade| async move {
+    //        await_points.lock().unwrap().push(1);
+    //        let mut e = {
+    //            let mut entities: Write<Entities> = facade.fetch().await?;
+    //            await_points.lock().unwrap().push(2);
+    //            entities.create()
+    //        };
 
-            e.lazy_add(Name("ada")).unwrap();
-            e.lazy_add(Age(666)).unwrap();
-            e.updates().await.unwrap();
-            await_points.lock().unwrap().push(3);
+    //        e.lazy_add(Name("ada")).unwrap();
+    //        e.lazy_add(Age(666)).unwrap();
+    //        e.updates().await.unwrap();
+    //        await_points.lock().unwrap().push(3);
 
-            let name = e.lazy_get::<Name>().await.unwrap();
-            await_points.lock().unwrap().push(4);
-            assert_eq!(Some(Name("ada")), name);
+    //        let name = e.lazy_get::<Name>().await.unwrap();
+    //        await_points.lock().unwrap().push(4);
+    //        assert_eq!(Some(Name("ada")), name);
 
-            let age = e.lazy_get::<Age>().await.unwrap();
-            await_points.lock().unwrap().push(5);
-            assert_eq!(Some(Age(666)), age);
+    //        let age = e.lazy_get::<Age>().await.unwrap();
+    //        await_points.lock().unwrap().push(5);
+    //        assert_eq!(Some(Age(666)), age);
 
-            println!("done!");
-            Ok(())
-        });
+    //        println!("done!");
+    //        Ok(())
+    //    });
 
-        for i in 1..=5 {
-            world.tick().unwrap();
-            assert!(awaits.lock().unwrap().last().cloned() == Some(i));
-        }
+    //    for i in 1..=5 {
+    //        world.tick().unwrap();
+    //        assert!(awaits.lock().unwrap().last().cloned() == Some(i));
+    //    }
 
-        let store = world.fetch::<ReadStore<Age>>().unwrap();
-        let age = store.get(0).unwrap();
-        assert_eq!(&Age(666), age);
-    }
+    //    let store = world.fetch::<ReadStore<Age>>().unwrap();
+    //    let age = store.get(0).unwrap();
+    //    assert_eq!(&Age(666), age);
+    //}
 
     #[test]
     fn plugin_inserts_resources_from_canfetch_in_systems() {

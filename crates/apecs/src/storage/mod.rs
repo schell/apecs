@@ -18,21 +18,6 @@ pub mod bitset {
     pub use hibitset::*;
 }
 
-static SYSTEM_ITERATION: AtomicU64 = AtomicU64::new(0);
-
-pub fn clear_iteration() {
-    SYSTEM_ITERATION.store(0, std::sync::atomic::Ordering::SeqCst)
-}
-
-pub fn current_iteration() -> u64 {
-    SYSTEM_ITERATION.load(std::sync::atomic::Ordering::SeqCst)
-}
-
-/// Increment the system iteration counter, returning the previous value.
-pub fn increment_current_iteration() -> u64 {
-    SYSTEM_ITERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-}
-
 pub trait IsEntry {
     type Value<'a>
         where Self: 'a;

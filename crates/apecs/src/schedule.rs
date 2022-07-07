@@ -6,8 +6,10 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::{collections::VecDeque, iter::FlatMap, slice::Iter, sync::Arc};
 
 use crate::{
-    mpsc, resource_manager::ResourceManager, storage::increment_current_iteration,
-    system::ShouldContinue, FetchReadyResource, Resource, ResourceId,
+    mpsc,
+    resource_manager::ResourceManager,
+    system::{increment_current_iteration, ShouldContinue},
+    FetchReadyResource, Resource, ResourceId,
 };
 
 pub trait IsSystem: std::fmt::Debug {
@@ -77,13 +79,7 @@ pub trait IsBatch: std::fmt::Debug + Default {
     fn trim_systems(&mut self, should_remove: FxHashSet<&str>);
 
     /// All borrows of all systems in this batch
-    fn borrows(
-        &self,
-    ) -> FlatMap<
-        Iter<Self::System>,
-        &[Borrow],
-        fn(&Self::System) -> &[Borrow],
-    > {
+    fn borrows(&self) -> FlatMap<Iter<Self::System>, &[Borrow], fn(&Self::System) -> &[Borrow]> {
         self.systems().iter().flat_map(|s| s.borrows())
     }
 
@@ -279,11 +275,7 @@ pub trait IsSchedule: std::fmt::Debug {
             // make the batch data
             // TODO: move making batch data down into IsBatch::run
             let batch_data = batch.prepare_batch_data(resource_manager, extra.clone())?;
-            batch.run(
-                parallelize,
-                batch_data,
-                resource_manager,
-            )?;
+            batch.run(parallelize, batch_data, resource_manager)?;
         }
 
         Ok(())

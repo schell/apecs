@@ -7,7 +7,7 @@ use crate::{
     CanFetch, IsResource, ResourceId, ResourceRequirement, LazyResource,
 };
 
-pub mod entity_upkeep;
+//pub mod entity_upkeep;
 
 pub struct SyncSystemWithDeps(pub SyncSystem, pub Vec<String>);
 
@@ -114,35 +114,35 @@ impl Plugin {
 #[cfg(test)]
 mod test {
     use crate as apecs;
-    use apecs::{join::Join, storage::VecStorage, system::*, world::World, CanFetch, Write};
+    use apecs::{system::*, world::World, CanFetch, Write};
 
-    #[test]
-    fn sanity() {
-        let _ = env_logger::builder()
-            .is_test(true)
-            .filter_level(log::LevelFilter::Trace)
-            .try_init();
+    //#[test]
+    //fn sanity() {
+    //    let _ = env_logger::builder()
+    //        .is_test(true)
+    //        .filter_level(log::LevelFilter::Trace)
+    //        .try_init();
 
-        #[derive(CanFetch)]
-        struct MyData {
-            strings: Write<VecStorage<&'static str>>,
-            numbers: Write<VecStorage<usize>>,
-        }
+    //    #[derive(CanFetch)]
+    //    struct MyData {
+    //        strings: Write<VecStorage<&'static str>>,
+    //        numbers: Write<VecStorage<usize>>,
+    //    }
 
-        fn my_system(mut data: MyData) -> anyhow::Result<ShouldContinue> {
-            for (_, n) in (&data.strings, &mut data.numbers).join() {
-                n.set_value(n.value() + 1);
-            }
+    //    fn my_system(mut data: MyData) -> anyhow::Result<ShouldContinue> {
+    //        for (_, n) in (&data.strings, &mut data.numbers).join() {
+    //            n.set_value(n.value() + 1);
+    //        }
 
-            ok()
-        }
+    //        ok()
+    //    }
 
-        let plugin = MyData::plugin();
-        assert_eq!(2, plugin.resources.len());
+    //    let plugin = MyData::plugin();
+    //    assert_eq!(2, plugin.resources.len());
 
-        let mut world = World::default();
-        world.with_system("my_system", my_system).unwrap();
+    //    let mut world = World::default();
+    //    world.with_system("my_system", my_system).unwrap();
 
-        let _data = world.fetch::<MyData>().unwrap();
-    }
+    //    let _data = world.fetch::<MyData>().unwrap();
+    //}
 }
