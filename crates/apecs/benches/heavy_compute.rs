@@ -70,8 +70,8 @@ where
             velocities.insert(e.id(), Velocity(Vector3::unit_x()));
         });
         let mut world = World::default();
+        world.set_resource(entities)?;
         world
-            .with_resource(entities)?
             .with_resource(transforms)?
             .with_resource(positions)?
             .with_resource(rotations)?

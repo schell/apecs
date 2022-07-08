@@ -5,8 +5,6 @@ use any_vec::{mem::Heap, AnyVec, AnyVecMut, AnyVecRef};
 use anyhow::Context;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::{IsResource, ResourceId};
-
 mod bundle;
 pub use bundle::*;
 
@@ -326,6 +324,10 @@ impl AllArchetypes {
 
 #[cfg(test)]
 mod test {
+    use std::ops::{DerefMut, Deref};
+
+    use any_vec::element::ElementPointer;
+
     use super::*;
 
     #[test]
@@ -346,7 +348,16 @@ mod test {
             v.push(12.0);
         }
 
-        std::mem::swap(&mut a.at_mut(0), &mut b.at_mut(0));
+        use any_vec::any_value::{AnyValue, AnyValueMut};
+        let mut element_a = a.at_mut(0);
+        let ptr_a: &mut ElementPointer<'_, _> = element_a.deref_mut();
+        let slice_a: *mut [u8] = std::ptr::slice_from_raw_parts_mut(ptr_a.bytes_mut(), ptr_a.size());
+
+        let mut element_b = b.at_mut(0);
+        let ptr_b: &mut ElementPointer<'_, _> = element_b.deref_mut();
+        let slice_b: *mut [u8] = std::ptr::slice_from_raw_parts_mut(ptr_b.bytes_mut(), ptr_b.size());
+
+        unsafe {(*slice_a).swap_with_slice(&mut *slice_b)};
 
         assert_eq!(10.0, *a.at(0).downcast_ref::<f32>().unwrap());
     }
