@@ -1,7 +1,7 @@
 //! Entity components stored together in contiguous arrays.
-use std::any::{Any, TypeId};
+use std::{any::{Any, TypeId}, ops::DerefMut};
 
-use any_vec::{mem::Heap, AnyVec, AnyVecMut, AnyVecRef};
+use any_vec::{mem::Heap, AnyVec, AnyVecMut, AnyVecRef, any_value::{AnyValue, AnyValueMut}, element::ElementPointer};
 use anyhow::Context;
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -133,7 +133,14 @@ impl Archetype {
         let prev = if let Some(index) = self.entity_lookup.get(&entity_id) {
             for (ty, component_vec) in bundle.0.iter_mut() {
                 let column = self.data.get_mut(ty).context("missing column")?;
-                std::mem::swap(&mut column.at_mut(*index), &mut component_vec.at_mut(0));
+
+                let mut element_a = column.at_mut(*index);
+                let slice_a: *mut [u8] = std::ptr::slice_from_raw_parts_mut(element_a.bytes_mut(), element_a.size());
+
+                let mut element_b = component_vec.at_mut(0);
+                let slice_b: *mut [u8] = std::ptr::slice_from_raw_parts_mut(element_b.bytes_mut(), element_b.size());
+
+                unsafe {(*slice_a).swap_with_slice(&mut *slice_b)};
             }
             Some(bundle)
         } else {
@@ -324,7 +331,7 @@ impl AllArchetypes {
 
 #[cfg(test)]
 mod test {
-    use std::ops::{DerefMut, Deref};
+    use std::ops::DerefMut;
 
     use any_vec::element::ElementPointer;
 
@@ -370,7 +377,7 @@ mod test {
         assert!(arch.insert(2, (2.0f32, "two", 2u32)).unwrap().is_none());
         assert!(arch.insert(3, (3.0f32, "three", 3u32)).unwrap().is_none());
         assert_eq!(Some((1.0f32,)), arch.insert(1, (111.0f32,)).unwrap());
-        assert_eq!((1.0f32, "one", 1u32), arch.remove(1).unwrap().unwrap());
+        assert_eq!((111.0f32, "one", 1u32), arch.remove(1).unwrap().unwrap());
         assert_eq!(
             Some(&3.0f32),
             arch.get(3).unwrap(),
