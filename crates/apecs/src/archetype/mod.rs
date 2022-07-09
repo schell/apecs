@@ -442,7 +442,7 @@ pub trait IsQueryItem<'a>: IsBundle<Head = Self::Column, Tail = Self::Rest> {
     fn resources_to_iter(
         mut resources: QueryResources,
     ) -> Option<Self::Iter> {
-        let col: <Self::Column as IsColumn>::Column = <Q::Head as IsColumn>::pop_column(&mut resources)?;
+        let col: <Self::Column as IsColumn>::Column = <Self::Head as IsColumn>::pop_column(&mut resources)?;
         let tail: <Self::Rest as IsQueryItem>::Iter = <Self::Rest>::resources_to_iter(resources)?;
         Some(Self::iter_cons(col, tail))
         // let iter: _ = col
