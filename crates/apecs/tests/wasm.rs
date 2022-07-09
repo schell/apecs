@@ -1,4 +1,4 @@
-use apecs::{world::*, mpsc};
+use apecs::{mpsc, world::*};
 use wasm_bindgen_test::*;
 
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);

@@ -1,6 +1,5 @@
 use apecs::{
-    anyhow,
-    join::*, storage::*, world::Entities, world::Facade, CanFetch, Read, Write, WriteExpect,
+    anyhow, join::*, storage::*, world::Entities, world::Facade, CanFetch, Read, Write, WriteExpect,
 };
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
@@ -81,7 +80,9 @@ async fn print_system(mut facade: Facade) -> anyhow::Result<()> {
 }
 
 fn main() -> anyhow::Result<()> {
-    let subscriber = FmtSubscriber::builder().with_max_level(Level::DEBUG).finish();
+    let subscriber = FmtSubscriber::builder()
+        .with_max_level(Level::DEBUG)
+        .finish();
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
     let mut world = apecs::world::World::default();
@@ -92,15 +93,15 @@ fn main() -> anyhow::Result<()> {
         .with_async_system("move", move_system)
         .with_async_system("print", print_system);
 
-    //let start = Instant::now();
-    //for _ in 0..1000 {
+    // let start = Instant::now();
+    // for _ in 0..1000 {
     //    world.tick()?;
     //}
     world.run()?;
 
-    //let elapsed = start.elapsed().as_secs_f32();
-    //log::info!("finished 1000 frames in {:.2}seconds", elapsed);
-    //log::info!("average {}fps", 1000.0 / elapsed);
+    // let elapsed = start.elapsed().as_secs_f32();
+    // log::info!("finished 1000 frames in {:.2}seconds", elapsed);
+    // log::info!("average {}fps", 1000.0 / elapsed);
 
     Ok(())
 }

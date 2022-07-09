@@ -1,5 +1,5 @@
 //! Bundle trait for decomposing component tuples.
-use std::any::{Any, TypeId};
+use std::any::TypeId;
 
 use any_vec::AnyVec;
 use anyhow::Context;
@@ -39,8 +39,8 @@ impl AnyBundle {
     }
 }
 
-pub trait IsBundle: Sized + 'static {
-    type Head: 'static;
+pub trait IsBundle: Sized {
+    type Head;
     type Tail: IsBundle;
 
     fn as_root() -> Option<Self> {
@@ -51,15 +51,24 @@ pub trait IsBundle: Sized + 'static {
 
     fn cons(head: Self::Head, tail: Self::Tail) -> Self;
 
-    fn type_info() -> anyhow::Result<FxHashSet<TypeId>> {
+    fn type_info() -> anyhow::Result<FxHashSet<TypeId>>
+    where
+        Self: 'static,
+    {
         let mut types = bundle_types::<Self>();
         types.sort();
         ensure_type_info(&types)?;
         Ok(FxHashSet::from_iter(types.into_iter()))
     }
 
-    fn into_any(self) -> AnyBundle {
-        fn mk_any<B: IsBundle>(bundle: B, any_bundle: &mut AnyBundle) {
+    fn into_any(self) -> AnyBundle
+    where
+        Self: 'static,
+    {
+        fn mk_any<B: IsBundle>(bundle: B, any_bundle: &mut AnyBundle)
+        where
+            B: 'static,
+        {
             if let Some((head, may_tail)) = bundle.uncons() {
                 let mut store = AnyVec::new::<B::Head>();
                 store.downcast_mut::<B::Head>().unwrap().push(head);
@@ -74,7 +83,10 @@ pub trait IsBundle: Sized + 'static {
         bundle
     }
 
-    fn try_from_any(mut any_bundle: AnyBundle) -> anyhow::Result<Self> {
+    fn try_from_any(mut any_bundle: AnyBundle) -> anyhow::Result<Self>
+    where
+        Self: 'static,
+    {
         if let Some(root) = Self::as_root() {
             Ok(root)
         } else {
@@ -112,7 +124,7 @@ impl IsBundle for () {
     }
 }
 
-impl<A: 'static> IsBundle for (A,) {
+impl<A> IsBundle for (A,) {
     type Head = A;
     type Tail = ();
 
@@ -125,11 +137,7 @@ impl<A: 'static> IsBundle for (A,) {
     }
 }
 
-impl<A, B> IsBundle for (A, B)
-where
-    A: 'static,
-    B: 'static,
-{
+impl<A, B> IsBundle for (A, B) {
     type Head = A;
     type Tail = (B,);
 
@@ -142,12 +150,7 @@ where
     }
 }
 
-impl<A, B, C> IsBundle for (A, B, C)
-where
-    A: 'static,
-    B: 'static,
-    C: 'static,
-{
+impl<A, B, C> IsBundle for (A, B, C) {
     type Head = A;
     type Tail = (B, C);
 
@@ -160,14 +163,38 @@ where
     }
 }
 
+pub trait Apply<F> {
+    type Output;
+}
+
+impl<F> Apply<F> for () {
+    type Output = ();
+}
+
+impl<F, A: Apply<F>> Apply<F> for (A,) {
+    type Output = (<A as Apply<F>>::Output,);
+}
+
+impl<F, A: Apply<F>, B: Apply<F>> Apply<F> for (A, B) {
+    type Output = (<A as Apply<F>>::Output, <B as Apply<F>>::Output);
+}
+
+impl<F, A: Apply<F>, B: Apply<F>, C: Apply<F>> Apply<F> for (A, B, C) {
+    type Output = (
+        <A as Apply<F>>::Output,
+        <B as Apply<F>>::Output,
+        <C as Apply<F>>::Output,
+    );
+}
+
 pub fn ensure_type_info(types: &[TypeId]) -> anyhow::Result<()> {
     for x in types.windows(2) {
         match x[0].cmp(&x[1]) {
             core::cmp::Ordering::Less => (),
             core::cmp::Ordering::Equal => {
                 anyhow::bail!(
-                    "attempted to allocate entity with duplicate components; \
-                         each type must occur at most once!"
+                    "attempted to allocate entity with duplicate components; each type must occur \
+                     at most once!"
                 )
             }
             core::cmp::Ordering::Greater => anyhow::bail!("type info is unsorted"),
@@ -176,7 +203,7 @@ pub fn ensure_type_info(types: &[TypeId]) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn bundle_types<B: IsBundle>() -> Vec<TypeId> {
+fn bundle_types<B: IsBundle + 'static>() -> Vec<TypeId> {
     let mut types = vec![TypeId::of::<B::Head>()];
     if std::any::TypeId::of::<B::Tail>() != std::any::TypeId::of::<()>() {
         types.extend(bundle_types::<B::Tail>());
@@ -189,7 +216,7 @@ mod test {
     use super::*;
 
     #[test]
-    fn bundle_union_returns_prev(){
+    fn bundle_union_returns_prev() {
         let mut left = ("one".to_string(), 1.0f32, true).into_any();
         let right = ("two".to_string(), false).into_any();
         let leftover: AnyBundle = left.union(right).unwrap();
@@ -201,5 +228,17 @@ mod test {
         assert_eq!("two", &a);
         assert_eq!(1.0, b);
         assert_eq!(false, c);
+    }
+
+    #[test]
+    fn ref_bundle() {
+        let a: f32 = 0.0;
+        let mut b: String = "hello".to_string();
+        let c: bool = true;
+        let abc = (&a, &mut b, &c);
+        let (_a_ref, may_tail) = abc.uncons().unwrap();
+        let (b_mut_ref, may_tail) = may_tail.unwrap().uncons().unwrap();
+        let (_c_ref, _) = may_tail.unwrap().uncons().unwrap();
+        *b_mut_ref = "goodbye".to_string();
     }
 }

@@ -1,8 +1,5 @@
 //! Core types and processes
-use crate::{
-    schedule::Borrow,
-    plugins::Plugin,
-};
+use crate::{plugins::Plugin, schedule::Borrow};
 use anyhow::Context;
 use rustc_hash::FxHashMap;
 use std::{
@@ -152,12 +149,12 @@ impl PartialEq for ResourceId {
 impl ResourceId {
     pub fn new<T: IsResource>() -> Self {
         ResourceId {
-            type_id: TypeId::of::<T>(), //ResourceTypeId::Raw(TypeId::of::<T>()),
+            type_id: TypeId::of::<T>(), // ResourceTypeId::Raw(TypeId::of::<T>()),
             name: std::any::type_name::<T>(),
         }
     }
 
-    //pub fn new_storage<T: IsComponent>() -> Self {
+    // pub fn new_storage<T: IsComponent>() -> Self {
     //    ResourceId {
     //        type_id: ResourceTypeId::Storage(TypeId::of::<T>()),
     //        name: std::any::type_name::<T>().to_string(),
@@ -214,7 +211,7 @@ impl<'a, T: IsResource + Default> DerefMut for Write<T> {
     }
 }
 
-//impl<T: IsResource + Default + CanReadStorage> CanReadStorage for Write<T> {
+// impl<T: IsResource + Default + CanReadStorage> CanReadStorage for Write<T> {
 //    type Component = T::Component;
 //
 //    type Iter<'a> = T::Iter<'a>
@@ -241,9 +238,8 @@ impl<'a, T: IsResource + Default> DerefMut for Write<T> {
 //        self.0.last()
 //    }
 //}
-//
-//impl<T: IsResource + Default + CanWriteStorage> CanWriteStorage for Write<T> {
-//    type IterMut<'a> = T::IterMut<'a>
+// impl<T: IsResource + Default + CanWriteStorage> CanWriteStorage for Write<T>
+// {    type IterMut<'a> = T::IterMut<'a>
 //         where
 //             Self: 'a;
 //
@@ -255,8 +251,8 @@ impl<'a, T: IsResource + Default> DerefMut for Write<T> {
 //        self.0.get_mut(id)
 //    }
 //
-//    fn insert(&mut self, id: usize, component: Self::Component) -> Option<Self::Component> {
-//        self.0.insert(id, component)
+//    fn insert(&mut self, id: usize, component: Self::Component) ->
+// Option<Self::Component> {        self.0.insert(id, component)
 //    }
 //
 //    fn remove(&mut self, id: usize) -> Option<Self::Component> {
@@ -288,7 +284,7 @@ impl<'a, T: IsResource> DerefMut for WriteExpect<T> {
     }
 }
 
-//impl<T: IsResource + CanReadStorage> CanReadStorage for WriteExpect<T> {
+// impl<T: IsResource + CanReadStorage> CanReadStorage for WriteExpect<T> {
 //    type Component = T::Component;
 //
 //    type Iter<'a> = T::Iter<'a>
@@ -315,8 +311,7 @@ impl<'a, T: IsResource> DerefMut for WriteExpect<T> {
 //        self.0.last()
 //    }
 //}
-//
-//impl<T: IsResource + CanWriteStorage> CanWriteStorage for WriteExpect<T> {
+// impl<T: IsResource + CanWriteStorage> CanWriteStorage for WriteExpect<T> {
 //    type IterMut<'a> = T::IterMut<'a>
 //    where
 //        Self: 'a;
@@ -329,8 +324,8 @@ impl<'a, T: IsResource> DerefMut for WriteExpect<T> {
 //        self.0.get_mut(id)
 //    }
 //
-//    fn insert(&mut self, id: usize, component: Self::Component) -> Option<Self::Component> {
-//        self.0.insert(id, component)
+//    fn insert(&mut self, id: usize, component: Self::Component) ->
+// Option<Self::Component> {        self.0.insert(id, component)
 //    }
 //
 //    fn remove(&mut self, id: usize) -> Option<Self::Component> {
@@ -360,7 +355,7 @@ impl<'a, T: IsResource + Default> Deref for Read<T> {
     }
 }
 
-//impl<T: IsResource + Default + CanReadStorage> CanReadStorage for Read<T> {
+// impl<T: IsResource + Default + CanReadStorage> CanReadStorage for Read<T> {
 //    type Component = T::Component;
 //
 //    type Iter<'a> = T::Iter<'a>
@@ -402,7 +397,7 @@ impl<'a, T: IsResource> Deref for ReadExpect<T> {
     }
 }
 
-//impl<T: IsResource + CanReadStorage> CanReadStorage for ReadExpect<T> {
+// impl<T: IsResource + CanReadStorage> CanReadStorage for ReadExpect<T> {
 //    type Component = T::Component;
 //
 //    type Iter<'a> = T::Iter<'a>
@@ -489,10 +484,12 @@ pub trait CanFetch: Sized {
         rs
     }
 
-    /// Return a plugin containing the systems and sub-resources required to create and use the type.
+    /// Return a plugin containing the systems and sub-resources required to
+    /// create and use the type.
     ///
-    /// This will be used by functions like [`World::with_plugin`] to ensure that a type's
-    /// resources have been created, and that the systems required for upkeep are included.
+    /// This will be used by functions like [`World::with_plugin`] to ensure
+    /// that a type's resources have been created, and that the systems
+    /// required for upkeep are included.
     fn plugin() -> Plugin {
         Plugin::default()
     }
@@ -516,8 +513,7 @@ impl<'a, T: IsResource + Default> CanFetch for Write<T> {
     }
 
     fn plugin() -> Plugin {
-        Plugin::default()
-            .with_default_resource::<T>()
+        Plugin::default().with_default_resource::<T>()
     }
 }
 
@@ -556,8 +552,7 @@ impl<'a, T: IsResource> CanFetch for WriteExpect<T> {
     }
 
     fn plugin() -> Plugin {
-        Plugin::default()
-            .with_expected_resource::<T>()
+        Plugin::default().with_expected_resource::<T>()
     }
 }
 
@@ -582,8 +577,7 @@ impl<'a, T: IsResource + Default> CanFetch for Read<T> {
     }
 
     fn plugin() -> Plugin {
-        Plugin::default()
-            .with_default_resource::<T>()
+        Plugin::default().with_default_resource::<T>()
     }
 }
 
@@ -616,8 +610,7 @@ impl<'a, T: IsResource> CanFetch for ReadExpect<T> {
     }
 
     fn plugin() -> Plugin {
-        Plugin::default()
-            .with_expected_resource::<T>()
+        Plugin::default().with_expected_resource::<T>()
     }
 }
 
@@ -689,5 +682,4 @@ mod tests {
             ]
         );
     }
-
 }

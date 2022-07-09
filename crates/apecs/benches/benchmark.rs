@@ -66,8 +66,8 @@ fn bench_create_move_print(c: &mut Criterion) {
     group.finish();
 }
 
-/// Measures the difference of speed of iteration between a wrapper of other std iterators
-/// and a custom one.
+/// Measures the difference of speed of iteration between a wrapper of other std
+/// iterators and a custom one.
 fn _bench_iter_wrapper_vs_bignext(c: &mut Criterion) {
     struct WrapperIter<'a, T>(FilterMap<Iter<'a, Option<T>>, fn(&'a Option<T>) -> Option<T>>);
 
@@ -277,9 +277,10 @@ fn bench_range_vs_options(c: &mut Criterion) {
 
 fn bench_simple_insert(c: &mut Criterion) {
     let mut group = c.benchmark_group("simple_insert");
-    //let plot_config =
-    //    criterion::PlotConfiguration::default().summary_scale(criterion::AxisScale::Logarithmic);
-    //group.plot_config(plot_config);
+    // let plot_config =
+    //    criterion::PlotConfiguration::default().
+    // summary_scale(criterion::AxisScale::Logarithmic);
+    // group.plot_config(plot_config);
 
     group.bench_function("apecs::storage::VecStorage", |b| {
         let mut bench = simple_insert::Benchmark::<
@@ -328,9 +329,10 @@ fn bench_simple_insert(c: &mut Criterion) {
 
 fn bench_add_remove(c: &mut Criterion) {
     let mut group = c.benchmark_group("add_remove_component");
-    //let plot_config =
-    //    criterion::PlotConfiguration::default().summary_scale(criterion::AxisScale::Logarithmic);
-    //group.plot_config(plot_config);
+    // let plot_config =
+    //    criterion::PlotConfiguration::default().
+    // summary_scale(criterion::AxisScale::Logarithmic);
+    // group.plot_config(plot_config);
 
     group.bench_function("apecs::storage::VecStorage", |b| {
         let mut bench = add_remove::Benchmark::<

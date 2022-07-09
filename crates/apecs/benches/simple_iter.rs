@@ -1,8 +1,4 @@
-use apecs::{
-    anyhow,
-    join::Join,
-    storage::WorldStorage,
-};
+use apecs::{anyhow, join::Join, storage::WorldStorage};
 use cgmath::*;
 
 #[derive(Copy, Clone)]
@@ -18,7 +14,8 @@ pub struct Rotation(Vector3<f32>);
 pub struct Velocity(Vector3<f32>);
 
 pub struct Benchmark<S2, S4> {
-    ps: S2, vs: S4,
+    ps: S2,
+    vs: S4,
 }
 
 impl<S2, S4> Benchmark<S2, S4>
@@ -27,8 +24,8 @@ where
     S4: WorldStorage<Component = Velocity>,
 {
     pub fn new() -> anyhow::Result<Self> {
-            let mut ps = S2::new_with_capacity(10001);
-            let mut vs = S4::new_with_capacity(10001);
+        let mut ps = S2::new_with_capacity(10001);
+        let mut vs = S4::new_with_capacity(10001);
 
         {
             (0..10000).for_each(|id| {
@@ -37,9 +34,7 @@ where
             });
         }
 
-        Ok(Self {
-            ps, vs,
-        })
+        Ok(Self { ps, vs })
     }
 
     pub fn run(&mut self) {

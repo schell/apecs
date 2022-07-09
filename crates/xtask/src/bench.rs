@@ -16,7 +16,7 @@ pub struct Bench {
 
     /// Whether to append this run to the historical benchmark file
     #[clap(long)]
-    append: bool
+    append: bool,
 }
 
 impl Bench {
@@ -105,7 +105,8 @@ impl Bench {
 
         if self.append {
             if let Some(file) = self.benchmark_file.as_ref() {
-                let contents = serde_yaml::to_string(&store).context("could not serialize store")?;
+                let contents =
+                    serde_yaml::to_string(&store).context("could not serialize store")?;
                 std::fs::write(file, contents).context("could not write benchmark file")?;
                 tracing::info!("saved benchmark file '{}'", file.display());
             }

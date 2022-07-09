@@ -30,54 +30,62 @@ impl Benchmark {
     pub fn new() -> Self {
         let world = World::default();
 
-        world.run(
-            |mut entities: EntitiesViewMut, mut a: ViewMut<A>, mut b: ViewMut<B>| {
-                for _ in 0..10_000 {
-                    entities.add_entity((&mut a, &mut b), (A(0.0), B(0.0)));
-                }
-            },
-        ).unwrap();
+        world
+            .run(
+                |mut entities: EntitiesViewMut, mut a: ViewMut<A>, mut b: ViewMut<B>| {
+                    for _ in 0..10_000 {
+                        entities.add_entity((&mut a, &mut b), (A(0.0), B(0.0)));
+                    }
+                },
+            )
+            .unwrap();
 
-        world.run(
-            |mut entities: EntitiesViewMut,
-             mut a: ViewMut<A>,
-             mut b: ViewMut<B>,
-             mut c: ViewMut<C>| {
-                for _ in 0..10_000 {
-                    entities.add_entity((&mut a, &mut b, &mut c), (A(0.0), B(0.0), C(0.0)));
-                }
-            },
-        ).unwrap();
+        world
+            .run(
+                |mut entities: EntitiesViewMut,
+                 mut a: ViewMut<A>,
+                 mut b: ViewMut<B>,
+                 mut c: ViewMut<C>| {
+                    for _ in 0..10_000 {
+                        entities.add_entity((&mut a, &mut b, &mut c), (A(0.0), B(0.0), C(0.0)));
+                    }
+                },
+            )
+            .unwrap();
 
-        world.run(
-            |mut entities: EntitiesViewMut,
-             mut a: ViewMut<A>,
-             mut b: ViewMut<B>,
-             mut c: ViewMut<C>,
-             mut d: ViewMut<D>| {
-                for _ in 0..10_000 {
-                    entities.add_entity(
-                        (&mut a, &mut b, &mut c, &mut d),
-                        (A(0.0), B(0.0), C(0.0), D(0.0)),
-                    );
-                }
-            },
-        ).unwrap();
+        world
+            .run(
+                |mut entities: EntitiesViewMut,
+                 mut a: ViewMut<A>,
+                 mut b: ViewMut<B>,
+                 mut c: ViewMut<C>,
+                 mut d: ViewMut<D>| {
+                    for _ in 0..10_000 {
+                        entities.add_entity(
+                            (&mut a, &mut b, &mut c, &mut d),
+                            (A(0.0), B(0.0), C(0.0), D(0.0)),
+                        );
+                    }
+                },
+            )
+            .unwrap();
 
-        world.run(
-            |mut entities: EntitiesViewMut,
-             mut a: ViewMut<A>,
-             mut b: ViewMut<B>,
-             mut c: ViewMut<C>,
-             mut e: ViewMut<E>| {
-                for _ in 0..10_000 {
-                    entities.add_entity(
-                        (&mut a, &mut b, &mut c, &mut e),
-                        (A(0.0), B(0.0), C(0.0), E(0.0)),
-                    );
-                }
-            },
-        ).unwrap();
+        world
+            .run(
+                |mut entities: EntitiesViewMut,
+                 mut a: ViewMut<A>,
+                 mut b: ViewMut<B>,
+                 mut c: ViewMut<C>,
+                 mut e: ViewMut<E>| {
+                    for _ in 0..10_000 {
+                        entities.add_entity(
+                            (&mut a, &mut b, &mut c, &mut e),
+                            (A(0.0), B(0.0), C(0.0), E(0.0)),
+                        );
+                    }
+                },
+            )
+            .unwrap();
 
         Workload::builder("run")
             .with_system(&ab)

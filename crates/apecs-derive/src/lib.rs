@@ -222,10 +222,9 @@ pub fn impl_join_tuple(input: proc_macro::TokenStream) -> proc_macro::TokenStrea
                 }
             })
             .collect::<Vec<_>>();
-        let result = nexts.iter().fold(
-            quote! {#next_a},
-            |acc, (name, _)| quote! {#acc, #name},
-        );
+        let result = nexts
+            .iter()
+            .fold(quote! {#next_a}, |acc, (name, _)| quote! {#acc, #name});
         quote! {
             while!(#checks) {
                 #(#syncs)*

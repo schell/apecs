@@ -1,4 +1,4 @@
-use apecs::{anyhow, join::*, storage::*, world::*, system::*, CanFetch, Write};
+use apecs::{anyhow, join::*, storage::*, system::*, world::*, CanFetch, Write};
 
 struct A(f32);
 struct B(f32);
@@ -53,11 +53,11 @@ pub struct Benchmark(World);
 impl Benchmark {
     pub fn new() -> Self {
         let mut entities = Entities::default();
-        let mut a_store:VecStorage<A> = VecStorage::new_with_capacity(40_000);
-        let mut b_store:VecStorage<B> = VecStorage::new_with_capacity(40_000);
-        let mut c_store:VecStorage<C> = VecStorage::new_with_capacity(30_000);
-        let mut d_store:VecStorage<D> = VecStorage::new_with_capacity(10_000);
-        let mut e_store:VecStorage<E> = VecStorage::new_with_capacity(10_000);
+        let mut a_store: VecStorage<A> = VecStorage::new_with_capacity(40_000);
+        let mut b_store: VecStorage<B> = VecStorage::new_with_capacity(40_000);
+        let mut c_store: VecStorage<C> = VecStorage::new_with_capacity(30_000);
+        let mut d_store: VecStorage<D> = VecStorage::new_with_capacity(10_000);
+        let mut e_store: VecStorage<E> = VecStorage::new_with_capacity(10_000);
 
         (0..10_000).for_each(|_| {
             let e = entities.create();

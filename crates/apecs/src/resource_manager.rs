@@ -80,8 +80,8 @@ impl ResourceManager {
             .with_context(|| "could not downcast resource")
     }
 
-    /// Attempt to loan the requested resources by adding them to the given mutable
-    /// hash map.
+    /// Attempt to loan the requested resources by adding them to the given
+    /// mutable hash map.
     pub fn try_loan_resources<'a>(
         &mut self,
         label: &str,
@@ -103,10 +103,7 @@ impl ResourceManager {
             let ready_rez: FetchReadyResource = match self.world_resources.remove(&rez_id) {
                 Some(rez) => {
                     if borrow.is_exclusive() {
-                        assert!(
-                            self.loaned_muts.insert(rez_id),
-                            "already mutably borrowed",
-                        );
+                        assert!(self.loaned_muts.insert(rez_id), "already mutably borrowed",);
                         FetchReadyResource::Owned(rez)
                     } else {
                         let arc_rez = Arc::new(rez);
@@ -175,7 +172,8 @@ impl ResourceManager {
     pub fn try_unify_resources(&mut self, label: &str) -> anyhow::Result<bool> {
         log::trace!("try unify resources {}", label);
         while let Ok((rez_id, resource)) = self.exclusive_return_chan.1.try_recv() {
-            // put the exclusively borrowed resources back, there should be nothing stored there currently
+            // put the exclusively borrowed resources back, there should be nothing stored
+            // there currently
             let prev = self.world_resources.insert(rez_id.clone(), resource);
             if cfg!(feature = "debug-async") && prev.is_some() {
                 anyhow::bail!("'{}' sent back duplicate resources", label);

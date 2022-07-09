@@ -1,6 +1,7 @@
 //! System scheduling for outer parallelism.
 //!
-//! This module contains trait definitions. Implementations can be found in other modeluse.
+//! This module contains trait definitions. Implementations can be found in
+//! other modeluse.
 use rayon::{iter::Either, prelude::*};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::{collections::VecDeque, iter::FlatMap, slice::Iter, sync::Arc};
@@ -121,8 +122,8 @@ pub trait IsBatch: std::fmt::Debug + Default {
 
     fn set_systems(&mut self, systems: Vec<Self::System>);
 
-    /// Run the batch in parallel and then unify the resources to make the world "whole".
-    /// Return the names of the systems that should be trimmed.
+    /// Run the batch in parallel and then unify the resources to make the world
+    /// "whole". Return the names of the systems that should be trimmed.
     fn run(
         &mut self,
         parallelize: bool,

@@ -4,10 +4,10 @@ use std::future::Future;
 use crate::{
     system::{AsyncSystemFuture, ShouldContinue, SyncSystem},
     world::Facade,
-    CanFetch, IsResource, ResourceId, ResourceRequirement, LazyResource,
+    CanFetch, IsResource, LazyResource, ResourceId, ResourceRequirement,
 };
 
-//pub mod entity_upkeep;
+// pub mod entity_upkeep;
 
 pub struct SyncSystemWithDeps(pub SyncSystem, pub Vec<String>);
 
@@ -55,31 +55,42 @@ impl Plugin {
         self
     }
 
-    /// Add a dependency on a resource that can be created with [`Default::default()`].
+    /// Add a dependency on a resource that can be created with
+    /// [`Default::default()`].
     ///
-    /// If this resource does not already exist in the world at the time this plugin is instantiated,
-    /// it will be inserted into the [`World`].
+    /// If this resource does not already exist in the world at the time this
+    /// plugin is instantiated, it will be inserted into the [`World`].
     pub fn with_default_resource<T: IsResource + Default>(mut self) -> Self {
-        self.resources.push(ResourceRequirement::LazyDefault(LazyResource::new(|| T::default())));
+        self.resources
+            .push(ResourceRequirement::LazyDefault(LazyResource::new(|| {
+                T::default()
+            })));
         self
     }
 
-    /// Add a dependency on a resource that can be created lazily with a closure.
+    /// Add a dependency on a resource that can be created lazily with a
+    /// closure.
     ///
-    /// If a resource of this type does not already exist in the world at the time the plugin is instantiated,
-    /// it will be inserted into the [`World`].
-    pub fn with_lazy_resource<T: IsResource>(mut self, create: impl FnOnce() -> T + 'static) -> Self {
-        self.resources.push(ResourceRequirement::LazyDefault(LazyResource::new(create)));
+    /// If a resource of this type does not already exist in the world at the
+    /// time the plugin is instantiated, it will be inserted into the
+    /// [`World`].
+    pub fn with_lazy_resource<T: IsResource>(
+        mut self,
+        create: impl FnOnce() -> T + 'static,
+    ) -> Self {
+        self.resources
+            .push(ResourceRequirement::LazyDefault(LazyResource::new(create)));
         self
     }
 
-    /// Add a dependency on a resource that must already exist in the [`World`] at the time of plugin
-    /// instantiation.
+    /// Add a dependency on a resource that must already exist in the [`World`]
+    /// at the time of plugin instantiation.
     ///
-    /// If this resource does not already exist in the world at the time this plugin is instantiated,
-    /// adding the plugin will err.
+    /// If this resource does not already exist in the world at the time this
+    /// plugin is instantiated, adding the plugin will err.
     pub fn with_expected_resource<T: IsResource>(mut self) -> Self {
-        self.resources.push(ResourceRequirement::ExpectedExisting(ResourceId::new::<T>()));
+        self.resources
+            .push(ResourceRequirement::ExpectedExisting(ResourceId::new::<T>()));
         self
     }
 
@@ -117,7 +128,7 @@ mod test {
     use apecs::{system::*, world::World, CanFetch, Write};
 
     //#[test]
-    //fn sanity() {
+    // fn sanity() {
     //    let _ = env_logger::builder()
     //        .is_test(true)
     //        .filter_level(log::LevelFilter::Trace)

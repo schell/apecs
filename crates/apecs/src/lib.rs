@@ -1,14 +1,13 @@
 //! *A*syncronous and *P*leasant *E*ntity *C*omponent *S*ystem
-//!
 #![allow(clippy::type_complexity)]
 mod core;
-pub mod system;
 pub mod resource_manager;
 pub mod schedule;
-//pub mod storage;
+pub mod system;
+// pub mod storage;
 pub mod archetype;
-pub mod world;
 pub mod plugins;
+pub mod world;
 pub mod anyhow {
     pub use anyhow::*;
 }

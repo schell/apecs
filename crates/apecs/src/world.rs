@@ -11,7 +11,6 @@ use hibitset::{BitIter, BitSet, BitSetLike};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::resource_manager::ResourceManager;
-use crate::{WriteExpect, oneshot, Read};
 use crate::{
     mpsc,
     plugins::Plugin,
@@ -24,6 +23,7 @@ use crate::{
     CanFetch, FetchReadyResource, IsResource, Request, Resource, ResourceId, ResourceRequirement,
     Write,
 };
+use crate::{oneshot, Read, WriteExpect};
 
 pub struct Facade {
     // Unbounded. Sending a request from the system should not yield the async
@@ -64,36 +64,42 @@ impl Facade {
 pub struct Lazy(mpsc::Sender<LazyOp>);
 
 impl Lazy {
-    pub fn exec_mut<T:Any + Send + Sync>(
+    pub fn exec_mut<T: Any + Send + Sync>(
         &self,
         op: impl FnOnce(&mut World) -> anyhow::Result<T> + Send + Sync + 'static,
     ) -> anyhow::Result<impl Future<Output = anyhow::Result<T>>> {
         let (tx, rx) = oneshot();
         self.0
-            .try_send(LazyOp{
+            .try_send(LazyOp {
                 op: Box::new(|world| {
                     let t = op(world)?;
                     let arc_t = Arc::new(t);
                     Ok(arc_t)
                 }),
-                tx
+                tx,
             })
             .context("could not send lazy op")?;
         Ok(async move {
-            let arc: Arc<dyn Any + Send + Sync> = rx.await.map_err(|_| anyhow::anyhow!("lazy exec_mut oneshot is closed"))?;
-            let t: Arc<T> = arc
-                .downcast::<T>()
-                .map_err(|_| anyhow::anyhow!("could not downcast to {}", std::any::type_name::<T>()))?;
+            let arc: Arc<dyn Any + Send + Sync> = rx
+                .await
+                .map_err(|_| anyhow::anyhow!("lazy exec_mut oneshot is closed"))?;
+            let t: Arc<T> = arc.downcast::<T>().map_err(|_| {
+                anyhow::anyhow!("could not downcast to {}", std::any::type_name::<T>())
+            })?;
 
-            Arc::try_unwrap(t)
-                .map_err(|_| anyhow::anyhow!("could not unwrap arc"))
+            Arc::try_unwrap(t).map_err(|_| anyhow::anyhow!("could not unwrap arc"))
         })
     }
 }
 
 pub struct LazyOp {
-    op: Box<dyn FnOnce(&mut World) -> anyhow::Result<Arc<dyn Any + Send + Sync>> + Send + Sync + 'static>,
-    tx: oneshot::Sender<Arc<dyn Any + Send + Sync>>
+    op: Box<
+        dyn FnOnce(&mut World) -> anyhow::Result<Arc<dyn Any + Send + Sync>>
+            + Send
+            + Sync
+            + 'static,
+    >,
+    tx: oneshot::Sender<Arc<dyn Any + Send + Sync>>,
 }
 
 pub struct Entity {
@@ -132,8 +138,8 @@ impl Entity {
     ///// Lazily add a component.
     /////
     ///// This entity will have the associated component after the next tick.
-    //pub fn lazy_with<C: StoredComponent>(mut self, component: C) -> anyhow::Result<Self>
-    //where
+    // pub fn lazy_with<C: StoredComponent>(mut self, component: C) ->
+    // anyhow::Result<Self> where
     //    C::StorageType: WorldStorage,
     //{
     //    let id = self.id;
@@ -157,11 +163,11 @@ impl Entity {
 
     ///// Lazily add a component and return a future that completes after the
     ///// component has been added.
-    //pub fn lazy_add<C: StoredComponent>(
+    // pub fn lazy_add<C: StoredComponent>(
     //    &mut self,
     //    component: C,
     //) -> anyhow::Result<()>
-    //where
+    // where
     //    C::StorageType: WorldStorage,
     //{
     //    let id = self.id;
@@ -184,17 +190,21 @@ impl Entity {
     //    Ok(())
     //}
 
-    /// Await a future that completes after all lazy updates have been performed.
+    /// Await a future that completes after all lazy updates have been
+    /// performed.
     pub async fn updates(&mut self) -> anyhow::Result<()> {
-        let updates: Vec<oneshot::Receiver<Arc<dyn Any + Send + Sync>>> = std::mem::take(&mut self.op_receivers);
+        let updates: Vec<oneshot::Receiver<Arc<dyn Any + Send + Sync>>> =
+            std::mem::take(&mut self.op_receivers);
         for update in updates.into_iter() {
-            let _ = update.await.map_err(|_| anyhow::anyhow!("updates oneshot is closed"))?;
+            let _ = update
+                .await
+                .map_err(|_| anyhow::anyhow!("updates oneshot is closed"))?;
         }
         Ok(())
     }
 
     ///// Get the value of a specific component, if it exists.
-    //pub async fn lazy_get<C>(&self) -> anyhow::Result<Option<C>>
+    // pub async fn lazy_get<C>(&self) -> anyhow::Result<Option<C>>
     //    where
     //    C: StoredComponent + Clone,
     //    C::StorageType: CanReadStorage
@@ -208,15 +218,16 @@ impl Entity {
     //                    world.with_default_storage::<C>()?;
     //                }
     //                let storage: ReadStore<C> = world.fetch()?;
-    //                Ok(Arc::new(storage.get(id).map(Clone::clone)) as Arc<dyn Any + Send + Sync>)
-    //            }),
+    //                Ok(Arc::new(storage.get(id).map(Clone::clone)) as Arc<dyn Any
+    // + Send + Sync>)            }),
     //            tx,
     //        })
     //        .context("could not send entity op")?;
-    //    let arc: Arc<dyn Any + Send + Sync> = rx.await.map_err(|_| anyhow::anyhow!("could not receive get request"))?;
-    //    let arc_c: Arc<Option<C>> = arc.downcast().map_err(|_| anyhow::anyhow!("could not downcast"))?;
-    //    let c: Option<C> = Arc::try_unwrap(arc_c).map_err(|_| anyhow::anyhow!("could not unwrap"))?;
-    //    Ok(c)
+    //    let arc: Arc<dyn Any + Send + Sync> = rx.await.map_err(|_|
+    // anyhow::anyhow!("could not receive get request"))?;    let arc_c:
+    // Arc<Option<C>> = arc.downcast().map_err(|_| anyhow::anyhow!("could not
+    // downcast"))?;    let c: Option<C> = Arc::try_unwrap(arc_c).map_err(|_|
+    // anyhow::anyhow!("could not unwrap"))?;    Ok(c)
     //}
 }
 
@@ -227,7 +238,7 @@ pub struct EntityBuilder<'a> {
 
 impl<'a> EntityBuilder<'a> {
     ///// Adds a component immediately.
-    //pub fn with<C: StoredComponent>(self, component: C) -> anyhow::Result<Self> {
+    // pub fn with<C: StoredComponent>(self, component: C) -> anyhow::Result<Self> {
     //    self.world
     //        .resource_manager
     //        .unify_resources("EntityBuilder::with")?;
@@ -387,7 +398,7 @@ impl World {
 
     pub fn set_resource<T: IsResource>(&mut self, resource: T) -> anyhow::Result<&mut Self> {
         let _prev = self.resource_manager.add(resource);
-        //if let Some(prev) = prev {
+        // if let Some(prev) = prev {
         //    let t: Box<T> = prev.downcast()?;
         //    let t: T = t.into_inner();
         //}
@@ -448,7 +459,7 @@ impl World {
         self.with_plugin(T::plugin())
     }
 
-    //pub fn with_storage<T: StoredComponent>(
+    // pub fn with_storage<T: StoredComponent>(
     //    &mut self,
     //    store: T::StorageType,
     //) -> anyhow::Result<&mut Self> {
@@ -456,8 +467,8 @@ impl World {
     //        .with_plugin(entity_upkeep::plugin::<T::StorageType>())
     //}
 
-    //pub fn with_default_storage<T: StoredComponent>(&mut self) -> anyhow::Result<&mut Self> {
-    //    let store = <T::StorageType>::default();
+    // pub fn with_default_storage<T: StoredComponent>(&mut self) ->
+    // anyhow::Result<&mut Self> {    let store = <T::StorageType>::default();
     //    self.with_resource(store)?
     //        .with_plugin(entity_upkeep::plugin::<T::StorageType>())
     //}
@@ -565,7 +576,8 @@ impl World {
 
     /// Conduct a world tick.
     ///
-    /// Calls `World::tick_async`, then `World::tick_sync`, then `World::tick_lazy`.
+    /// Calls `World::tick_async`, then `World::tick_sync`, then
+    /// `World::tick_lazy`.
     pub fn tick(&mut self) -> anyhow::Result<()> {
         self.tick_async()?;
         self.tick_sync()?;
@@ -651,7 +663,7 @@ impl World {
     pub fn tick_lazy(&mut self) -> anyhow::Result<()> {
         log::trace!("tick lazy");
 
-        while let Ok(LazyOp{op, mut tx}) = self.lazy_ops.1.try_recv() {
+        while let Ok(LazyOp { op, mut tx }) = self.lazy_ops.1.try_recv() {
             self.resource_manager.unify_resources("World::tick_lazy")?;
             let t = (op)(self)?;
             let _ = tx.send(t);
@@ -700,8 +712,8 @@ impl World {
         Ok(t)
     }
 
-    /// Run all system and non-system futures until they have all finished or one
-    /// system has erred, whichever comes first.
+    /// Run all system and non-system futures until they have all finished or
+    /// one system has erred, whichever comes first.
     pub fn run(&mut self) -> anyhow::Result<&mut Self> {
         loop {
             self.tick()?;
@@ -729,7 +741,7 @@ mod test {
     use apecs::{anyhow, spsc, system::*, world::*, Read, Write, WriteExpect};
 
     //#[test]
-    //fn can_closure_system() -> anyhow::Result<()> {
+    // fn can_closure_system() -> anyhow::Result<()> {
     //    #[derive(CanFetch)]
     //    struct StatefulSystemData {
     //        positions: Read<VecStorage<(f32, f32)>>,
@@ -742,8 +754,8 @@ mod test {
     //        let mut highest_pos: (f32, f32) = (0.0, f32::NEG_INFINITY);
 
     //        move |data: StatefulSystemData| {
-    //            println!("running stateful system: highest_pos:{:?}", highest_pos);
-    //            for pos in data.positions.iter() {
+    //            println!("running stateful system: highest_pos:{:?}",
+    // highest_pos);            for pos in data.positions.iter() {
     //                if pos.1 > highest_pos.1 {
     //                    highest_pos = *pos.value();
     //                    println!("set new highest_pos: {:?}", highest_pos);
@@ -778,9 +790,9 @@ mod test {
     //}
 
     //#[test]
-    //fn async_systems_run_and_return_resources() -> anyhow::Result<()> {
-    //    async fn create(tx: spsc::Sender<()>, mut facade: Facade) -> anyhow::Result<()> {
-    //        println!("create running");
+    // fn async_systems_run_and_return_resources() -> anyhow::Result<()> {
+    //    async fn create(tx: spsc::Sender<()>, mut facade: Facade) ->
+    // anyhow::Result<()> {        println!("create running");
     //        tx.try_send(()).unwrap();
     //        let (mut entities, mut names, mut numbers): (
     //            WriteExpect<Entities>,
@@ -815,11 +827,11 @@ mod test {
     //    let (tx, rx) = spsc::bounded(1);
     //    let mut world = World::default();
     //    world
-    //        .with_async_system("create", |facade| async move { create(tx, facade).await })
-    //        .with_system("maintain", maintain_map)?;
+    //        .with_async_system("create", |facade| async move { create(tx,
+    // facade).await })        .with_system("maintain", maintain_map)?;
 
-    //    // create system runs - sending on the channel and making the fetch request
-    //    world.tick()?;
+    //    // create system runs - sending on the channel and making the fetch
+    // request    world.tick()?;
     //    rx.try_recv().unwrap();
 
     //    // world sends resources to the create system which makes
@@ -882,7 +894,7 @@ mod test {
     }
 
     //#[test]
-    //fn can_create_entities_and_build_convenience() {
+    // fn can_create_entities_and_build_convenience() {
     //    struct DataA(f32);
     //    impl StoredComponent for DataA {
     //        type StorageType = VecStorage<Self>;
@@ -921,8 +933,8 @@ mod test {
     //        world.tick().unwrap();
     //    }
 
-    //    let (a_store, b_store): (ReadStore<DataA>, ReadStore<DataB>) = world.fetch().unwrap();
-    //    let a = a_store.get(id).unwrap();
+    //    let (a_store, b_store): (ReadStore<DataA>, ReadStore<DataB>) =
+    // world.fetch().unwrap();    let a = a_store.get(id).unwrap();
     //    assert_eq!(a.0, 666.0);
 
     //    let b = b_store.get(id).unwrap();
@@ -930,7 +942,7 @@ mod test {
     //}
 
     //#[test]
-    //fn entities_can_lazy_add_and_get() {
+    // fn entities_can_lazy_add_and_get() {
     //    #[derive(Debug, Clone, PartialEq)]
     //    struct Name(&'static str);
     //    impl StoredComponent for Name {

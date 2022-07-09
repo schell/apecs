@@ -3,7 +3,7 @@ use apecs::{
     join::*,
     storage::*,
     system::*,
-    world::{Facade, World, Entities},
+    world::{Entities, Facade, World},
     CanFetch, Read, Write,
 };
 
@@ -136,7 +136,11 @@ pub struct Benchmark {
 
 impl std::fmt::Display for Benchmark {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&format!("{}_{}", if self.is_async {"async"} else {"sync"}, self.size))
+        f.write_str(&format!(
+            "{}_{}",
+            if self.is_async { "async" } else { "sync" },
+            self.size
+        ))
     }
 }
 

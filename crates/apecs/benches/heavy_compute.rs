@@ -1,6 +1,6 @@
 use std::marker::PhantomData;
 
-use apecs::{anyhow, join::*, storage::*, world::*, system::*, CanFetch, IsResource, Write};
+use apecs::{anyhow, join::*, storage::*, system::*, world::*, CanFetch, IsResource, Write};
 use cgmath::*;
 
 #[derive(Copy, Clone)]

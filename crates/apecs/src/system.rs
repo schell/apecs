@@ -48,7 +48,7 @@ where
 pub struct AsyncSystem {
     pub name: String,
     // The system logic as a future.
-    //pub future: AsyncSystemFuture,
+    // pub future: AsyncSystemFuture,
     // Unbounded. Used to send resource requests from the system to the world.
     pub resource_request_rx: spsc::Receiver<Request>,
     // Bounded (1). Used to send resources from the world to the system.
