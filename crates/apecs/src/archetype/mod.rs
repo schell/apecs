@@ -413,6 +413,14 @@ pub trait IsColumn {
     fn pop_column(resources: &mut QueryResources) -> Option<Self::Column>;
 }
 
+impl IsColumn for () {
+    type Column = std::iter::Empty<()>;
+
+    fn pop_column(resources: &mut QueryResources) -> Option<Self::Column> {
+        Some(std::iter::empty())
+    }
+}
+
 // impl<'a, T: 'static> IsColumn for &'a T {
 //    type Column = QueryColumn<'a, T>;
 //
@@ -449,6 +457,70 @@ pub trait IsQueryItem<'a>: IsBundle<Head = Self::Column, Tail = Self::Rest> {
         //    .zip(tail)
         //    .map((|(head, rest)| Q::cons(head, rest)) as fn((Q::Head, Q::Tail)) ->
         // Q); Some(iter)
+    }
+}
+
+impl<'a> IsQueryItem<'a> for () {
+    type Column = ();
+    type Rest = ();
+    type Iter = <() as IsColumn>::Column;
+
+    fn iter_cons(
+        col: <Self::Column as IsColumn>::Column,
+        rest: <Self::Rest as IsQueryItem<'a>>::Iter,
+    ) -> Self::Iter {
+        todo!()
+    }
+}
+
+impl<'a, T> IsQueryItem<'a> for (T,)
+where
+    T: IsColumn + 'a,
+{
+    type Column = T;
+    type Rest = ();
+    type Iter = std::iter::Map<<Self::Column as IsColumn>::Column, fn(T) -> (T,)>;
+
+    fn iter_cons(
+        col: <Self::Column as IsColumn>::Column,
+        rest: <Self::Rest as IsQueryItem<'a>>::Iter,
+    ) -> Self::Iter {
+        col.map(|t| (t,))
+    }
+}
+
+impl<'a, A, B> IsQueryItem<'a> for (A, B)
+where
+    A: IsColumn + 'a,
+    B: IsColumn + 'a,
+{
+    type Column = A;
+    type Rest = (B,);
+    type Iter = std::iter::Map<<Self::Column as IsColumn>::Column, fn(A, (B,)) -> (A, B)>;
+
+    fn iter_cons(
+        col: <Self::Column as IsColumn>::Column,
+        rest: <Self::Rest as IsQueryItem<'a>>::Iter,
+    ) -> Self::Iter {
+        col.map(|t| (t,))
+    }
+}
+
+impl<'a, A, B, C> IsQueryItem<'a> for (A, B, C)
+where
+    A: IsColumn + 'a,
+    B: IsColumn + 'a,
+    C: IsColumn + 'a,
+{
+    type Column = A;
+    type Rest = ();
+    type Iter = std::iter::Map<<Self::Column as IsColumn>::Column, fn(T) -> (T,)>;
+
+    fn iter_cons(
+        col: <Self::Column as IsColumn>::Column,
+        rest: <Self::Rest as IsQueryItem<'a>>::Iter,
+    ) -> Self::Iter {
+        col.map(|t| (t,))
     }
 }
 
