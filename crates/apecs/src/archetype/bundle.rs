@@ -4,6 +4,99 @@ use std::any::TypeId;
 use any_vec::AnyVec;
 use anyhow::Context;
 use rustc_hash::{FxHashMap, FxHashSet};
+use tuple_list::TupleList;
+
+pub use tuple_list::Tuple;
+
+pub trait TryFromAnyBundle: Sized + 'static {
+    fn try_from_any(bundle: AnyBundle) -> anyhow::Result<Self>;
+}
+
+impl TryFromAnyBundle for () {
+    fn try_from_any(_: AnyBundle) -> anyhow::Result<Self> {
+        Ok(())
+    }
+}
+
+impl<Head, Tail> TryFromAnyBundle for (Head, Tail)
+where
+    Head: 'static,
+    Tail: TryFromAnyBundle + TupleList,
+{
+    fn try_from_any(mut bundle: AnyBundle) -> anyhow::Result<Self> {
+        let ty = TypeId::of::<Head>();
+        let mut any_head_vec = bundle.0.remove(&ty).with_context(|| {
+            format!("bundle is missing type: {}", std::any::type_name::<Head>())
+        })?;
+        let mut head_vec = any_head_vec
+            .downcast_mut::<Head>()
+            .context("could not downcast")?;
+        let head = head_vec
+            .pop()
+            .with_context(|| format!("missing '{}' component", std::any::type_name::<Head>()))?;
+
+        Ok((head, Tail::try_from_any(bundle)?))
+    }
+}
+
+pub trait TupleListTypeVec {
+    fn tuple_list_type_vec() -> Vec<TypeId>;
+}
+
+impl TupleListTypeVec for () {
+    fn tuple_list_type_vec() -> Vec<TypeId> {
+        vec![]
+    }
+}
+
+impl<Head, Tail> TupleListTypeVec for (Head, Tail)
+where
+    Head: 'static,
+    Tail: TupleListTypeVec + TupleList,
+{
+    fn tuple_list_type_vec() -> Vec<TypeId> {
+        let mut tys = Tail::tuple_list_type_vec();
+        tys.push(TypeId::of::<Head>());
+        tys
+    }
+}
+
+pub trait IsBundleTypeInfo: Tuple {
+    fn get_type_info() -> anyhow::Result<FxHashSet<TypeId>>;
+}
+
+impl<T> IsBundleTypeInfo for T
+where
+    T: Tuple,
+    T::TupleList: TupleListTypeVec,
+{
+    fn get_type_info() -> anyhow::Result<FxHashSet<TypeId>> {
+        let mut types = T::TupleList::tuple_list_type_vec();
+        types.sort();
+        ensure_type_info(&types)?;
+        Ok(FxHashSet::from_iter(types.into_iter()))
+    }
+}
+
+pub fn type_info<T: IsBundleTypeInfo>() -> anyhow::Result<FxHashSet<TypeId>> {
+    T::get_type_info()
+}
+
+pub fn ensure_type_info(types: &[TypeId]) -> anyhow::Result<()> {
+    for x in types.windows(2) {
+        match x[0].cmp(&x[1]) {
+            core::cmp::Ordering::Less => (),
+            core::cmp::Ordering::Equal => {
+                anyhow::bail!(
+                    "attempted to allocate entity with duplicate components; each type must occur \
+                     at most once!"
+                )
+            }
+            core::cmp::Ordering::Greater => anyhow::bail!("type info is unsorted"),
+        }
+    }
+    Ok(())
+}
 
 /// A type erased bundle of components.
 #[derive(Default)]
@@ -37,178 +130,68 @@ impl AnyBundle {
     pub fn type_info(&self) -> FxHashSet<TypeId> {
         FxHashSet::from_iter(self.0.keys().map(Clone::clone))
     }
+
+    pub fn try_into_tuple<T>(self) -> anyhow::Result<T>
+    where
+        T: Tuple + 'static,
+        T::TupleList: TryFromAnyBundle,
+    {
+        let tuple_list = <T::TupleList as TryFromAnyBundle>::try_from_any(self)?;
+        Ok(tuple_list.into_tuple())
+    }
+
+    pub fn from_tuple<T>(tuple: T) -> Self
+    where
+        T: Tuple,
+        AnyBundle: From<T::TupleList>,
+    {
+        AnyBundle::from(tuple.into_tuple_list())
+    }
 }
 
-pub trait IsBundle: Sized {
-    type Head;
-    type Tail: IsBundle;
-
-    fn as_root() -> Option<Self> {
-        None
+impl From<()> for AnyBundle {
+    fn from(_: ()) -> Self {
+        AnyBundle::default()
     }
+}
 
-    fn uncons(self) -> Option<(Self::Head, Option<Self::Tail>)>;
-
-    fn cons(head: Self::Head, tail: Self::Tail) -> Self;
-
-    fn type_info() -> anyhow::Result<FxHashSet<TypeId>>
-    where
-        Self: 'static,
-    {
-        let mut types = bundle_types::<Self>();
-        types.sort();
-        ensure_type_info(&types)?;
-        Ok(FxHashSet::from_iter(types.into_iter()))
-    }
-
-    fn into_any(self) -> AnyBundle
-    where
-        Self: 'static,
-    {
-        fn mk_any<B: IsBundle>(bundle: B, any_bundle: &mut AnyBundle)
-        where
-            B: 'static,
-        {
-            if let Some((head, may_tail)) = bundle.uncons() {
-                let mut store = AnyVec::new::<B::Head>();
-                store.downcast_mut::<B::Head>().unwrap().push(head);
-                any_bundle.0.insert(store.element_typeid(), store);
-                if let Some(tail) = may_tail {
-                    mk_any::<B::Tail>(tail, any_bundle);
-                }
-            }
-        }
-        let mut bundle = AnyBundle::default();
-        mk_any::<Self>(self, &mut bundle);
+impl<Head, Tail> From<(Head, Tail)> for AnyBundle
+where
+    Head: 'static,
+    Tail: TupleList + 'static,
+    AnyBundle: From<Tail>,
+{
+    fn from((head, tail): (Head, Tail)) -> Self {
+        let mut bundle = AnyBundle::from(tail);
+        let mut store = AnyVec::new::<Head>();
+        store.downcast_mut::<Head>().unwrap().push(head);
+        bundle.0.insert(store.element_typeid(), store);
         bundle
     }
+}
 
-    fn try_from_any(mut any_bundle: AnyBundle) -> anyhow::Result<Self>
+pub trait EmptyBundle {
+    fn empty_bundle() -> AnyBundle;
+}
+
+impl EmptyBundle for () {
+    fn empty_bundle() -> AnyBundle {
+        AnyBundle::default()
+    }
+}
+
+impl<Head, Tail> EmptyBundle for (Head, Tail)
     where
-        Self: 'static,
-    {
-        if let Some(root) = Self::as_root() {
-            Ok(root)
-        } else {
-            let ty = TypeId::of::<Self::Head>();
-            let mut any_head_vec = any_bundle.0.remove(&ty).with_context(|| {
-                format!(
-                    "anybundle is missing type: {}",
-                    std::any::type_name::<Self::Head>()
-                )
-            })?;
-            let mut head_vec = any_head_vec
-                .downcast_mut::<Self::Head>()
-                .context("could not downcast")?;
-            let head = head_vec.pop().context("missing component")?;
-            let tail = <Self::Tail>::try_from_any(any_bundle)?;
-            Ok(Self::cons(head, tail))
-        }
+    Head: 'static,
+    Tail: EmptyBundle + TupleList
+{
+    fn empty_bundle() -> AnyBundle {
+        let mut bundle = Tail::empty_bundle();
+        let ty = TypeId::of::<Head>();
+        let anyvec: AnyVec = AnyVec::new::<Head>();
+        bundle.0.insert(ty, anyvec);
+        bundle
     }
-}
-
-impl IsBundle for () {
-    type Head = ();
-    type Tail = ();
-
-    fn as_root() -> Option<Self> {
-        Some(())
-    }
-
-    fn uncons(self) -> Option<(Self::Head, Option<Self::Tail>)> {
-        None
-    }
-
-    fn cons((): Self::Head, (): Self::Tail) -> Self {
-        ()
-    }
-}
-
-impl<A> IsBundle for (A,) {
-    type Head = A;
-    type Tail = ();
-
-    fn uncons(self) -> Option<(Self::Head, Option<Self::Tail>)> {
-        Some((self.0, None))
-    }
-
-    fn cons(head: Self::Head, _: Self::Tail) -> Self {
-        (head,)
-    }
-}
-
-impl<A, B> IsBundle for (A, B) {
-    type Head = A;
-    type Tail = (B,);
-
-    fn uncons(self) -> Option<(Self::Head, Option<Self::Tail>)> {
-        Some((self.0, Some((self.1,))))
-    }
-
-    fn cons(head: Self::Head, (tail,): Self::Tail) -> Self {
-        (head, tail)
-    }
-}
-
-impl<A, B, C> IsBundle for (A, B, C) {
-    type Head = A;
-    type Tail = (B, C);
-
-    fn uncons(self) -> Option<(Self::Head, Option<Self::Tail>)> {
-        Some((self.0, Some((self.1, self.2))))
-    }
-
-    fn cons(head: Self::Head, (b, c): Self::Tail) -> Self {
-        (head, b, c)
-    }
-}
-
-pub trait Apply<F> {
-    type Output;
-}
-
-impl<F> Apply<F> for () {
-    type Output = ();
-}
-
-impl<F, A: Apply<F>> Apply<F> for (A,) {
-    type Output = (<A as Apply<F>>::Output,);
-}
-
-impl<F, A: Apply<F>, B: Apply<F>> Apply<F> for (A, B) {
-    type Output = (<A as Apply<F>>::Output, <B as Apply<F>>::Output);
-}
-
-impl<F, A: Apply<F>, B: Apply<F>, C: Apply<F>> Apply<F> for (A, B, C) {
-    type Output = (
-        <A as Apply<F>>::Output,
-        <B as Apply<F>>::Output,
-        <C as Apply<F>>::Output,
-    );
-}
-
-pub fn ensure_type_info(types: &[TypeId]) -> anyhow::Result<()> {
-    for x in types.windows(2) {
-        match x[0].cmp(&x[1]) {
-            core::cmp::Ordering::Less => (),
-            core::cmp::Ordering::Equal => {
-                anyhow::bail!(
-                    "attempted to allocate entity with duplicate components; each type must occur \
-                     at most once!"
-                )
-            }
-            core::cmp::Ordering::Greater => anyhow::bail!("type info is unsorted"),
-        }
-    }
-    Ok(())
-}
-
-fn bundle_types<B: IsBundle + 'static>() -> Vec<TypeId> {
-    let mut types = vec![TypeId::of::<B::Head>()];
-    if std::any::TypeId::of::<B::Tail>() != std::any::TypeId::of::<()>() {
-        types.extend(bundle_types::<B::Tail>());
-    }
-    types
 }
 
 #[cfg(test)]
@@ -217,14 +200,14 @@ mod test {
 
     #[test]
     fn bundle_union_returns_prev() {
-        let mut left = ("one".to_string(), 1.0f32, true).into_any();
-        let right = ("two".to_string(), false).into_any();
+        let mut left = AnyBundle::from_tuple(("one".to_string(), 1.0f32, true));
+        let right = AnyBundle::from_tuple(("two".to_string(), false));
         let leftover: AnyBundle = left.union(right).unwrap();
-        let (a, b) = <(String, bool)>::try_from_any(leftover).unwrap();
+        let (a, b) = leftover.try_into_tuple::<(String, bool)>().unwrap();
         assert_eq!("one", a.as_str());
         assert_eq!(b, true);
 
-        let (a, b, c) = <(String, f32, bool)>::try_from_any(left).unwrap();
+        let (a, b, c) = left.try_into_tuple::<(String, f32, bool)>().unwrap();
         assert_eq!("two", &a);
         assert_eq!(1.0, b);
         assert_eq!(false, c);
@@ -236,9 +219,28 @@ mod test {
         let mut b: String = "hello".to_string();
         let c: bool = true;
         let abc = (&a, &mut b, &c);
-        let (_a_ref, may_tail) = abc.uncons().unwrap();
-        let (b_mut_ref, may_tail) = may_tail.unwrap().uncons().unwrap();
-        let (_c_ref, _) = may_tail.unwrap().uncons().unwrap();
+        let (_a_ref, tail) = abc.into_tuple_list();
+        let (b_mut_ref, tail) = tail;
+        let (_c_ref, ()) = tail;
         *b_mut_ref = "goodbye".to_string();
+    }
+
+    #[test]
+    fn type_info_for_tuple() {
+        let list_info = type_info::<<(f32, (String, (bool, (u32, ())))) as TupleList>::Tuple>().unwrap();
+        let tupl_info = type_info::<(f32, String, bool, u32)>().unwrap();
+        assert_eq!(
+            list_info,
+            tupl_info,
+            "diff:\n{:#?}",
+            list_info.difference(&tupl_info)
+        );
+
+        assert!(type_info::<(f32, bool, f32)>().is_err());
+    }
+
+    #[test]
+    fn single_tuple_sanity() {
+        let _ = type_info::<(f32,)>().unwrap();
     }
 }
