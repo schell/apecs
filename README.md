@@ -22,6 +22,7 @@ short-lived systems.
 - joins / queries
 - parallel joins / queries (inner parallelism)
 - parallel system scheduling (outer parallelism)
+- archetypal storage (why should an ecs only have one or the other?)
 - tracked storage (components created, updated, modified)
 - insert plugins/bundles (groups of systems and resources)
 - schedule: system dependencies
@@ -31,4 +32,3 @@ short-lived systems.
 - schedule: local thread systems (maybe not necessary?)
 - wasm
 - make range storage faster
-- archtypal storage (why should an ecs only have one or the other?)
