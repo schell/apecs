@@ -396,13 +396,15 @@ impl World {
         Ok(self)
     }
 
-    pub fn set_resource<T: IsResource>(&mut self, resource: T) -> anyhow::Result<&mut Self> {
-        let _prev = self.resource_manager.add(resource);
-        // if let Some(prev) = prev {
-        //    let t: Box<T> = prev.downcast()?;
-        //    let t: T = t.into_inner();
-        //}
-        Ok(self)
+    pub fn set_resource<T: IsResource>(&mut self, resource: T) -> anyhow::Result<Option<T>> {
+        if let Some(prev) = self.resource_manager.add(resource) {
+            match prev.downcast::<T>() {
+                Ok(t) => Ok(Some(*t)),
+                Err(_) => Err(anyhow::anyhow!("could not downcast previous resource")),
+            }
+        } else {
+            Ok(None)
+        }
     }
 
     pub fn with_plugin(&mut self, plugin: impl Into<Plugin>) -> anyhow::Result<&mut Self> {

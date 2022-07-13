@@ -115,12 +115,6 @@ impl FetchReadyResource {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum ResourceTypeId {
-    Raw(TypeId),
-    Storage(TypeId),
-}
-
 #[derive(Clone, Debug, Eq)]
 pub struct ResourceId {
     pub(crate) type_id: TypeId,
@@ -149,7 +143,7 @@ impl PartialEq for ResourceId {
 impl ResourceId {
     pub fn new<T: IsResource>() -> Self {
         ResourceId {
-            type_id: TypeId::of::<T>(), // ResourceTypeId::Raw(TypeId::of::<T>()),
+            type_id: TypeId::of::<T>(),
             name: std::any::type_name::<T>(),
         }
     }
