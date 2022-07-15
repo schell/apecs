@@ -5,8 +5,7 @@ mod core;
 pub mod resource_manager;
 pub mod schedule;
 pub mod system;
-// pub mod storage;
-pub mod archetype;
+pub mod storage;
 pub mod plugins;
 pub mod world;
 pub mod anyhow {

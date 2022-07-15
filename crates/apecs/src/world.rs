@@ -324,6 +324,16 @@ impl Entities {
     }
 }
 
+impl<'a> IntoIterator for &'a Entities {
+    type Item = usize;
+
+    type IntoIter = Map<BitIter<&'a BitSet>, fn(u32) -> usize>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
 pub struct World {
     pub resource_manager: ResourceManager,
     pub sync_schedule: SyncSchedule,
@@ -737,7 +747,7 @@ impl World {
 
 #[cfg(test)]
 mod test {
-    use std::sync::Mutex;
+    use std::{sync::Mutex, ops::DerefMut};
 
     use crate as apecs;
     use apecs::{anyhow, spsc, system::*, world::*, Read, Write, WriteExpect};
@@ -868,14 +878,14 @@ mod test {
                 async_timer::oneshot::Timer::new(std::time::Duration::from_millis(50)).await;
                 log::info!("asys passed timer");
 
-                data.1.send(data.0).await?;
+                data.deref().1.send(data.deref().0).await?;
             }
             Ok(())
         }
 
         fn sys(mut data: WriteExpect<DataOne>) -> anyhow::Result<ShouldContinue> {
             log::info!("running sys");
-            data.0 += 1;
+            data.deref_mut().0 += 1;
             ok()
         }
 

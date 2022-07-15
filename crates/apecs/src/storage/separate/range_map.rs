@@ -11,17 +11,20 @@ use rayon::iter::{
     IndexedParallelIterator, IntoParallelIterator, ParallelIterator,
 };
 
-use super::{CanReadStorage, CanWriteStorage, Entry, Without, WorldStorage};
+use crate::storage::{
+    Entry,
+    separate::{CanReadStorage, CanWriteStorage, Without, WorldStorage},
+};
 
 pub struct MissingRange<'a, T>(usize, PhantomData<&'a T>);
 
-//pub struct RangeStoreIter<'a, T> {
+// pub struct RangeStoreIter<'a, T> {
 //    group: Option<(usize, &'a [Entry<T>])>,
 //    // RangeStore elements, sorted backwards
 //    groups: Vec<(usize, &'a [Entry<T>])>,
 //}
 
-//impl<'a, T> Iterator for RangeStoreIter<'a, T> {
+// impl<'a, T> Iterator for RangeStoreIter<'a, T> {
 //    type Item = &'a Entry<T>;
 //
 //    fn next(&mut self) -> Option<Self::Item> {

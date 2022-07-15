@@ -124,8 +124,8 @@ pub fn derive_stored_component_vec(input: proc_macro::TokenStream) -> proc_macro
     let (impl_generics, ty_generics, _) = generics.split_for_impl();
 
     let output = quote! {
-        impl #impl_generics apecs::storage::StoredComponent for #name #ty_generics {
-            type StorageType = apecs::storage::VecStorage<Self>;
+        impl #impl_generics apecs::storage::separate::StoredComponent for #name #ty_generics {
+            type StorageType = apecs::storage::separate::VecStorage<Self>;
         }
     };
 
@@ -141,8 +141,8 @@ pub fn derive_stored_component_range(input: proc_macro::TokenStream) -> proc_mac
     let (impl_generics, ty_generics, _) = generics.split_for_impl();
 
     let output = quote! {
-        impl #impl_generics apecs::storage::StoredComponent for #name #ty_generics {
-            type StorageType = apecs::storage::RangeStore<Self>;
+        impl #impl_generics apecs::storage::separate::StoredComponent for #name #ty_generics {
+            type StorageType = apecs::storage::separate::RangeStore<Self>;
         }
     };
 

@@ -1,6 +1,7 @@
 //! Core types and processes
 use crate::{plugins::Plugin, schedule::Borrow};
 use anyhow::Context;
+use rayon::iter::IntoParallelIterator;
 use rustc_hash::FxHashMap;
 use std::{
     any::{Any, TypeId},
@@ -205,62 +206,57 @@ impl<'a, T: IsResource + Default> DerefMut for Write<T> {
     }
 }
 
-// impl<T: IsResource + Default + CanReadStorage> CanReadStorage for Write<T> {
-//    type Component = T::Component;
-//
-//    type Iter<'a> = T::Iter<'a>
-//    where
-//        Self: 'a;
-//
-//    type ParIter<'a> = T::ParIter<'a>
-//    where
-//        Self: 'a;
-//
-//    fn get(&self, id: usize) -> Option<&Self::Component> {
-//        self.0.get(id)
-//    }
-//
-//    fn iter(&self) -> Self::Iter<'_> {
-//        self.0.iter()
-//    }
-//
-//    fn par_iter(&self) -> Self::ParIter<'_> {
-//        self.0.par_iter()
-//    }
-//
-//    fn last(&self) -> Option<&crate::storage::Entry<Self::Component>> {
-//        self.0.last()
-//    }
-//}
-// impl<T: IsResource + Default + CanWriteStorage> CanWriteStorage for Write<T>
-// {    type IterMut<'a> = T::IterMut<'a>
-//         where
-//             Self: 'a;
-//
-//    type ParIterMut<'a> = T::ParIterMut<'a>
-//         where
-//             Self: 'a;
-//
-//    fn get_mut(&mut self, id: usize) -> Option<&mut Self::Component> {
-//        self.0.get_mut(id)
-//    }
-//
-//    fn insert(&mut self, id: usize, component: Self::Component) ->
-// Option<Self::Component> {        self.0.insert(id, component)
-//    }
-//
-//    fn remove(&mut self, id: usize) -> Option<Self::Component> {
-//        self.0.remove(id)
-//    }
-//
-//    fn iter_mut(&mut self) -> Self::IterMut<'_> {
-//        self.0.iter_mut()
-//    }
-//
-//    fn par_iter_mut(&mut self) -> Self::ParIterMut<'_> {
-//        self.0.par_iter_mut()
-//    }
-//}
+impl<'a, T: Default + Send + Sync + 'static> IntoIterator for &'a Write<T>
+where
+    &'a T: IntoIterator,
+{
+    type Item = <<&'a T as IntoIterator>::IntoIter as Iterator>::Item;
+
+    type IntoIter = <&'a T as IntoIterator>::IntoIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.deref().into_iter()
+    }
+}
+
+impl<'a, T: Default + Send + Sync + 'static> IntoParallelIterator for &'a Write<T>
+where
+    &'a T: IntoParallelIterator,
+{
+    type Item = <&'a T as IntoParallelIterator>::Item;
+
+    type Iter = <&'a T as IntoParallelIterator>::Iter;
+
+    fn into_par_iter(self) -> Self::Iter {
+        self.deref().into_par_iter()
+    }
+}
+
+impl<'a, T: Default + Send + Sync + 'static> IntoIterator for &'a mut Write<T>
+where
+    &'a mut T: IntoIterator,
+{
+    type Item = <<&'a mut T as IntoIterator>::IntoIter as Iterator>::Item;
+
+    type IntoIter = <&'a mut T as IntoIterator>::IntoIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.deref_mut().into_iter()
+    }
+}
+
+impl<'a, T: Default + Send + Sync + 'static> IntoParallelIterator for &'a mut Write<T>
+where
+    &'a mut T: IntoParallelIterator,
+{
+    type Item = <&'a mut T as IntoParallelIterator>::Item;
+
+    type Iter = <&'a mut T as IntoParallelIterator>::Iter;
+
+    fn into_par_iter(self) -> Self::Iter {
+        self.deref_mut().into_par_iter()
+    }
+}
 
 pub struct WriteExpect<T: IsResource>(Fetched<T>);
 
@@ -278,62 +274,30 @@ impl<'a, T: IsResource> DerefMut for WriteExpect<T> {
     }
 }
 
-// impl<T: IsResource + CanReadStorage> CanReadStorage for WriteExpect<T> {
-//    type Component = T::Component;
-//
-//    type Iter<'a> = T::Iter<'a>
-//    where
-//        Self: 'a;
-//
-//    type ParIter<'a> = T::ParIter<'a>
-//    where
-//        Self: 'a;
-//
-//    fn get(&self, id: usize) -> Option<&Self::Component> {
-//        self.0.get(id)
-//    }
-//
-//    fn iter(&self) -> Self::Iter<'_> {
-//        self.0.iter()
-//    }
-//
-//    fn par_iter(&self) -> Self::ParIter<'_> {
-//        self.0.par_iter()
-//    }
-//
-//    fn last(&self) -> Option<&crate::storage::Entry<Self::Component>> {
-//        self.0.last()
-//    }
-//}
-// impl<T: IsResource + CanWriteStorage> CanWriteStorage for WriteExpect<T> {
-//    type IterMut<'a> = T::IterMut<'a>
-//    where
-//        Self: 'a;
-//
-//    type ParIterMut<'a> = T::ParIterMut<'a>
-//    where
-//        Self: 'a;
-//
-//    fn get_mut(&mut self, id: usize) -> Option<&mut Self::Component> {
-//        self.0.get_mut(id)
-//    }
-//
-//    fn insert(&mut self, id: usize, component: Self::Component) ->
-// Option<Self::Component> {        self.0.insert(id, component)
-//    }
-//
-//    fn remove(&mut self, id: usize) -> Option<Self::Component> {
-//        self.0.remove(id)
-//    }
-//
-//    fn iter_mut(&mut self) -> Self::IterMut<'_> {
-//        self.0.iter_mut()
-//    }
-//
-//    fn par_iter_mut(&mut self) -> Self::ParIterMut<'_> {
-//        self.0.par_iter_mut()
-//    }
-//}
+impl<'a, S: Send + Sync + 'static> IntoParallelIterator for &'a mut WriteExpect<S>
+where
+    &'a mut S: IntoParallelIterator,
+{
+    type Iter = <&'a mut S as IntoParallelIterator>::Iter;
+
+    type Item = <&'a mut S as IntoParallelIterator>::Item;
+
+    fn into_par_iter(self) -> Self::Iter {
+        self.0.into_par_iter()
+    }
+}
+
+impl<'a, S: Send + Sync + 'static> IntoParallelIterator for &'a WriteExpect<S>
+where
+    &'a S: IntoParallelIterator,
+{
+    type Iter = <&'a S as IntoParallelIterator>::Iter;
+    type Item = <&'a S as IntoParallelIterator>::Item;
+
+    fn into_par_iter(self) -> Self::Iter {
+        self.0.into_par_iter()
+    }
+}
 
 pub struct Read<T: IsResource + Default> {
     inner: Arc<Resource>,
@@ -349,33 +313,31 @@ impl<'a, T: IsResource + Default> Deref for Read<T> {
     }
 }
 
-// impl<T: IsResource + Default + CanReadStorage> CanReadStorage for Read<T> {
-//    type Component = T::Component;
-//
-//    type Iter<'a> = T::Iter<'a>
-//    where
-//        Self: 'a;
-//
-//    type ParIter<'a> = T::ParIter<'a>
-//    where
-//        Self: 'a;
-//
-//    fn last(&self) -> Option<&crate::storage::Entry<Self::Component>> {
-//        self.deref().last()
-//    }
-//
-//    fn get(&self, id: usize) -> Option<&Self::Component> {
-//        self.deref().get(id)
-//    }
-//
-//    fn iter(&self) -> Self::Iter<'_> {
-//        self.deref().iter()
-//    }
-//
-//    fn par_iter(&self) -> Self::ParIter<'_> {
-//        self.deref().par_iter()
-//    }
-//}
+impl<'a, T: Default + Send + Sync + 'static> IntoIterator for &'a Read<T>
+where
+    &'a T: IntoIterator,
+{
+    type Item = <<&'a T as IntoIterator>::IntoIter as Iterator>::Item;
+
+    type IntoIter = <&'a T as IntoIterator>::IntoIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.deref().into_iter()
+    }
+}
+
+impl<'a, S: Default + Send + Sync + 'static> IntoParallelIterator for &'a Read<S>
+where
+    &'a S: IntoParallelIterator,
+{
+    type Iter = <&'a S as IntoParallelIterator>::Iter;
+
+    type Item = <&'a S as IntoParallelIterator>::Item;
+
+    fn into_par_iter(self) -> Self::Iter {
+        self.into_par_iter()
+    }
+}
 
 pub struct ReadExpect<T: IsResource> {
     inner: Arc<Resource>,
@@ -391,33 +353,18 @@ impl<'a, T: IsResource> Deref for ReadExpect<T> {
     }
 }
 
-// impl<T: IsResource + CanReadStorage> CanReadStorage for ReadExpect<T> {
-//    type Component = T::Component;
-//
-//    type Iter<'a> = T::Iter<'a>
-//    where
-//        Self: 'a;
-//
-//    type ParIter<'a> = T::ParIter<'a>
-//    where
-//        Self: 'a;
-//
-//    fn last(&self) -> Option<&crate::storage::Entry<Self::Component>> {
-//        self.deref().last()
-//    }
-//
-//    fn get(&self, id: usize) -> Option<&Self::Component> {
-//        self.deref().get(id)
-//    }
-//
-//    fn iter(&self) -> Self::Iter<'_> {
-//        self.deref().iter()
-//    }
-//
-//    fn par_iter(&self) -> Self::ParIter<'_> {
-//        self.deref().par_iter()
-//    }
-//}
+impl<'a, S: Send + Sync + 'static> IntoParallelIterator for &'a ReadExpect<S>
+where
+    &'a S: IntoParallelIterator,
+{
+    type Iter = <&'a S as IntoParallelIterator>::Iter;
+
+    type Item = <&'a S as IntoParallelIterator>::Item;
+
+    fn into_par_iter(self) -> Self::Iter {
+        self.into_par_iter()
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct Request {

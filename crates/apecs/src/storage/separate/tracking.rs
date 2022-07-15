@@ -5,8 +5,11 @@ use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterato
 use rustc_hash::FxHashSet;
 
 use crate::{
-    join::Join,
-    storage::{current_iteration, CanReadStorage, Entry},
+    storage::{
+        Entry,
+        separate::CanReadStorage,
+    },
+    system::current_iteration,
 };
 
 pub struct TrackedIter<'a, T, I>(u64, I, fn(&'a Entry<T>, u64) -> bool);
@@ -24,13 +27,13 @@ impl<'a, T, I: Iterator<Item = &'a Entry<T>>> Iterator for TrackedIter<'a, T, I>
     }
 }
 
-impl<'a, T, I: Iterator<Item = &'a Entry<T>>> Join for TrackedIter<'a, T, I> {
-    type Iter = Self;
-
-    fn join(self) -> Self::Iter {
-        self
-    }
-}
+//impl<'a, T, I: Iterator<Item = &'a Entry<T>>> IntoJoinIterator for TrackedIter<'a, T, I> {
+//    type Iter = Self;
+//
+//    fn join_iter(self) -> Self::Iter {
+//        self
+//    }
+//}
 
 /// Tracks changed components in a store with components of `T`.
 ///
@@ -143,10 +146,12 @@ impl<T: Send + Sync + 'static> Tracker<T> {
         })
     }
 
-    /// Return the ids of deleted items **since the last time this function was called**.
+    /// Return the ids of deleted items **since the last time this function was
+    /// called**.
     ///
     /// ## Warning
-    /// This does **not** return the deleted ids since the last time the tracker was cleared.
+    /// This does **not** return the deleted ids since the last time the tracker
+    /// was cleared.
     pub fn deleted<'b, S: CanReadStorage<Component = T>>(&mut self, store: &'b S) -> Vec<usize> {
         let old_cache = std::mem::replace(
             &mut self.id_cache,
@@ -161,7 +166,7 @@ impl<T: Send + Sync + 'static> Tracker<T> {
 
 #[cfg(test)]
 mod test {
-    use crate::{anyhow, join::*, storage::*};
+    use crate::{anyhow, storage::separate::*, storage::separate::join::*, system::increment_current_iteration};
 
     fn sanity_check_deleted<S: WorldStorage<Component = f32>>() {
         let mut tracker: Tracker<f32> = Tracker::default();
@@ -352,10 +357,7 @@ mod test {
         store_b.insert(0, 0);
         store_b.insert(2, 2);
 
-        let _added: Vec<_> = (
-            tracker_a.added_iter(&store_a),
-            tracker_b.added_iter(&store_b),
-        )
+        let _added: Vec<_> = (tracker_a.added_iter(&store_a), tracker_b.added_iter(&store_b))
             .join()
             .collect();
     }
