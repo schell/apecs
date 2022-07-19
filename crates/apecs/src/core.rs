@@ -335,7 +335,7 @@ where
     type Item = <&'a S as IntoParallelIterator>::Item;
 
     fn into_par_iter(self) -> Self::Iter {
-        self.into_par_iter()
+        self.deref().into_par_iter()
     }
 }
 
@@ -362,7 +362,7 @@ where
     type Item = <&'a S as IntoParallelIterator>::Item;
 
     fn into_par_iter(self) -> Self::Iter {
-        self.into_par_iter()
+        self.deref().into_par_iter()
     }
 }
 

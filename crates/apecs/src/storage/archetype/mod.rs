@@ -2,7 +2,7 @@
 use std::{any::TypeId, marker::PhantomData, ops::DerefMut};
 
 use any_vec::{
-    any_value::{AnyValue, AnyValueMut},
+    any_value::AnyValueMut,
     mem::Heap,
     AnyVec, AnyVecMut, AnyVecRef,
 };
@@ -216,7 +216,7 @@ impl Archetype {
             let anybundle =
                 self.data
                     .iter_mut()
-                    .fold(AnyBundle::default(), |mut bundle, (ty, store)| {
+                    .fold(AnyBundle::default(), |mut bundle, (_ty, store)| {
                         let mut temp_store = store.clone_empty();
                         let value = store.swap_remove(index);
                         temp_store.push(value);
@@ -450,11 +450,11 @@ impl<'a, T: 'static> Iterator for QueryColumnIter<'a, T> {
 
 pub struct QueryColumnMut<T: 'static>(QueryColumn<T>);
 
-impl<T> QueryColumnMut<T> {
-    fn new(tx: mpsc::Sender<QueryReturn>) -> Self {
-        QueryColumnMut(QueryColumn::new(tx))
-    }
-}
+//impl<T> QueryColumnMut<T> {
+//    fn new(tx: mpsc::Sender<QueryReturn>) -> Self {
+//        QueryColumnMut(QueryColumn::new(tx))
+//    }
+//}
 
 pub struct QueryColumnIterMut<'a, T: 'static>(
     Option<std::slice::IterMut<'a, T>>,

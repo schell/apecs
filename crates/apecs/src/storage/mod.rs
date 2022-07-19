@@ -9,7 +9,42 @@ pub mod separate;
 
 use std::ops::{Deref, DerefMut};
 
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use tuple_list::TupleList;
+
+pub trait HasId {
+    fn id(&self) -> usize;
+}
+
+impl<T> HasId for Entry<T> {
+    fn id(&self) -> usize {
+        Entry::id(self)
+    }
+}
+
+impl<T> HasId for &Entry<T> {
+    fn id(&self) -> usize {
+        Entry::id(self)
+    }
+}
+
+impl<T> HasId for &mut Entry<T> {
+    fn id(&self) -> usize {
+        Entry::id(self)
+    }
+}
+
+impl<T> HasId for (usize, T) {
+    fn id(&self) -> usize {
+        self.0
+    }
+}
+
+impl HasId for usize {
+    fn id(&self) -> usize {
+        *self
+    }
+}
 
 pub trait IsEntry {
     type Value<'a>
@@ -181,5 +216,180 @@ impl<T> Entry<T> {
 
     pub fn split(self) -> (usize, T) {
         (self.key, self.value)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Maybe<T> {
+    pub key: usize,
+    pub inner: Option<T>,
+}
+
+impl<T> HasId for Maybe<T> {
+    fn id(&self) -> usize {
+        self.key
+    }
+}
+
+impl<T: IsEntry> IsEntry for Maybe<T> {
+    type Value<'a> = Option<T::Value<'a>>
+        where T: 'a;
+
+    fn id(&self) -> usize {
+        self.key
+    }
+
+    fn value(&self) -> Option<T::Value<'_>> {
+        self.inner.as_ref().map(IsEntry::value)
+    }
+}
+
+pub struct MaybeIter<C: IsEntry, T: Iterator<Item = C>> {
+    iter: T,
+    id: usize,
+    next_id: usize,
+    next_entry: Option<C>,
+}
+
+impl<C, T> MaybeIter<C, T>
+where
+    C: IsEntry,
+    T: Iterator<Item = C>,
+{
+    pub(crate) fn new(mut iter: T) -> Self {
+        let next_entry = iter.next();
+        MaybeIter {
+            iter,
+            id: 0,
+            next_id: next_entry.as_ref().map(|e| e.id()).unwrap_or(usize::MAX),
+            next_entry,
+        }
+    }
+}
+
+impl<C, T> Iterator for MaybeIter<C, T>
+where
+    C: IsEntry,
+    T: Iterator<Item = C>,
+{
+    type Item = Maybe<C>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let entry = if self.next_id == self.id {
+            if let Some(entry) = self.next_entry.take() {
+                self.next_entry = self.iter.next();
+                self.next_id = self
+                    .next_entry
+                    .as_ref()
+                    .map(|e| e.id())
+                    .unwrap_or_else(|| usize::MAX);
+                Some(entry)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let maybe = Maybe {
+            key: self.id,
+            inner: entry,
+        };
+        self.id += 1;
+        Some(maybe)
+    }
+}
+
+pub struct MaybeParIter<T>(T);
+
+impl<T: IntoParallelIterator> IntoParallelIterator for MaybeParIter<T> {
+    type Iter = rayon::iter::Map<T::Iter, fn(T::Item) -> Option<T::Item>>;
+
+    type Item = Option<T::Item>;
+
+    fn into_par_iter(self) -> Self::Iter {
+        self.0.into_par_iter().map(Option::Some)
+    }
+}
+
+pub struct Without<T>(pub T);
+
+impl<'a, T, C> IntoParallelIterator for Without<&'a T>
+where
+    &'a T: IntoParallelIterator<Item = Option<C>>,
+{
+    type Iter =
+        rayon::iter::Map<<&'a T as IntoParallelIterator>::Iter, fn(Option<C>) -> Option<()>>;
+
+    type Item = Option<()>;
+
+    fn into_par_iter(self) -> Self::Iter {
+        self.0
+            .into_par_iter()
+            .map(|mitem| if mitem.is_none() { Some(()) } else { None })
+    }
+}
+
+/// An iterator that wraps a storage iterator, producing values
+/// for indicies that **are not** contained within the storage.
+pub struct WithoutIter<T: Iterator> {
+    iter: T,
+    id: usize,
+    next_id: usize,
+}
+
+impl<T, C> WithoutIter<T>
+where
+    C: IsEntry,
+    T: Iterator<Item = C>,
+{
+    pub(crate) fn new(mut iter: T) -> Self {
+        let next_id = iter.next().map(|e| e.id()).unwrap_or_else(|| usize::MAX);
+        WithoutIter {
+            iter,
+            id: 0,
+            next_id,
+        }
+    }
+}
+
+impl<T: Iterator, C> Iterator for WithoutIter<T>
+where
+    C: IsEntry,
+    T: Iterator<Item = C>,
+{
+    type Item = Entry<()>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.id == self.next_id {
+            self.next_id = self
+                .iter
+                .next()
+                .map(|e| e.id())
+                .unwrap_or_else(|| usize::MAX);
+            self.id += 1;
+        }
+
+        let entry = Entry {
+            key: self.id,
+            value: (),
+            changed: 0,
+            added: false,
+        };
+        self.id += 1;
+        Some(entry)
+    }
+}
+
+impl<T, C> IntoIterator for Without<T>
+where
+    C: IsEntry,
+    T: IntoIterator<Item = C>,
+{
+    type Item = Entry<()>;
+
+    type IntoIter = WithoutIter<T::IntoIter>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        WithoutIter::new(self.0.into_iter())
     }
 }

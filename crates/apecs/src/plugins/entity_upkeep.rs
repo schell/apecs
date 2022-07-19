@@ -2,9 +2,9 @@
 //!
 //! Makes sure that destroyed entities have their components removed from
 //! storages.
-use crate::{self as apecs, WriteExpect};
-use crate::storage::WorldStorage;
+use crate::storage::separate::VecStorage;
 use crate::system::{ok, ShouldContinue};
+use crate::{self as apecs, WriteExpect};
 use crate::{world::Entities, CanFetch, Read, Write};
 
 use super::Plugin;
@@ -31,33 +31,34 @@ fn pre_upkeep_system(mut data: PreEntityUpkeepData) -> anyhow::Result<ShouldCont
 }
 
 #[derive(CanFetch)]
-pub struct EntityUpkeep<Storage: Default + Send + Sync + 'static> {
+pub struct EntityUpkeep<T: Send + Sync + 'static> {
     dead_ids: Read<DestroyedIds>,
-    storage: Write<Storage>,
+    storage: Write<VecStorage<T>>,
 }
 
-fn upkeep_system<Storage>(mut data: EntityUpkeep<Storage>) -> anyhow::Result<ShouldContinue>
+fn upkeep_system<T: Send + Sync + 'static>(
+    mut data: EntityUpkeep<T>,
+) -> anyhow::Result<ShouldContinue>
 where
-    Storage: WorldStorage,
 {
     data.storage.upkeep(&data.dead_ids.0);
     ok()
 }
 
 /// The upkeep plugin for a component storage
-pub fn plugin<Storage: WorldStorage>() -> Plugin {
+pub fn plugin<T: Send + Sync + 'static>() -> Plugin {
     Plugin::default()
         .with_system("entity_pre_upkeep", pre_upkeep_system, &[])
         .with_system(
-            &format!("entity_upkeep_{}", std::any::type_name::<Storage>()),
-            upkeep_system::<Storage>,
+            &format!("entity_upkeep_{}", std::any::type_name::<VecStorage<T>>()),
+            upkeep_system::<T>,
             &["entity_pre_upkeep"],
         )
 }
 
 #[cfg(test)]
 mod test {
-    use crate::{world::Entities, storage::*, world::World, Write};
+    use crate::{storage::separate::*, world::Entities, world::World, Write};
 
     #[test]
     fn can_run_storage_upkeep() {
@@ -65,10 +66,6 @@ mod test {
             .is_test(true)
             .filter_level(log::LevelFilter::Trace)
             .try_init();
-
-        impl StoredComponent for usize {
-            type StorageType = VecStorage<Self>;
-        }
 
         let mut world = World::default();
         world.with_default_storage::<usize>().unwrap();

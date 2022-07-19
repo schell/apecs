@@ -1,7 +1,6 @@
-use std::marker::PhantomData;
-
-use apecs::{anyhow, join::*, storage::*, system::*, world::*, CanFetch, IsResource, Write};
+use apecs::{anyhow, storage::separate::*, system::*, world::*, CanFetch};
 use cgmath::*;
+use rayon::prelude::*;
 
 #[derive(Copy, Clone)]
 pub struct Transform(Matrix4<f32>);
@@ -16,16 +15,12 @@ pub struct Rotation(Vector3<f32>);
 pub struct Velocity(Vector3<f32>);
 
 #[derive(CanFetch)]
-struct HeavyComputeData<P: Default + IsResource, T: Default + IsResource> {
-    positions: Write<P>,
-    transforms: Write<T>,
+struct HeavyComputeData {
+    positions: WriteStore<Position>,
+    transforms: WriteStore<Transform>,
 }
 
-fn system<P, T>(mut data: HeavyComputeData<P, T>) -> anyhow::Result<ShouldContinue>
-where
-    P: WorldStorage<Component = Position>,
-    T: WorldStorage<Component = Transform>,
-{
+fn system(mut data: HeavyComputeData) -> anyhow::Result<ShouldContinue> {
     use cgmath::Transform;
     (&mut data.positions, &mut data.transforms)
         .par_join()
@@ -38,30 +33,15 @@ where
     ok()
 }
 
-pub struct Benchmark<T, P, R, V>
-where
-    T: IsResource,
-    P: IsResource,
-    R: IsResource,
-    V: IsResource,
-{
-    world: World,
-    _phantom: PhantomData<(T, P, R, V)>,
-}
+pub struct Benchmark(World);
 
-impl<T, P, R, V> Benchmark<T, P, R, V>
-where
-    P: WorldStorage<Component = Position>,
-    T: WorldStorage<Component = Transform>,
-    R: WorldStorage<Component = Rotation>,
-    V: WorldStorage<Component = Velocity>,
-{
+impl Benchmark {
     pub fn new() -> anyhow::Result<Self> {
         let mut entities = Entities::default();
-        let mut transforms: T = T::new_with_capacity(1000);
-        let mut positions: P = P::new_with_capacity(1000);
-        let mut rotations: R = R::new_with_capacity(1000);
-        let mut velocities: V = V::new_with_capacity(1000);
+        let mut transforms = VecStorage::<Transform>::new_with_capacity(1000);
+        let mut positions = VecStorage::<Position>::new_with_capacity(1000);
+        let mut rotations = VecStorage::<Rotation>::new_with_capacity(1000);
+        let mut velocities = VecStorage::<Velocity>::new_with_capacity(1000);
         (0..1000).for_each(|_| {
             let e = entities.create();
             transforms.insert(e.id(), Transform(Matrix4::<f32>::from_angle_x(Rad(1.2))));
@@ -76,15 +56,12 @@ where
             .with_resource(positions)?
             .with_resource(rotations)?
             .with_resource(velocities)?
-            .with_system("heavy_compute", system::<P, T>)?;
+            .with_system("heavy_compute", system)?;
 
-        Ok(Self {
-            world,
-            _phantom: PhantomData,
-        })
+        Ok(Self(world))
     }
 
     pub fn run(&mut self) {
-        self.world.tick_sync().unwrap();
+        self.0.tick_sync().unwrap();
     }
 }

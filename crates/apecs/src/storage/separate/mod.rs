@@ -1,9 +1,4 @@
 //! Entity component storage traits.
-use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
-use std::ops::{Deref, DerefMut};
-
-// mod range_map;
-// pub use range_map::*;
 // mod tracking;
 // pub use tracking::*;
 mod vec;
@@ -11,514 +6,53 @@ pub use vec::*;
 pub mod join;
 pub use join::*;
 
-use crate::{IsResource, Read, ReadExpect, Write, WriteExpect};
-
-use super::{Entry, IsEntry};
+use crate::{world::World, Read, Write};
 
 pub mod bitset {
+    // TODO: Remove hibitset
     pub use hibitset::*;
 }
-
-pub struct Without<T>(pub T);
-
-impl<'a, T, C> IntoParallelIterator for Without<&'a T>
-where
-    &'a T: IntoParallelIterator<Item = Option<C>>,
-{
-    type Iter =
-        rayon::iter::Map<<&'a T as IntoParallelIterator>::Iter, fn(Option<C>) -> Option<()>>;
-
-    type Item = Option<()>;
-
-    fn into_par_iter(self) -> Self::Iter {
-        self.0
-            .into_par_iter()
-            .map(|mitem| if mitem.is_none() { Some(()) } else { None })
-    }
-}
-
-/// An iterator that wraps a storage iterator, producing values
-/// for indicies that **are not** contained within the storage.
-pub struct WithoutIter<T: Iterator> {
-    iter: T,
-    id: usize,
-    next_id: usize,
-}
-
-impl<T, C> WithoutIter<T>
-where
-    C: IsEntry,
-    T: Iterator<Item = C>,
-{
-    pub(crate) fn new(mut iter: T) -> Self {
-        let next_id = iter.next().map(|e| e.id()).unwrap_or_else(|| usize::MAX);
-        WithoutIter {
-            iter,
-            id: 0,
-            next_id,
-        }
-    }
-}
-
-impl<T: Iterator, C> Iterator for WithoutIter<T>
-where
-    C: IsEntry,
-    T: Iterator<Item = C>,
-{
-    type Item = Entry<()>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        while self.id == self.next_id {
-            self.next_id = self
-                .iter
-                .next()
-                .map(|e| e.id())
-                .unwrap_or_else(|| usize::MAX);
-            self.id += 1;
-        }
-
-        let entry = Entry {
-            key: self.id,
-            value: (),
-            changed: 0,
-            added: false,
-        };
-        self.id += 1;
-        Some(entry)
-    }
-}
-
-impl<T, C> IntoIterator for Without<T>
-where
-    C: IsEntry,
-    T: IntoIterator<Item = C>,
-{
-    type Item = Entry<()>;
-
-    type IntoIter = WithoutIter<T::IntoIter>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        WithoutIter::new(self.0.into_iter())
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Maybe<T> {
-    pub key: usize,
-    pub inner: Option<T>,
-}
-
-impl<T> HasId for Maybe<T> {
-    fn id(&self) -> usize {
-        self.key
-    }
-}
-
-impl<T: IsEntry> IsEntry for Maybe<T> {
-    type Value<'a> = Option<T::Value<'a>>
-        where T: 'a;
-
-    fn id(&self) -> usize {
-        self.key
-    }
-
-    fn value(&self) -> Option<T::Value<'_>> {
-        self.inner.as_ref().map(IsEntry::value)
-    }
-}
-
-pub struct MaybeIter<C: IsEntry, T: Iterator<Item = C>> {
-    iter: T,
-    id: usize,
-    next_id: usize,
-    next_entry: Option<C>,
-}
-
-impl<C, T> MaybeIter<C, T>
-where
-    C: IsEntry,
-    T: Iterator<Item = C>,
-{
-    pub(crate) fn new(mut iter: T) -> Self {
-        let next_entry = iter.next();
-        MaybeIter {
-            iter,
-            id: 0,
-            next_id: next_entry.as_ref().map(|e| e.id()).unwrap_or(usize::MAX),
-            next_entry,
-        }
-    }
-}
-
-impl<C, T> Iterator for MaybeIter<C, T>
-where
-    C: IsEntry,
-    T: Iterator<Item = C>,
-{
-    type Item = Maybe<C>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let entry = if self.next_id == self.id {
-            if let Some(entry) = self.next_entry.take() {
-                self.next_entry = self.iter.next();
-                self.next_id = self
-                    .next_entry
-                    .as_ref()
-                    .map(|e| e.id())
-                    .unwrap_or_else(|| usize::MAX);
-                Some(entry)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        let maybe = Maybe {
-            key: self.id,
-            inner: entry,
-        };
-        self.id += 1;
-        Some(maybe)
-    }
-}
-
-pub struct MaybeParIter<T>(T);
-
-impl<T: IntoParallelIterator> IntoParallelIterator for MaybeParIter<T> {
-    type Iter = rayon::iter::Map<T::Iter, fn(T::Item) -> Option<T::Item>>;
-
-    type Item = Option<T::Item>;
-
-    fn into_par_iter(self) -> Self::Iter {
-        self.0.into_par_iter().map(Option::Some)
-    }
-}
-
-///// A storage that can only be read from
-// pub trait CanReadStorage: Send + Sync {
-//    type Component: Send + Sync;
-//
-//    type Iter<'a>: Iterator<Item = &'a Entry<Self::Component>>
-//    where
-//        Self: 'a;
-//
-//    type ParIter<'a>: IndexedParallelIterator<Item = Option<&'a
-// Entry<Self::Component>>>    where
-//        Self: 'a;
-//
-//    /// Return the last (alive) entry.
-//    fn last(&self) -> Option<&Entry<Self::Component>>;
-//
-//    /// Returns the length of the storage, which is really how many
-//    /// indices might be stored (based on the last stored entry),
-//    /// *not the number of actual entries*.
-//    fn len(&self) -> usize {
-//        self.last().map(|e| e.id() + 1).unwrap_or(0)
-//    }
-//
-//    fn is_empty(&self) -> bool {
-//        self.len() == 0
-//    }
-//
-//    fn get(&self, id: usize) -> Option<&Self::Component>;
-//
-//    /// Return an iterator over all entities and indices
-//    fn iter(&self) -> Self::Iter<'_>;
-//
-//    /// Return an iterator over all contiguous entities, regardless
-//    /// of whether they reside in the storage.
-//    ///
-//    /// ## WARNING
-//    /// This iterator is unconstrained. It does not terminate.
-//    fn maybe(&self) -> MaybeIter<&Entry<Self::Component>, Self::Iter<'_>> {
-//        MaybeIter::new(self.iter())
-//    }
-//
-//    fn par_iter(&self) -> Self::ParIter<'_>;
-//
-//    fn maybe_par_iter(&self) -> MaybeParIter<Self::ParIter<'_>> {
-//        MaybeParIter(self.par_iter())
-//    }
-//}
-// impl<T: IsResource + CanReadStorage> CanReadStorage for ReadExpect<T> {
-//    type Component = T::Component;
-//
-//    type Iter<'a> = T::Iter<'a>
-//    where
-//        Self: 'a;
-//
-//    type ParIter<'a> = T::ParIter<'a>
-//    where
-//        Self: 'a;
-//
-//    fn last(&self) -> Option<&crate::storage::Entry<Self::Component>> {
-//        self.deref().last()
-//    }
-//
-//    fn get(&self, id: usize) -> Option<&Self::Component> {
-//        self.deref().get(id)
-//    }
-//
-//    fn iter(&self) -> Self::Iter<'_> {
-//        self.deref().iter()
-//    }
-//
-//    fn par_iter(&self) -> Self::ParIter<'_> {
-//        self.deref().par_iter()
-//    }
-//}
-// impl<T: IsResource + Default + CanReadStorage> CanReadStorage for Read<T> {
-//    type Component = T::Component;
-//
-//    type Iter<'a> = T::Iter<'a>
-//    where
-//        Self: 'a;
-//
-//    type ParIter<'a> = T::ParIter<'a>
-//    where
-//        Self: 'a;
-//
-//    fn last(&self) -> Option<&crate::storage::Entry<Self::Component>> {
-//        self.deref().last()
-//    }
-//
-//    fn get(&self, id: usize) -> Option<&Self::Component> {
-//        self.deref().get(id)
-//    }
-//
-//    fn iter(&self) -> Self::Iter<'_> {
-//        self.deref().iter()
-//    }
-//
-//    fn par_iter(&self) -> Self::ParIter<'_> {
-//        self.deref().par_iter()
-//    }
-//}
-// impl<'a, S: CanReadStorage> CanReadStorage for &'a S {
-//    type Component = S::Component;
-//
-//    type Iter<'b> = S::Iter<'b>
-//    where
-//        Self: 'b;
-//
-//    fn last(&self) -> Option<&Entry<Self::Component>> {
-//        <S as CanReadStorage>::last(self)
-//    }
-//
-//    fn get(&self, id: usize) -> Option<&Self::Component> {
-//        <S as CanReadStorage>::get(self, id)
-//    }
-//
-//    fn iter(&self) -> Self::Iter<'_> {
-//        <S as CanReadStorage>::iter(self)
-//    }
-//
-//    type ParIter<'b> = S::ParIter<'b>
-//    where
-//        Self: 'b;
-//
-//    fn par_iter(&self) -> Self::ParIter<'_> {
-//        <S as CanReadStorage>::par_iter(self)
-//    }
-//}
-// impl<T: IsResource + CanReadStorage> CanReadStorage for WriteExpect<T> {
-//    type Component = T::Component;
-//
-//    type Iter<'a> = T::Iter<'a>
-//    where
-//        Self: 'a;
-//
-//    type ParIter<'a> = T::ParIter<'a>
-//    where
-//        Self: 'a;
-//
-//    fn get(&self, id: usize) -> Option<&Self::Component> {
-//        self.get(id)
-//    }
-//
-//    fn iter(&self) -> Self::Iter<'_> {
-//        self.iter()
-//    }
-//
-//    fn par_iter(&self) -> Self::ParIter<'_> {
-//        self.par_iter()
-//    }
-//
-//    fn last(&self) -> Option<&crate::storage::Entry<Self::Component>> {
-//        self.last()
-//    }
-//}
-//
-///// A storage that can be read and written
-// pub trait CanWriteStorage: CanReadStorage {
-//    type IterMut<'a>: Iterator<Item = &'a mut Entry<Self::Component>>
-//    where
-//        Self: 'a;
-//
-//    type ParIterMut<'a>: IndexedParallelIterator<Item = Option<&'a mut
-// Entry<Self::Component>>>    where
-//        Self: 'a;
-//
-//    /// Get a mutable reference to the component with the given id.
-//    ///
-//    /// ## NOTE
-//    /// This will cause the component's entry to be marked as changed.
-//    fn get_mut(&mut self, id: usize) -> Option<&mut Self::Component>;
-//
-//    fn insert(&mut self, id: usize, component: Self::Component) ->
-// Option<Self::Component>;
-//
-//    fn remove(&mut self, id: usize) -> Option<Self::Component>;
-//
-//    /// Return an iterator to all entries, mutably.
-//    ///
-//    /// ## NOTE
-//    /// Iterating over the entries mutably will _not_ cause the entries to be
-//    /// marked as changed. Only after mutating the underlying component
-//    /// through [`DerefMut`] or [`Entry::set_value`], etc, will a change be
-//    /// reflected in the entry.
-//    fn iter_mut(&mut self) -> Self::IterMut<'_>;
-//
-//    /// Return a parallel iterator to all entries, mutably.
-//    ///
-//    /// ## NOTE
-//    /// Iterating over the entries mutably will _not_ cause the entries to be
-//    /// marked as changed. Only after mutating the underlying component
-//    /// through [`DerefMut`] or [`Entry::set_value`], etc, will a change be
-//    /// reflected in the entry.
-//    fn par_iter_mut(&mut self) -> Self::ParIterMut<'_>;
-//
-//    /// Return an iterator over all contiguous entities, regardless
-//    /// of whether they reside in the storage. Uses mutable components.
-//    fn maybe_mut(&mut self) -> MaybeIter<&mut Entry<Self::Component>,
-// Self::IterMut<'_>> {        MaybeIter::new(self.iter_mut())
-//    }
-//
-//    fn maybe_par_iter_mut(&mut self) -> MaybeParIter<Self::ParIterMut<'_>> {
-//        MaybeParIter(self.par_iter_mut())
-//    }
-//}
-// impl<T: IsResource + CanWriteStorage> CanWriteStorage for WriteExpect<T> {
-//    type IterMut<'a> = T::IterMut<'a>
-//    where
-//        Self: 'a;
-//
-//    type ParIterMut<'a> = T::ParIterMut<'a>
-//    where
-//        Self: 'a;
-//
-//    fn get_mut(&mut self, id: usize) -> Option<&mut Self::Component> {
-//        self.get_mut(id)
-//    }
-//
-//    fn insert(&mut self, id: usize, component: Self::Component) ->
-// Option<Self::Component> {        self.insert(id, component)
-//    }
-//
-//    fn remove(&mut self, id: usize) -> Option<Self::Component> {
-//        self.remove(id)
-//    }
-//
-//    fn iter_mut(&mut self) -> Self::IterMut<'_> {
-//        self.iter_mut()
-//    }
-//
-//    fn par_iter_mut(&mut self) -> Self::ParIterMut<'_> {
-//        self.par_iter_mut()
-//    }
-//}
-
-///// Storages that can be read from, written to, joined in parallel, created by
-///// default and stored as a resource in the world.
-// pub trait WorldStorage: CanReadStorage + CanWriteStorage + Default + 'static
-// {    /// Create a new storage with a pre-allocated capacity
-//    fn new_with_capacity(cap: usize) -> Self;
-//
-//    /// Perform entity upkeep, defragmentation or any other upkeep on the
-//    /// storage. When the storage is added through
-//    /// [`WorldStorageExt::with_storage`]
-//    /// or [`WorldStorageExt::with_default_storage`], this function will be
-//    /// called once per frame, automatically.
-//    fn upkeep(&mut self, dead_ids: &[usize]) {
-//        for id in dead_ids {
-//            let _ = self.remove(*id);
-//        }
-//    }
-//}
-
-// pub trait StoredComponent: Send + Sync + 'static {
-//    type StorageType: WorldStorage<Component = Self>;
-//}
 
 pub type ReadStore<T> = Read<VecStorage<T>>;
 pub type WriteStore<T> = Write<VecStorage<T>>;
 
-// impl<T: IsResource + Default + CanReadStorage> CanReadStorage for Write<T> {
-//    type Component = T::Component;
-//
-//    type Iter<'a> = T::Iter<'a>
-//    where
-//        Self: 'a;
-//
-//    type ParIter<'a> = T::ParIter<'a>
-//    where
-//        Self: 'a;
-//
-//    fn get(&self, id: usize) -> Option<&Self::Component> {
-//        self.get(id)
-//    }
-//
-//    fn iter(&self) -> Self::Iter<'_> {
-//        self.iter()
-//    }
-//
-//    fn par_iter(&self) -> Self::ParIter<'_> {
-//        self.par_iter()
-//    }
-//
-//    fn last(&self) -> Option<&crate::storage::Entry<Self::Component>> {
-//        self.last()
-//    }
-//}
-// impl<T: IsResource + Default + CanWriteStorage> CanWriteStorage for Write<T>
-// {    type IterMut<'a> = T::IterMut<'a>
-//         where
-//             Self: 'a;
-//
-//    type ParIterMut<'a> = T::ParIterMut<'a>
-//         where
-//             Self: 'a;
-//
-//    fn get_mut(&mut self, id: usize) -> Option<&mut Self::Component> {
-//        self.get_mut(id)
-//    }
-//
-//    fn insert(&mut self, id: usize, component: Self::Component) ->
-// Option<Self::Component> {        self.insert(id, component)
-//    }
-//
-//    fn remove(&mut self, id: usize) -> Option<Self::Component> {
-//        self.remove(id)
-//    }
-//
-//    fn iter_mut(&mut self) -> Self::IterMut<'_> {
-//        self.iter_mut()
-//    }
-//
-//    fn par_iter_mut(&mut self) -> Self::ParIterMut<'_> {
-//        self.par_iter_mut()
-//    }
-//}
+pub trait SeparateStorageExt {
+    fn with_storage<T: Send + Sync + 'static>(
+        &mut self,
+        store: VecStorage<T>,
+    ) -> anyhow::Result<&mut Self>;
+
+    fn with_default_storage<T: Send + Sync + 'static>(&mut self) -> anyhow::Result<&mut Self>;
+}
+
+impl SeparateStorageExt for World {
+    fn with_storage<T: Send + Sync + 'static>(
+        &mut self,
+        store: VecStorage<T>,
+    ) -> anyhow::Result<&mut Self> {
+        self.with_resource(store)?
+            .with_plugin(crate::plugins::entity_upkeep::plugin::<VecStorage<T>>())
+    }
+
+    fn with_default_storage<T: Send + Sync + 'static>(&mut self) -> anyhow::Result<&mut Self> {
+        let store = VecStorage::<T>::default();
+        self.with_resource(store)?
+            .with_plugin(crate::plugins::entity_upkeep::plugin::<T>())
+    }
+}
 
 #[cfg(test)]
 pub mod test {
     use crate::{
         self as apecs,
-        storage::{separate::*, Entry, IsEntry},
+        storage::{separate::*, Entry, IsEntry, Maybe},
         system::{ok, ShouldContinue},
         world::*,
         CanFetch,
     };
+
+    use rayon::prelude::*;
+    use std::ops::DerefMut;
 
     #[test]
     pub fn can_track_stores() {
@@ -526,11 +60,6 @@ pub mod test {
         vs.insert(0, 0usize);
         vs.insert(1, 1);
         vs.insert(2, 2);
-
-        // let mut rs = RangeStore::default();
-        // rs.insert(0, 0);
-        // rs.insert(1, 1);
-        // rs.insert(2, 2);
 
         crate::system::increment_current_iteration();
 
@@ -668,10 +197,7 @@ pub mod test {
         }
 
         run::<VecStorage<f32>, VecStorage<&'static str>, false>().unwrap();
-        // run::<RangeStore<f32>, RangeStore<&'static str>, false>().unwrap();
-
         run::<VecStorage<f32>, VecStorage<&'static str>, true>().unwrap();
-        // run::<RangeStore<f32>, RangeStore<&'static str>, true>().unwrap();
     }
 
     #[test]
@@ -718,29 +244,19 @@ pub mod test {
         assert_eq!(unwrap(&mut joined), (10, "666".to_string(), Some(10)));
         assert_eq!(joined.next(), None);
 
-        // let joined = (&vs_abc, vs_246.maybe_par_iter())
-        //    .par_join()
-        //    .map(|(es, ns)| (es.as_str(), ns.as_ref().map(|e| e.value)))
-        //    .collect::<Vec<_>>();
-        // assert_eq!(
-        //    joined,
-        //    vec![
-        //        ("abc", Some(0)),
-        //        ("def", None),
-        //        ("hij", Some(2)),
-        //        ("666", Some(10))
-        //    ]
-        //);
-
-        // let mut range = RangeStore::<usize>::default();
-        // range.insert(0, 0);
-        // let joined = (&range,).par_join().map(|e|
-        // e.value).collect::<Vec<_>>(); assert_eq!(joined, vec![0]);
-        // let joined = (&mut range,)
-        //    .par_join()
-        //    .map(|e| e.value)
-        //    .collect::<Vec<_>>();
-        // assert_eq!(joined, vec![0]);
+        let joined = (&vs_abc, vs_246.maybe_par_iter())
+            .par_join()
+            .map(|(es, ns)| (es.as_str(), ns.as_ref().map(|e| e.value)))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            joined,
+            vec![
+                ("abc", Some(0)),
+                ("def", None),
+                ("hij", Some(2)),
+                ("666", Some(10))
+            ]
+        );
     }
 
     #[test]
@@ -789,19 +305,4 @@ pub mod test {
         let years: f32 = max / (1000.0 * 60.0 * 60.0 * 60.0 * 24.0 * 365.0);
         assert!(1.0 <= years, "{} years", years);
     }
-
-    //#[test]
-    // fn can_derive_storedcomponent() {
-    //    #[derive(Debug, StoredComponent_Vec)]
-    //    struct MyComponent(f32);
-
-    //    let _store: <MyComponent as StoredComponent>::StorageType =
-    // Default::default();
-
-    //    #[derive(Debug, StoredComponent_Range)]
-    //    struct OtherComponent(f32);
-
-    //    let _store: <OtherComponent as StoredComponent>::StorageType =
-    // Default::default();
-    //}
 }

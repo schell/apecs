@@ -2,14 +2,12 @@
 //!
 //! Joining is to separate storages as querying is to archetypal storage.
 
-use std::{cmp::Ordering, fs::File};
+use std::cmp::Ordering;
 
-use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator, MultiZip};
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use tuple_list::{Tuple, TupleList};
 
-use crate::storage::Entry;
-
-use super::Maybe;
+use crate::storage::{Entry, HasId, Maybe};
 
 /// Converts a `TupleList` of `IntoIterator`s into a `TupleList` of `Iterator`s.
 pub trait TupleListIntoIter {
@@ -35,40 +33,6 @@ where
 
     fn tuple_list_into_iter(self) -> Self::Output {
         (self.0.into_iter(), self.1.tuple_list_into_iter())
-    }
-}
-
-pub trait HasId {
-    fn id(&self) -> usize;
-}
-
-impl<T> HasId for Entry<T> {
-    fn id(&self) -> usize {
-        Entry::id(self)
-    }
-}
-
-impl<T> HasId for &Entry<T> {
-    fn id(&self) -> usize {
-        Entry::id(self)
-    }
-}
-
-impl<T> HasId for &mut Entry<T> {
-    fn id(&self) -> usize {
-        Entry::id(self)
-    }
-}
-
-impl<T> HasId for (usize, T) {
-    fn id(&self) -> usize {
-        self.0
-    }
-}
-
-impl HasId for usize {
-    fn id(&self) -> usize {
-        *self
     }
 }
 
@@ -127,6 +91,7 @@ pub trait TupleListSyncIter {
 impl TupleListSyncIter for () {
     type Item = ();
 
+    #[inline]
     fn next_item(&mut self) -> Option<Self::Item> {
         Some(())
     }
@@ -141,6 +106,7 @@ where
 {
     type Item = (<Head as Iterator>::Item, <Tail as TupleListSyncIter>::Item);
 
+    #[inline]
     fn next_item(&mut self) -> Option<Self::Item> {
         let mut head = self.0.next()?;
         let mut tail = self.1.next_item()?;
@@ -164,6 +130,7 @@ where
 {
     type Item = <T as TupleListSyncIter>::Item;
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         self.0.next_item()
     }
@@ -201,29 +168,71 @@ where
 {
 }
 
-pub trait TupleOfOptions: Tuple {
-    type Output;
+pub trait TupleOfOptions {
+    type Output: TupleList;
 
     fn into_option_of_tuple(self) -> Option<Self::Output>;
 }
 
-pub trait ParJoin: Tuple + IntoParallelIterator
+impl TupleOfOptions for () {
+    type Output = ();
+
+    fn into_option_of_tuple(self) -> Option<Self::Output> {
+        Some(())
+    }
+}
+
+impl<Head, Tail> TupleOfOptions for (Option<Head>, Tail)
 where
-    <Self as IntoParallelIterator>::Item: TupleOfOptions
+    (Head, Tail::Output): TupleList,
+    Tail: TupleOfOptions + TupleList,
 {
-    fn par_join(self) -> ()  {
+    type Output = (Head, Tail::Output);
+
+    #[inline]
+    fn into_option_of_tuple(self) -> Option<Self::Output> {
+        let head = self.0?;
+        let tail = self.1.into_option_of_tuple()?;
+        Some((head, tail))
+    }
+}
+
+pub trait ParJoin: Sized + IntoParallelIterator
+where
+    <Self as IntoParallelIterator>::Item: Tuple,
+    <<Self as IntoParallelIterator>::Item as Tuple>::TupleList: TupleOfOptions,
+    <<<<Self as IntoParallelIterator>::Item as Tuple>::TupleList as TupleOfOptions>::Output as TupleList>::Tuple: Send,
+{
+    fn par_join(
+        self,
+    ) -> rayon::iter::FilterMap<
+        <Self as IntoParallelIterator>::Iter,
+        fn(
+            <Self as IntoParallelIterator>::Item,
+        ) -> Option<
+            <<<<Self as IntoParallelIterator>::Item as Tuple>::TupleList as TupleOfOptions>::Output as TupleList>::Tuple,
+        >,
+    > {
         let multizip: <Self as IntoParallelIterator>::Iter = self.into_par_iter();
         multizip.filter_map(|tuple_of_options| {
-            tuple_of_options.into_option_of_tuple() // <<Self as rayon::iter::IntoParallelIterator>::Item as TupleOfOptions>::Output
+            Some(tuple_of_options.into_tuple_list().into_option_of_tuple()?.into_tuple())
         })
     }
 }
 
+impl<T> ParJoin for T
+where
+    Self: Sized + IntoParallelIterator,
+<Self as IntoParallelIterator>::Item: Tuple,
+<<Self as IntoParallelIterator>::Item as Tuple>::TupleList: TupleOfOptions,
+<<<<Self as IntoParallelIterator>::Item as Tuple>::TupleList as TupleOfOptions>::Output as TupleList>::Tuple: Send,
+{
+}
+
 #[cfg(test)]
 mod test {
-    use tuple_list::Tuple;
-
-    use super::*;
+    use crate::storage::separate::*;
+    use rayon::prelude::*;
 
     #[test]
     fn join_tuple_list_iters() {
@@ -240,5 +249,20 @@ mod test {
         assert_eq!((6u32, "six", true, 6.0), join_iter.next().unwrap());
         assert!(join_iter.next().is_none());
         assert_eq!(vec![(3, 3, 3, 3), (6, 6, 6, 6)], ids);
+    }
+
+    #[test]
+    fn par_join_vec_sanity() {
+        let mut u32s = VecStorage::<u32>::default();
+        u32s.insert(0, 1);
+        u32s.insert(0, 2);
+        u32s.insert(0, 3);
+        let mut f32s = VecStorage::<f32>::default();
+        f32s.insert(0, 1.0);
+        f32s.insert(0, 2.0);
+        f32s.insert(0, 3.0);
+        (&u32s, &f32s)
+            .par_join()
+            .for_each(|(u, f)| assert_eq!(*u.value() as f32, *f.value()));
     }
 }

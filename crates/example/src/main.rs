@@ -67,11 +67,11 @@ async fn print_system(mut facade: Facade) -> anyhow::Result<()> {
     loop {
         let positions = facade.fetch::<Read<VecStorage<Position>>>().await?;
         let mut line = vec![" "; 80];
-        for position in (&positions,).join() {
+        for position in positions.iter() {
             anyhow::ensure!(
-                position.x >= 0.0 && position.x <= 79.0,
+                position.value().x >= 0.0 && position.value().x <= 79.0,
                 "{} is an invalid position",
-                position.x
+                position.value().x
             );
             line[position.x.floor() as usize] = "x";
         }

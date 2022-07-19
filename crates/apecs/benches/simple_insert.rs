@@ -1,65 +1,57 @@
-use std::marker::PhantomData;
-
-use apecs::{
-    storage::{CanWriteStorage, WorldStorage},
-    world::*,
-    Write,
-};
+use apecs::storage::{archetype::AllArchetypes, separate::*};
 use cgmath::*;
 
-#[derive(Copy, Clone)]
 pub struct Transform(Matrix4<f32>);
-
-#[derive(Copy, Clone)]
 pub struct Position(Vector3<f32>);
-
-#[derive(Copy, Clone)]
 pub struct Rotation(Vector3<f32>);
-
-#[derive(Copy, Clone)]
 pub struct Velocity(Vector3<f32>);
 
-pub struct Benchmark<
-    T: WorldStorage<Component = Transform>,
-    P: WorldStorage<Component = Position>,
-    R: WorldStorage<Component = Rotation>,
-    V: WorldStorage<Component = Velocity>,
->(PhantomData<(T, P, R, V)>);
+pub struct BenchmarkSeparate {
+    ts: VecStorage<Transform>,
+    ps: VecStorage<Position>,
+    rs: VecStorage<Rotation>,
+    vs: VecStorage<Velocity>,
+}
 
-impl<T, P, R, V> Benchmark<T, P, R, V>
-where
-    T: WorldStorage<Component = Transform>,
-    P: WorldStorage<Component = Position>,
-    R: WorldStorage<Component = Rotation>,
-    V: WorldStorage<Component = Velocity>,
-{
+impl BenchmarkSeparate {
     pub fn new() -> Self {
-        Self(PhantomData)
+        BenchmarkSeparate {
+            ts: VecStorage::<Transform>::new_with_capacity(10000),
+            ps: VecStorage::<Position>::new_with_capacity(10000),
+            rs: VecStorage::<Rotation>::new_with_capacity(10000),
+            vs: VecStorage::<Velocity>::new_with_capacity(10000),
+        }
     }
 
     pub fn run(&mut self) {
-        let mut world = World::default();
-        world
-            .with_resource(T::new_with_capacity(10000))
-            .unwrap()
-            .with_resource(P::new_with_capacity(10000))
-            .unwrap()
-            .with_resource(R::new_with_capacity(10000))
-            .unwrap()
-            .with_resource(V::new_with_capacity(10000))
-            .unwrap();
-
-        let (mut es, mut ts, mut ps, mut rs, mut vs) = world
-            .fetch::<(Write<Entities>, Write<T>, Write<P>, Write<R>, Write<V>)>()
-            .unwrap();
-
-        (0..10000).for_each(|_| {
-            let e = es.create();
-            let id = e.id();
-            ts.insert(id, Transform(Matrix4::<f32>::from_scale(1.0)));
-            ps.insert(id, Position(Vector3::unit_x()));
-            rs.insert(id, Rotation(Vector3::unit_x()));
-            vs.insert(id, Velocity(Vector3::unit_x()));
+        (0..10000).for_each(|id| {
+            self.ts
+                .insert(id, Transform(Matrix4::<f32>::from_scale(1.0)));
+            self.ps.insert(id, Position(Vector3::unit_x()));
+            self.rs.insert(id, Rotation(Vector3::unit_x()));
+            self.vs.insert(id, Velocity(Vector3::unit_x()));
         });
+    }
+}
+
+pub struct BenchmarkArchetype(AllArchetypes);
+
+impl BenchmarkArchetype {
+    pub fn new() -> Self {
+        BenchmarkArchetype(AllArchetypes::default())
+    }
+
+    pub fn run(&mut self) {
+        (0..10000).for_each(|id| {
+            let _ = self.0.insert_bundle(
+                id,
+                (
+                    Transform(Matrix4::<f32>::from_scale(1.0)),
+                    Position(Vector3::unit_x()),
+                    Rotation(Vector3::unit_x()),
+                    Velocity(Vector3::unit_x()),
+                ),
+            );
+        })
     }
 }

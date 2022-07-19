@@ -1,6 +1,6 @@
 use std::ops::DerefMut;
 
-use apecs::{storage::*, world::*};
+use apecs::{storage::separate::*, world::*};
 
 macro_rules! create_entities {
     ($store:expr; $datas:ident; $entities:ident; $( $variants:ident ),*) => {
@@ -19,7 +19,7 @@ macro_rules! create_entities {
 
 pub struct Data(f32);
 
-pub fn tick<S: CanWriteStorage<Component = Data> + Send + Sync + 'static>(data_storage: &mut S) {
+pub fn tick(data_storage: &mut VecStorage<Data>) {
     for data in data_storage.iter_mut() {
         data.deref_mut().0 *= 2.0;
     }
@@ -29,12 +29,5 @@ pub fn vec() -> VecStorage<Data> {
     let mut entities = Entities::default();
     let mut datas: VecStorage<Data> = VecStorage::new_with_capacity(26 * 20);
     create_entities!(VecStorage::new_with_capacity(20); datas; entities; A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z);
-    datas
-}
-
-pub fn range() -> RangeStore<Data> {
-    let mut entities = Entities::default();
-    let mut datas: RangeStore<Data> = RangeStore::new_with_capacity(26 * 20);
-    create_entities!(RangeStore::default(); datas; entities; A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z);
     datas
 }

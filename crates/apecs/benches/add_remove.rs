@@ -1,35 +1,24 @@
-use std::marker::PhantomData;
+use apecs::{storage::{separate::*, archetype::*}, world::*, Write};
 
-use apecs::{storage::*, world::*, Write};
-
-// TODO: Remove clone constraint
-#[derive(Clone)]
 pub struct A(f32);
-
-#[derive(Clone)]
 pub struct B(f32);
 
-pub struct Benchmark<Store1, Store2> {
+pub struct BenchmarkSeparate {
     world: World,
     entities: Vec<Entity>,
-    _phantom: PhantomData<(Store1, Store2)>,
 }
 
-impl<S1, S2> Benchmark<S1, S2>
-where
-    S1: WorldStorage<Component = A>,
-    S2: WorldStorage<Component = B>,
-{
+impl BenchmarkSeparate {
     pub fn new() -> Self {
         let mut world = World::default();
         world
-            .with_resource(S1::default())
+            .with_resource(VecStorage::<A>::new_with_capacity(10001))
             .unwrap()
-            .with_resource(S2::default())
+            .with_resource(VecStorage::<B>::new_with_capacity(10001))
             .unwrap();
 
         let entities = {
-            let (mut entities, mut a_storage): (Write<Entities>, Write<S1>) =
+            let (mut entities, mut a_storage): (Write<Entities>, WriteStore<A>) =
                 world.fetch().unwrap();
             (0..10000)
                 .map(|_| {
@@ -43,12 +32,55 @@ where
         Self {
             world,
             entities,
-            _phantom: PhantomData,
         }
     }
 
     pub fn run(&mut self) {
-        let mut b_storage: Write<S2> = self.world.fetch().unwrap();
+        let mut b_storage: WriteStore<B> = self.world.fetch().unwrap();
+        for entity in &self.entities {
+            let _ = b_storage.insert(entity.id(), B(0.0));
+        }
+
+        for entity in &self.entities {
+            b_storage.remove(entity.id());
+        }
+    }
+}
+
+pub struct BenchmarkArchetype {
+    world: World,
+    entities: Vec<Entity>,
+}
+
+impl BenchmarkArchetype {
+    pub fn new() -> Self {
+        let mut world = World::default();
+        world
+            .with_resource(VecStorage::<A>::new_with_capacity(10001))
+            .unwrap()
+            .with_resource(VecStorage::<B>::new_with_capacity(10001))
+            .unwrap();
+
+        let entities = {
+            let (mut entities, mut a_storage): (Write<Entities>, WriteStore<A>) =
+                world.fetch().unwrap();
+            (0..10000)
+                .map(|_| {
+                    let e = entities.create();
+                    let _ = a_storage.insert(e.id(), A(0.0));
+                    e
+                })
+                .collect()
+        };
+
+        Self {
+            world,
+            entities,
+        }
+    }
+
+    pub fn run(&mut self) {
+        let mut b_storage: WriteStore<B> = self.world.fetch().unwrap();
         for entity in &self.entities {
             let _ = b_storage.insert(entity.id(), B(0.0));
         }

@@ -2,19 +2,10 @@
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use std::slice::IterMut;
 
-use crate::storage::{separate::*, Entry, IsEntry};
+use crate::storage::{Entry, MaybeIter, MaybeParIter, Without};
 
 #[derive(Clone)]
 pub struct VecStorage<T>(Vec<Option<Entry<T>>>);
-
-impl<T> VecStorage<T> {
-    pub fn new_with_capacity(cap: usize) -> Self {
-        let mut store = Vec::new();
-        store.resize_with(cap, Default::default);
-
-        VecStorage(store)
-    }
-}
 
 impl<T> Default for VecStorage<T> {
     fn default() -> Self {
@@ -108,6 +99,16 @@ impl<'a, T: Send + Sync + 'static> IntoIterator for &'a mut VecStorage<T> {
     }
 }
 
+pub type VecStorageParIter<'a, T> = rayon::iter::Map<
+    rayon::slice::Iter<'a, Option<Entry<T>>>,
+    fn(&Option<Entry<T>>) -> Option<&Entry<T>>,
+>;
+
+pub type VecStorageParIterMut<'a, T> = rayon::iter::Map<
+    rayon::slice::IterMut<'a, Option<Entry<T>>>,
+    fn(&mut Option<Entry<T>>) -> Option<&mut Entry<T>>,
+>;
+
 impl<T: Send + Sync + 'static> VecStorage<T> {
     pub fn get(&self, id: usize) -> Option<&T> {
         self.0.get(id).and_then(|m| m.as_ref().map(|e| &e.value))
@@ -122,17 +123,41 @@ impl<T: Send + Sync + 'static> VecStorage<T> {
         me.as_ref()
     }
 
-    pub fn par_iter(
-        &self,
-    ) -> rayon::iter::Map<
-        rayon::slice::Iter<'_, Option<Entry<T>>>,
-        fn(&Option<Entry<T>>) -> Option<&Entry<T>>,
-    > {
+    pub fn par_iter(&self) -> VecStorageParIter<'_, T> {
         self.into_par_iter()
     }
 
+    /// Return an iterator over all contiguous entities, regardless
+    /// of whether they reside in the storage.
+    ///
+    /// ## WARNING
+    /// This iterator is unconstrained. It does not terminate.
+    pub fn maybe(&self) -> MaybeIter<&Entry<T>, VecStorageIter<'_, T>> {
+        MaybeIter::new(self.iter())
+    }
+
+    /// Return an iterator over all contiguous entities, regardless
+    /// of whether they reside in the storage. Uses mutable components.
+    pub fn maybe_mut(&mut self) -> MaybeIter<&mut Entry<T>, VecStorageIterMut<'_, T>> {
+        MaybeIter::new(self.iter_mut())
+    }
+
+    pub fn maybe_par_iter(&self) -> MaybeParIter<VecStorageParIter<'_, T>> {
+        MaybeParIter(self.par_iter())
+    }
+
+    pub fn maybe_par_iter_mut(&mut self) -> MaybeParIter<VecStorageParIterMut<'_, T>> {
+        MaybeParIter(self.par_iter_mut())
+    }
+
+    /// Get a mutable reference to the component with the given id.
+    ///
+    /// ## NOTE
+    /// This will cause the component's entry to be marked as changed.
     pub fn get_mut(&mut self, id: usize) -> Option<&mut T> {
-        self.0.get_mut(id).and_then(|m| m.as_mut().map(|e| &mut e.value))
+        self.0
+            .get_mut(id)
+            .and_then(|m| m.as_mut().map(|e| &mut e.value))
     }
 
     pub fn insert(&mut self, id: usize, component: T) -> Option<T> {
@@ -156,17 +181,45 @@ impl<T: Send + Sync + 'static> VecStorage<T> {
         }
     }
 
+    /// Return an iterator to all entries, mutably.
+    ///
+    /// ## NOTE
+    /// Iterating over the entries mutably will _not_ cause the entries to be
+    /// marked as changed. Only after mutating the underlying component
+    /// through [`DerefMut`] or [`Entry::set_value`], etc, will a change be
+    /// reflected in the entry.
     pub fn iter_mut(&mut self) -> VecStorageIterMut<'_, T> {
         VecStorageIterMut(self.0.iter_mut())
     }
 
-    pub fn par_iter_mut(
-        &mut self,
-    ) -> rayon::iter::Map<
-        rayon::slice::IterMut<'_, Option<Entry<T>>>,
-        fn(&mut Option<Entry<T>>) -> Option<&mut Entry<T>>,
-    > {
+    /// Return a parallel iterator to all entries, mutably.
+    ///
+    /// ## NOTE
+    /// Iterating over the entries mutably will _not_ cause the entries to be
+    /// marked as changed. Only after mutating the underlying component
+    /// through [`DerefMut`] or [`Entry::set_value`], etc, will a change be
+    /// reflected in the entry.
+    pub fn par_iter_mut(&mut self) -> VecStorageParIterMut<'_, T> {
         self.0.as_mut_slice().into_par_iter().map(|me| me.as_mut())
+    }
+
+    /// Perform entity upkeep, defragmentation or any other upkeep on the
+    /// storage. When the storage is added through
+    /// [`SeparateStorageExt::with_storage`]
+    /// or [`SeparateStorageExt::with_default_storage`], this function will be
+    /// called once per frame, automatically.
+    pub fn upkeep(&mut self, dead_ids: &[usize]) {
+        for id in dead_ids {
+            let _ = self.remove(*id);
+        }
+    }
+
+    /// Efficient allocation for a known number of components.
+    pub fn new_with_capacity(cap: usize) -> Self {
+        let mut store = Vec::new();
+        store.resize_with(cap, Default::default);
+
+        VecStorage(store)
     }
 }
 
@@ -185,12 +238,6 @@ impl<'a, T> std::ops::Not for &'a mut VecStorage<T> {
         Without(self)
     }
 }
-
-// impl<T: Send + Sync + 'static> WorldStorage for VecStorage<T> {
-//    fn new_with_capacity(cap: usize) -> Self {
-//        VecStorage::new_with_capacity(cap)
-//    }
-//}
 
 #[cfg(test)]
 mod test {
