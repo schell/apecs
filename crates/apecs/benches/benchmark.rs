@@ -140,7 +140,11 @@ fn bench_add_remove(c: &mut Criterion) {
     // group.plot_config(plot_config);
 
     group.bench_function("apecs::separate", |b| {
-        let mut bench = add_remove::Benchmark::new();
+        let mut bench = add_remove::BenchmarkSeparate::new();
+        b.iter(move || bench.run());
+    });
+    group.bench_function("apecs::archetype", |b| {
+        let mut bench = add_remove::BenchmarkArchetype::new();
         b.iter(move || bench.run());
     });
     group.bench_function("legion", |b| {
@@ -215,9 +219,13 @@ fn bench_simple_iter(c: &mut Criterion) {
 fn bench_frag_iter(c: &mut Criterion) {
     let mut group = c.benchmark_group("frag_iter");
 
-    group.bench_function("apecs::storage::VecStorage", |b| {
-        let mut store = frag_iter::vec();
-        b.iter(move || frag_iter::tick(&mut store))
+    group.bench_function("apecs::separate", |b| {
+        let mut store = frag_iter::sep();
+        b.iter(move || frag_iter::tick_sep(&mut store))
+    });
+    group.bench_function("apecs::archetype", |b| {
+        let mut store = frag_iter::arch();
+        b.iter(move || frag_iter::tick_arch(&mut store))
     });
     group.bench_function("legion", |b| {
         let mut bench = legion::frag_iter::Benchmark::new();

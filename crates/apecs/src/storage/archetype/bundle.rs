@@ -100,7 +100,7 @@ pub fn ensure_type_info(types: &[TypeId]) -> anyhow::Result<()> {
 
 /// A type erased bundle of components.
 #[derive(Default)]
-pub struct AnyBundle(pub FxHashMap<TypeId, AnyVec>);
+pub struct AnyBundle(pub FxHashMap<TypeId, AnyVec<dyn Send + Sync>>);
 
 impl AnyBundle {
     /// Merge the given bundle into `self`, returning any key+values in
@@ -124,6 +124,14 @@ impl AnyBundle {
         };
         self.0.extend(other.0.into_iter());
         prev
+    }
+
+    /// Remove a type from the bundle and return it as an `AnyBundle`.
+    pub fn remove(&mut self, ty: TypeId) -> Option<Self> {
+        let prev = self.0.remove(&ty)?;
+        let mut bundle = AnyBundle::default();
+        let _ = bundle.0.insert(ty, prev);
+        Some(bundle)
     }
 
     /// Get the type info of the bundle
@@ -157,7 +165,7 @@ impl From<()> for AnyBundle {
 
 impl<Head, Tail> From<(Head, Tail)> for AnyBundle
 where
-    Head: 'static,
+    Head: Send + Sync + 'static,
     Tail: TupleList + 'static,
     AnyBundle: From<Tail>,
 {
@@ -182,13 +190,13 @@ impl EmptyBundle for () {
 
 impl<Head, Tail> EmptyBundle for (Head, Tail)
     where
-    Head: 'static,
+    Head: Send + Sync + 'static,
     Tail: EmptyBundle + TupleList
 {
     fn empty_bundle() -> AnyBundle {
         let mut bundle = Tail::empty_bundle();
         let ty = TypeId::of::<Head>();
-        let anyvec: AnyVec = AnyVec::new::<Head>();
+        let anyvec: AnyVec<dyn Send + Sync> = AnyVec::new::<Head>();
         bundle.0.insert(ty, anyvec);
         bundle
     }

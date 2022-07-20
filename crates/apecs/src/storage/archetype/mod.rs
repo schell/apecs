@@ -1,11 +1,7 @@
 //! Entity components stored together in contiguous arrays.
 use std::{any::TypeId, marker::PhantomData, ops::DerefMut};
 
-use any_vec::{
-    any_value::AnyValueMut,
-    mem::Heap,
-    AnyVec, AnyVecMut, AnyVecRef,
-};
+use any_vec::{any_value::AnyValueMut, mem::Heap, traits::*, AnyVec, AnyVecMut, AnyVecRef};
 use anyhow::Context;
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -16,13 +12,13 @@ use tuple_list::TupleList;
 use crate::mpsc;
 
 /// A collection of entities having the same component types
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct Archetype {
     pub(crate) types: FxHashSet<TypeId>,
     pub(crate) entities: Vec<usize>,
     // map of entity_id to storage index
     pub(crate) entity_lookup: FxHashMap<usize, usize>,
-    pub(crate) data: FxHashMap<TypeId, AnyVec>,
+    pub(crate) data: FxHashMap<TypeId, AnyVec<dyn Sync + Send>>,
 }
 
 impl TryFrom<()> for Archetype {
@@ -35,7 +31,7 @@ impl TryFrom<()> for Archetype {
 
 impl<Head, Tail> TryFrom<(Head, Tail)> for Archetype
 where
-    Head: 'static,
+    Head: Send + Sync + 'static,
     Tail: TupleList,
     Archetype: From<Tail>,
 {
@@ -49,7 +45,7 @@ where
             type_is_unique_in_archetype,
             "type is already in the archetype"
         );
-        let mut anyvec: AnyVec = AnyVec::new::<Head>();
+        let mut anyvec: AnyVec<dyn Send + Sync> = AnyVec::new::<Head>();
         {
             let mut vec = anyvec
                 .downcast_mut::<Head>()
@@ -91,6 +87,10 @@ impl Archetype {
 
     pub fn len(&self) -> usize {
         self.entities.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entities.is_empty()
     }
 
     /// Whether this archetype contains the entity
@@ -143,7 +143,7 @@ impl Archetype {
             .with_context(|| format!("could not downcast to {}", std::any::type_name::<T>()))
     }
 
-    pub fn take_column(&mut self, ty: &TypeId) -> Option<AnyVec> {
+    pub fn take_column(&mut self, ty: &TypeId) -> Option<AnyVec<dyn Send + Sync>> {
         self.data.remove(ty)
     }
 
@@ -207,8 +207,9 @@ impl Archetype {
     /// type-erased representation
     pub fn remove_any(&mut self, entity_id: usize) -> anyhow::Result<Option<AnyBundle>> {
         if let Some(index) = self.entity_lookup.remove(&entity_id) {
+            let should_reset_index = index != self.entities.len() - 1;
             assert_eq!(self.entities.swap_remove(index), entity_id);
-            if index != self.entities.len() {
+            if should_reset_index {
                 // the index of the last entity was swapped for that of the removed index, so
                 // we need to update the lookup
                 self.entity_lookup.insert(self.entities[index], index);
@@ -218,6 +219,12 @@ impl Archetype {
                     .iter_mut()
                     .fold(AnyBundle::default(), |mut bundle, (_ty, store)| {
                         let mut temp_store = store.clone_empty();
+                        debug_assert!(
+                            index < store.len(),
+                            "store len {} does not contain index {}",
+                            store.len(),
+                            index
+                        );
                         let value = store.swap_remove(index);
                         temp_store.push(value);
                         bundle.0.insert(store.element_typeid(), temp_store);
@@ -250,8 +257,13 @@ impl Archetype {
     }
 }
 
-struct QueryReturn(TypeId, Vec<ArchetypeColumnInfo>, Vec<AnyVec>);
+struct QueryReturn(
+    TypeId,
+    Vec<ArchetypeColumnInfo>,
+    Vec<AnyVec<dyn Send + Sync>>,
+);
 
+#[derive(Debug)]
 pub struct AllArchetypes {
     archetypes: Vec<Archetype>,
     query_return_chan: (mpsc::Sender<QueryReturn>, mpsc::Receiver<QueryReturn>),
@@ -360,7 +372,11 @@ impl AllArchetypes {
         prev_bundle.and_then(|b| b.try_into_tuple().ok())
     }
 
-    pub fn insert<T: 'static>(&mut self, entity_id: usize, component: T) -> Option<T> {
+    pub fn insert<T: Send + Sync + 'static>(
+        &mut self,
+        entity_id: usize,
+        component: T,
+    ) -> Option<T> {
         self.insert_bundle(entity_id, (component,)).map(|(t,)| t)
     }
 
@@ -381,6 +397,84 @@ impl AllArchetypes {
         }
         None
     }
+
+    /// Remove all components of the given entity and return them in an untyped
+    /// bundle.
+    pub fn remove_any(&mut self, entity_id: usize) -> Option<AnyBundle> {
+        for arch in self.archetypes.iter_mut() {
+            if let Some(bundle) = arch.remove_any(entity_id).unwrap() {
+                return Some(bundle);
+            }
+        }
+        None
+    }
+
+    /// Remove all components of the given entity and return them as a typed
+    /// bundle.
+    pub fn remove<B>(&mut self, entity_id: usize) -> Option<B>
+    where
+        B: IsBundleTypeInfo + 'static,
+        B::TupleList: TryFromAnyBundle,
+        AnyBundle: From<B::TupleList>,
+    {
+        let bundle = self.remove_any(entity_id)?;
+        Some(bundle.try_into_tuple().unwrap())
+    }
+
+    /// Remove a single component from the given entity
+    pub fn remove_component<T: Send + Sync + 'static>(&mut self, entity_id: usize) -> Option<T> {
+        fn only_remove<S: Send + Sync + 'static>(
+            id: usize,
+            all: &mut AllArchetypes,
+        ) -> (Option<AnyBundle>, Option<S>) {
+            for arch in all.archetypes.iter_mut() {
+                if let Some(mut bundle) = arch.remove_any(id).unwrap() {
+                    let ty = TypeId::of::<S>();
+                    let prev = bundle.remove(ty).map(|b| {
+                        let (s,): (S,) = b.try_into_tuple().unwrap();
+                        s
+                    });
+                    return (Some(bundle), prev);
+                }
+            }
+            (None, None)
+        }
+        let (bundle, prev) = only_remove(entity_id, self);
+
+        let bundle = bundle?;
+        let bundle_types = bundle.type_info();
+        // now search for an archetype to store the bundle
+        for arch in self.archetypes.iter_mut() {
+            if arch.contains_bundle_components(&bundle_types) {
+                // we found an archetype that will store our bundle, so store it
+                let no_previous_bundle = arch.insert_any(entity_id, bundle).unwrap().is_none();
+                assert!(
+                    no_previous_bundle,
+                    "the archetype had a bundle at the entity"
+                );
+                return prev;
+            }
+        }
+
+        // we couldn't find any existing archetypes that can hold the bundle, so make a
+        // new one
+        let mut new_arch = Archetype::try_from(bundle).unwrap();
+        new_arch.entities = vec![entity_id];
+        new_arch.entity_lookup = FxHashMap::from_iter([(entity_id, 0)]);
+        self.archetypes.push(new_arch);
+
+        prev
+    }
+
+    /// Return the number of entities with archetypes.
+    pub fn len(&self) -> usize {
+        self.archetypes.iter().map(|a| a.len()).sum()
+    }
+
+    /// Return whether any entities with archetypes exist in storage.
+    pub fn is_empty(&self) -> bool {
+        self.archetypes.iter().all(|a| a.is_empty())
+    }
 }
 
 struct ArchetypeColumnInfo {
@@ -392,7 +486,7 @@ struct ArchetypeColumnInfo {
 
 pub struct QueryColumn<T: 'static> {
     info: Vec<ArchetypeColumnInfo>,
-    data: Vec<AnyVec>,
+    data: Vec<AnyVec<dyn Send + Sync>>,
     query_return_tx: mpsc::Sender<QueryReturn>,
     _phantom: PhantomData<T>,
 }
@@ -449,12 +543,6 @@ impl<'a, T: 'static> Iterator for QueryColumnIter<'a, T> {
 }
 
 pub struct QueryColumnMut<T: 'static>(QueryColumn<T>);
-
-//impl<T> QueryColumnMut<T> {
-//    fn new(tx: mpsc::Sender<QueryReturn>) -> Self {
-//        QueryColumnMut(QueryColumn::new(tx))
-//    }
-//}
 
 pub struct QueryColumnIterMut<'a, T: 'static>(
     Option<std::slice::IterMut<'a, T>>,
@@ -596,6 +684,8 @@ where
 
 #[cfg(test)]
 mod test {
+    use std::any::Any;
+
     use super::*;
 
     #[test]
@@ -703,5 +793,26 @@ mod test {
                 assert_eq!(*f, s.len() as f32);
             }
         }
+    }
+
+    #[test]
+    fn archetype_send_sync() {
+        let _: Box<dyn Any + Send + Sync + 'static> = Box::new(AllArchetypes::default());
+    }
+
+    #[test]
+    fn can_remove_all() {
+        let mut all = AllArchetypes::default();
+
+        for id in 0..10000 {
+            all.insert(id, id);
+        }
+        for id in 0..10000 {
+            all.insert(id, id as f32);
+        }
+        for id in 0..10000 {
+            let _ = all.remove_any(id);
+        }
+        assert!(all.is_empty());
     }
 }

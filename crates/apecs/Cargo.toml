@@ -23,7 +23,7 @@ bench = false
 
 [dependencies]
 anyhow = "^1.0"
-any_vec = { git = "https://github.com/tower120/any_vec.git", branch = "main" } #"^0.9"
+any_vec = "^0.10" #{ git = "https://github.com/tower120/any_vec.git", branch = "main" } #"^0.9"
 apecs-derive = { version = "0.1.3", path = "../apecs-derive" }
 async-broadcast = "^0.4"
 async-channel = "^1.6"
