@@ -2,11 +2,7 @@
 use crate as apecs;
 
 impl apecs::CanFetch for () {
-    fn reads() -> Vec<apecs::ResourceId> {
-        vec![]
-    }
-
-    fn writes() -> Vec<apecs::ResourceId> {
+    fn borrows() -> Vec<apecs::schedule::Borrow> {
         vec![]
     }
 

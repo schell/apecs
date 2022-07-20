@@ -409,21 +409,12 @@ impl ResourceRequirement {
 
 /// Types that can be fetched from the [`World`].
 pub trait CanFetch: Sized {
-    fn reads() -> Vec<ResourceId>;
-
-    fn writes() -> Vec<ResourceId>;
+    fn borrows() -> Vec<Borrow>;
 
     fn construct(
         resource_return_tx: mpsc::Sender<(ResourceId, Resource)>,
         fields: &mut FxHashMap<ResourceId, FetchReadyResource>,
     ) -> anyhow::Result<Self>;
-
-    fn all_resources() -> Vec<ResourceId> {
-        let mut rs = vec![];
-        rs.extend(Self::reads());
-        rs.extend(Self::writes());
-        rs
-    }
 
     /// Return a plugin containing the systems and sub-resources required to
     /// create and use the type.
@@ -437,12 +428,11 @@ pub trait CanFetch: Sized {
 }
 
 impl<'a, T: IsResource + Default> CanFetch for Write<T> {
-    fn writes() -> Vec<ResourceId> {
-        vec![ResourceId::new::<T>()]
-    }
-
-    fn reads() -> Vec<ResourceId> {
-        vec![]
+    fn borrows() -> Vec<Borrow> {
+        vec![Borrow {
+            id: ResourceId::new::<T>(),
+            is_exclusive: true,
+        }]
     }
 
     fn construct(
@@ -459,12 +449,11 @@ impl<'a, T: IsResource + Default> CanFetch for Write<T> {
 }
 
 impl<'a, T: IsResource> CanFetch for WriteExpect<T> {
-    fn writes() -> Vec<ResourceId> {
-        vec![ResourceId::new::<T>()]
-    }
-
-    fn reads() -> Vec<ResourceId> {
-        vec![]
+    fn borrows() -> Vec<Borrow> {
+        vec![Borrow {
+            id: ResourceId::new::<T>(),
+            is_exclusive: true,
+        }]
     }
 
     fn construct(
@@ -498,12 +487,11 @@ impl<'a, T: IsResource> CanFetch for WriteExpect<T> {
 }
 
 impl<'a, T: IsResource + Default> CanFetch for Read<T> {
-    fn writes() -> Vec<ResourceId> {
-        vec![]
-    }
-
-    fn reads() -> Vec<ResourceId> {
-        vec![ResourceId::new::<T>()]
+    fn borrows() -> Vec<Borrow> {
+        vec![Borrow {
+            id: ResourceId::new::<T>(),
+            is_exclusive: false,
+        }]
     }
 
     fn construct(
@@ -523,12 +511,11 @@ impl<'a, T: IsResource + Default> CanFetch for Read<T> {
 }
 
 impl<'a, T: IsResource> CanFetch for ReadExpect<T> {
-    fn writes() -> Vec<ResourceId> {
-        vec![]
-    }
-
-    fn reads() -> Vec<ResourceId> {
-        vec![ResourceId::new::<T>()]
+    fn borrows() -> Vec<Borrow> {
+        vec![Borrow {
+            id: ResourceId::new::<T>(),
+            is_exclusive: false,
+        }]
     }
 
     fn construct(

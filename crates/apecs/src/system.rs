@@ -128,17 +128,7 @@ impl SyncSystem {
     {
         SyncSystem {
             name: name.as_ref().to_string(),
-            borrows: T::reads()
-                .into_iter()
-                .map(|id| Borrow {
-                    id,
-                    is_exclusive: false,
-                })
-                .chain(T::writes().into_iter().map(|id| Borrow {
-                    id,
-                    is_exclusive: true,
-                }))
-                .collect(),
+            borrows: T::borrows(),
             function: Box::new(move |tx, mut resources| {
                 let data = T::construct(tx, &mut resources)?;
                 sys_fn(data)

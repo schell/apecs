@@ -15,7 +15,7 @@ use crate::storage::separate::{ReadStore, SeparateStorageExt, VecStorage, WriteS
 use crate::{
     mpsc,
     plugins::Plugin,
-    schedule::{Borrow, IsSchedule},
+    schedule::IsSchedule,
     spsc,
     system::{
         AsyncSchedule, AsyncSystem, AsyncSystemFuture, AsyncSystemRequest, ShouldContinue,
@@ -36,18 +36,9 @@ pub struct Facade {
 
 impl Facade {
     pub async fn fetch<T: CanFetch>(&mut self) -> anyhow::Result<T> {
-        let reads = T::reads().into_iter().map(|id| Borrow {
-            id,
-            is_exclusive: false,
-        });
-        let writes = T::writes().into_iter().map(|id| Borrow {
-            id,
-            is_exclusive: true,
-        });
+        let borrows = T::borrows();
         self.resource_request_tx
-            .try_send(Request {
-                borrows: reads.chain(writes).collect(),
-            })
+            .try_send(Request {borrows})
             .context("could not send request for resources")?;
 
         let mut resources = self
@@ -677,16 +668,7 @@ impl World {
     pub fn fetch<T: CanFetch>(&mut self) -> anyhow::Result<T> {
         self.resource_manager.unify_resources("World::fetch")?;
 
-        let reads = T::reads().into_iter().map(|id| Borrow {
-            id,
-            is_exclusive: false,
-        });
-        let writes = T::writes().into_iter().map(|id| Borrow {
-            id,
-            is_exclusive: true,
-        });
-        let borrows = reads.chain(writes).collect::<Vec<_>>();
-
+        let borrows = T::borrows();
         let mut resources = FxHashMap::default();
         self.resource_manager
             .try_loan_resources("World::fetch", &mut resources, borrows.iter())?;

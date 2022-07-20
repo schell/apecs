@@ -9,7 +9,7 @@ mod bundle;
 pub use bundle::*;
 use tuple_list::TupleList;
 
-use crate::mpsc;
+use crate::{mpsc, CanFetch, ResourceId, schedule::Borrow};
 
 /// A collection of entities having the same component types
 #[derive(Debug, Default)]
@@ -572,8 +572,8 @@ pub trait IsQuery {
     type ColumnsIter<'t>: Iterator<Item = Self::Item<'t>>;
 
     fn pop_columns(archetypes: &mut AllArchetypes) -> Option<Self::Columns>;
-
     fn columns_iter(columns: &mut Self::Columns) -> Self::ColumnsIter<'_>;
+    fn column_borrows() -> Vec<Borrow>;
 }
 
 impl IsQuery for () {
@@ -588,9 +588,13 @@ impl IsQuery for () {
     fn columns_iter(_: &mut Self::Columns) -> Self::ColumnsIter<'_> {
         std::iter::once(()).cycle()
     }
+
+    fn column_borrows() -> Vec<Borrow> {
+        vec![]
+    }
 }
 
-impl<'a, T: 'static> IsQuery for &'a T {
+impl<'a, T: Send + Sync + 'static> IsQuery for &'a T {
     type Columns = QueryColumn<T>;
     type Item<'t> = &'t T;
     type ColumnsIter<'t> = QueryColumnIter<'t, T>;
@@ -608,9 +612,13 @@ impl<'a, T: 'static> IsQuery for &'a T {
         let first = vs.pop().map(|v| v.iter());
         QueryColumnIter(first, vs)
     }
+
+    fn column_borrows() -> Vec<Borrow> {
+        vec![Borrow{ id: ResourceId::new::<QueryColumn<T>>(), is_exclusive: false}]
+    }
 }
 
-impl<'a, T: 'static> IsQuery for &'a mut T {
+impl<'a, T: Send + Sync + 'static> IsQuery for &'a mut T {
     type Columns = QueryColumnMut<T>;
     type Item<'t> = &'t mut T;
     type ColumnsIter<'t> = QueryColumnIterMut<'t, T>;
@@ -628,6 +636,10 @@ impl<'a, T: 'static> IsQuery for &'a mut T {
             .collect::<Vec<_>>();
         let first = vs.pop().map(|mut v| v.iter_mut());
         QueryColumnIterMut(first, vs)
+    }
+
+    fn column_borrows() -> Vec<Borrow> {
+        vec![Borrow{id: ResourceId::new::<QueryColumnMut<T>>(), is_exclusive: true}]
     }
 }
 
@@ -649,12 +661,35 @@ where
     fn columns_iter(cols: &mut Self::Columns) -> Self::ColumnsIter<'_> {
         Head::columns_iter(&mut cols.0).zip(Tail::columns_iter(&mut cols.1))
     }
+
+    fn column_borrows() -> Vec<Borrow> {
+        let mut borrows = Tail::column_borrows();
+        borrows.extend(Head::column_borrows());
+        borrows
+    }
 }
 
 pub struct Query<T>(<T::TupleList as IsQuery>::Columns)
 where
     T: Tuple + ?Sized,
     T::TupleList: IsQuery;
+
+impl<T> CanFetch for Query<T>
+where
+    T: Tuple + ?Sized,
+    T::TupleList: IsQuery,
+{
+    fn borrows() -> Vec<Borrow> {
+        <T::TupleList as IsQuery>::column_borrows()
+    }
+
+    fn construct(
+        resource_return_tx: mpsc::Sender<(crate::ResourceId, crate::Resource)>,
+        fields: &mut FxHashMap<crate::ResourceId, crate::FetchReadyResource>,
+    ) -> anyhow::Result<Self> {
+        todo!()
+    }
+}
 
 impl<'a, T> TryFrom<&'a mut AllArchetypes> for Query<T>
 where

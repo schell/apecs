@@ -82,18 +82,10 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
 
     let output = quote! {
         impl #impl_generics apecs::CanFetch for #name #ty_generics #where_clause {
-            fn reads() -> Vec<apecs::ResourceId> {
+            fn borrows() -> Vec<apecs::schedule::Borrow> {
                 let mut r = Vec::new();
                 #({
-                    r.extend(<#tys as apecs::CanFetch>::reads());
-                })*
-                r
-            }
-
-            fn writes() -> Vec<apecs::ResourceId> {
-                let mut r = Vec::new();
-                #({
-                    r.extend(<#tys as apecs::CanFetch>::writes());
+                    r.extend(<#tys as apecs::CanFetch>::borrows());
                 })*
                 r
             }
@@ -155,16 +147,10 @@ pub fn impl_canfetch_tuple(input: proc_macro::TokenStream) -> proc_macro::TokenS
     let tys = tuple.elems.iter().collect::<Vec<_>>();
     let output = quote! {
         impl <#(#tys:apecs::CanFetch),*> apecs::CanFetch for #tuple {
-            fn reads() -> Vec<apecs::ResourceId> {
-                let mut r = Vec::new();
-                #(r.extend(<#tys as apecs::CanFetch>::reads());)*
-                r
-            }
-
-            fn writes() -> Vec<apecs::ResourceId> {
-                let mut w = Vec::new();
-                #(w.extend(<#tys as apecs::CanFetch>::writes());)*
-                w
+            fn borrows() -> Vec<apecs::schedule::Borrow> {
+                let mut bs = Vec::new();
+                #(bs.extend(<#tys as apecs::CanFetch>::borrows());)*
+                bs
             }
 
             fn construct(
