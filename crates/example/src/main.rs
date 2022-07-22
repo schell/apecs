@@ -1,5 +1,5 @@
 use apecs::{
-    anyhow, storage::separate::join::*, storage::separate::*, world::Entities, world::Facade,
+    anyhow, storage::separated::join::*, storage::separated::*, world::Entities, world::Facade,
     CanFetch, Read, Write, WriteExpect,
 };
 use tracing::Level;

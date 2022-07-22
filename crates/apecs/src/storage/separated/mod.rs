@@ -45,7 +45,7 @@ impl SeparateStorageExt for World {
 pub mod test {
     use crate::{
         self as apecs,
-        storage::{separate::*, Entry, Maybe},
+        storage::{separated::*, Entry, Maybe},
         system::{ok, ShouldContinue},
         world::*,
         CanFetch,

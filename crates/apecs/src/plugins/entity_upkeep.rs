@@ -2,7 +2,7 @@
 //!
 //! Makes sure that destroyed entities have their components removed from
 //! storages.
-use crate::storage::separate::VecStorage;
+use crate::storage::separated::VecStorage;
 use crate::system::{ok, ShouldContinue};
 use crate::{self as apecs, WriteExpect};
 use crate::{world::Entities, CanFetch, Read, Write};
@@ -58,7 +58,7 @@ pub fn plugin<T: Send + Sync + 'static>() -> Plugin {
 
 #[cfg(test)]
 mod test {
-    use crate::{storage::separate::*, world::Entities, world::World, Write};
+    use crate::{storage::separated::*, world::Entities, world::World, Write};
 
     #[test]
     fn can_run_storage_upkeep() {

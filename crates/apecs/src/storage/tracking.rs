@@ -182,8 +182,8 @@ impl<T: Send + Sync + 'static> Tracker<T> {
 mod test {
     use crate::{
         anyhow,
-        storage::separate::join::*,
-        storage::{separate::*, Entry},
+        storage::separated::join::*,
+        storage::{separated::*, Entry},
         system::increment_current_iteration,
     };
 

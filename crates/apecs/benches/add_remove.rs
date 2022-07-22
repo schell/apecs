@@ -1,5 +1,5 @@
 use apecs::{
-    storage::{archetype::*, separate::*},
+    storage::{archetype::*, separated::*},
     world::*,
     Write,
 };

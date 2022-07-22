@@ -1,4 +1,4 @@
-use apecs::{anyhow, storage::{separate::*, archetype::*}};
+use apecs::{anyhow, storage::{separated::*, archetype::*}};
 use cgmath::*;
 
 #[derive(Copy, Clone)]

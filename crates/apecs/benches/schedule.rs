@@ -1,4 +1,4 @@
-use apecs::{anyhow, storage::separate::*, system::*, world::*, CanFetch, Write};
+use apecs::{anyhow, storage::separated::*, system::*, world::*, CanFetch, Write};
 
 struct A(f32);
 struct B(f32);

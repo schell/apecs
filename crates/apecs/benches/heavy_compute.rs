@@ -1,4 +1,4 @@
-use apecs::{anyhow, storage::separate::*, system::*, world::*, CanFetch};
+use apecs::{anyhow, storage::separated::*, system::*, world::*, CanFetch};
 use cgmath::*;
 use rayon::prelude::*;
 

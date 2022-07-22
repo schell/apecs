@@ -1,4 +1,4 @@
-use apecs::storage::{archetype::AllArchetypes, separate::*};
+use apecs::storage::{archetype::AllArchetypes, separated::*};
 use cgmath::*;
 
 pub struct Transform(Matrix4<f32>);

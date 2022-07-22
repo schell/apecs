@@ -125,7 +125,7 @@ impl Plugin {
 #[cfg(test)]
 mod test {
     use crate as apecs;
-    use apecs::{system::*, storage::separate::*, world::World, CanFetch, Write};
+    use apecs::{system::*, storage::separated::*, world::World, CanFetch, Write};
 
     #[test]
      fn sanity() {

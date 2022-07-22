@@ -5,7 +5,7 @@
 //! To read more about the difference between separated and archetypal storage
 //! check out [this article](https://csherratt.github.io/blog/posts/specs-and-legion/).
 pub mod archetype;
-pub mod separate;
+pub mod separated;
 pub mod tracking;
 
 use std::ops::{Deref, DerefMut};

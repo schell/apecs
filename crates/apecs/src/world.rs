@@ -12,7 +12,7 @@ use rustc_hash::FxHashSet;
 
 use crate::resource_manager::{LoanManager, ResourceManager};
 use crate::schedule::UntypedSystemData;
-use crate::storage::separate::{ReadStore, SeparateStorageExt, VecStorage, WriteStore};
+use crate::storage::separated::{ReadStore, SeparateStorageExt, VecStorage, WriteStore};
 use crate::{
     mpsc,
     plugins::Plugin,
@@ -701,7 +701,7 @@ mod test {
 
     use crate as apecs;
     use apecs::{
-        anyhow, spsc, storage::separate::*, system::*, world::*, Read, Write, WriteExpect,
+        anyhow, spsc, storage::separated::*, system::*, world::*, Read, Write, WriteExpect,
     };
     use rustc_hash::FxHashMap;
 

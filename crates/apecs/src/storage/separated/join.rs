@@ -231,7 +231,7 @@ where
 
 #[cfg(test)]
 mod test {
-    use crate::storage::separate::*;
+    use crate::storage::separated::*;
     use rayon::prelude::*;
 
     #[test]
