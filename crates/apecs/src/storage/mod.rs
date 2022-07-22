@@ -6,14 +6,34 @@
 //! check out [this article](https://csherratt.github.io/blog/posts/specs-and-legion/).
 pub mod archetype;
 pub mod separate;
+pub mod tracking;
 
 use std::ops::{Deref, DerefMut};
 
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
-use tuple_list::TupleList;
 
 pub trait HasId {
     fn id(&self) -> usize;
+}
+
+impl<T> HasId for (usize, T) {
+    fn id(&self) -> usize {
+        self.0
+    }
+}
+
+impl HasId for usize {
+    fn id(&self) -> usize {
+        *self
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Entry<T> {
+    pub(crate) key: usize,
+    pub(crate) value: T,
+    changed: u64,
+    added: bool,
 }
 
 impl<T> HasId for Entry<T> {
@@ -31,118 +51,6 @@ impl<T> HasId for &Entry<T> {
 impl<T> HasId for &mut Entry<T> {
     fn id(&self) -> usize {
         Entry::id(self)
-    }
-}
-
-impl<T> HasId for (usize, T) {
-    fn id(&self) -> usize {
-        self.0
-    }
-}
-
-impl HasId for usize {
-    fn id(&self) -> usize {
-        *self
-    }
-}
-
-pub trait IsEntry {
-    type Value<'a>
-    where
-        Self: 'a;
-
-    fn id(&self) -> usize;
-
-    fn value(&self) -> Self::Value<'_>;
-}
-
-impl IsEntry for usize {
-    type Value<'a> = usize;
-
-    fn id(&self) -> usize {
-        *self
-    }
-
-    fn value(&self) -> Self {
-        *self
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Entry<T> {
-    pub(crate) key: usize,
-    pub(crate) value: T,
-    changed: u64,
-    added: bool,
-}
-
-impl<T> IsEntry for Entry<T> {
-    type Value<'a> = &'a T
-        where T: 'a;
-
-    fn id(&self) -> usize {
-        self.id()
-    }
-
-    fn value(&self) -> &T {
-        Entry::value(self)
-    }
-}
-
-impl<'a, T> IsEntry for &'a Entry<T> {
-    type Value<'b> = &'b T
-        where 'a: 'b;
-
-    fn id(&self) -> usize {
-        self.key
-    }
-
-    fn value(&self) -> &T {
-        Entry::value(self)
-    }
-}
-
-impl<'a, T> IsEntry for &'a mut Entry<T> {
-    type Value<'b> = &'b T
-        where 'a: 'b;
-
-    fn id(&self) -> usize {
-        self.key
-    }
-
-    fn value(&self) -> &T {
-        Entry::value(self)
-    }
-}
-
-impl<T:IsEntry> IsEntry for (T, ()) {
-    type Value<'t> = (T::Value<'t>, ())
-        where T: 't;
-
-    fn id(&self) -> usize {
-        self.0.id()
-    }
-
-    fn value(&self) -> Self::Value<'_> {
-        (self.0.value(), ())
-    }
-}
-
-impl<Head, Next, Tail> IsEntry for (Head, (Next, Tail))
-where
-    Head: IsEntry,
-    (Next, Tail): IsEntry + TupleList,
-{
-    type Value<'a> = (Head::Value<'a>, <(Next, Tail) as IsEntry>::Value<'a>)
-    where
-        Self: 'a;
-
-    fn id(&self) -> usize {
-        self.0.id()
-    }
-
-    fn value(&self) -> Self::Value<'_> {
-        (self.0.value(), self.1.value())
     }
 }
 
@@ -231,20 +139,7 @@ impl<T> HasId for Maybe<T> {
     }
 }
 
-impl<T: IsEntry> IsEntry for Maybe<T> {
-    type Value<'a> = Option<T::Value<'a>>
-        where T: 'a;
-
-    fn id(&self) -> usize {
-        self.key
-    }
-
-    fn value(&self) -> Option<T::Value<'_>> {
-        self.inner.as_ref().map(IsEntry::value)
-    }
-}
-
-pub struct MaybeIter<C: IsEntry, T: Iterator<Item = C>> {
+pub struct MaybeIter<C: HasId, T: Iterator<Item = C>> {
     iter: T,
     id: usize,
     next_id: usize,
@@ -253,7 +148,7 @@ pub struct MaybeIter<C: IsEntry, T: Iterator<Item = C>> {
 
 impl<C, T> MaybeIter<C, T>
 where
-    C: IsEntry,
+    C: HasId,
     T: Iterator<Item = C>,
 {
     pub(crate) fn new(mut iter: T) -> Self {
@@ -269,7 +164,7 @@ where
 
 impl<C, T> Iterator for MaybeIter<C, T>
 where
-    C: IsEntry,
+    C: HasId,
     T: Iterator<Item = C>,
 {
     type Item = Maybe<C>;
@@ -339,7 +234,7 @@ pub struct WithoutIter<T: Iterator> {
 
 impl<T, C> WithoutIter<T>
 where
-    C: IsEntry,
+    C: HasId,
     T: Iterator<Item = C>,
 {
     pub(crate) fn new(mut iter: T) -> Self {
@@ -354,7 +249,7 @@ where
 
 impl<T: Iterator, C> Iterator for WithoutIter<T>
 where
-    C: IsEntry,
+    C: HasId,
     T: Iterator<Item = C>,
 {
     type Item = Entry<()>;
@@ -382,7 +277,7 @@ where
 
 impl<T, C> IntoIterator for Without<T>
 where
-    C: IsEntry,
+    C: HasId,
     T: IntoIterator<Item = C>,
 {
     type Item = Entry<()>;

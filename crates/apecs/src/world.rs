@@ -8,9 +8,10 @@ use std::{iter::Map, ops::Deref};
 use anyhow::Context;
 use async_oneshot::oneshot;
 use hibitset::{BitIter, BitSet, BitSetLike};
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashSet;
 
-use crate::resource_manager::ResourceManager;
+use crate::resource_manager::{LoanManager, ResourceManager};
+use crate::schedule::UntypedSystemData;
 use crate::storage::separate::{ReadStore, SeparateStorageExt, VecStorage, WriteStore};
 use crate::{
     mpsc,
@@ -21,34 +22,46 @@ use crate::{
         AsyncSchedule, AsyncSystem, AsyncSystemFuture, AsyncSystemRequest, ShouldContinue,
         SyncSchedule, SyncSystem,
     },
-    CanFetch, FetchReadyResource, IsResource, Request, Resource, ResourceId, ResourceRequirement,
+    CanFetch, IsResource, Request, Resource, ResourceId, ResourceRequirement,
 };
 use crate::{oneshot, WriteExpect};
 
+/// Fetches world resources in async systems.
 pub struct Facade {
     // Unbounded. Sending a request from the system should not yield the async
     pub(crate) resource_request_tx: spsc::Sender<Request>,
     // Bounded(1). Awaiting in the system should yield the async
-    pub(crate) resources_to_system_rx: spsc::Receiver<FxHashMap<ResourceId, FetchReadyResource>>,
-    // Unbounded. Sending from the system should not yield the async
-    pub(crate) resources_from_system_tx: mpsc::Sender<(ResourceId, Resource)>,
+    pub(crate) resources_to_system_rx: spsc::Receiver<Resource>,
 }
 
 impl Facade {
-    pub async fn fetch<T: CanFetch>(&mut self) -> anyhow::Result<T> {
+    pub async fn fetch<T: CanFetch + Send + Sync + 'static>(&mut self) -> anyhow::Result<T> {
         let borrows = T::borrows();
         self.resource_request_tx
-            .try_send(Request {borrows})
+            .try_send(Request {
+                borrows,
+                construct: |loan_mngr: &mut LoanManager| {
+                    let t = T::construct(loan_mngr).with_context(|| {
+                        format!("could not construct {}", std::any::type_name::<T>())
+                    })?;
+                    let box_t: Box<T> = Box::new(t);
+                    let box_any: UntypedSystemData = box_t;
+                    Ok(box_any)
+                },
+            })
             .context("could not send request for resources")?;
 
-        let mut resources = self
+        let box_any: Resource = self
             .resources_to_system_rx
             .recv()
             .await
             .context("could not fetch resources")?;
-
-        T::construct(self.resources_from_system_tx.clone(), &mut resources)
-            .with_context(|| format!("could not construct {}", std::any::type_name::<T>()))
+        let box_t: Box<T> = box_any
+            .downcast()
+            .ok()
+            .with_context(|| format!("Facade could not downcast {}", std::any::type_name::<T>()))?;
+        let t = *box_t;
+        Ok(t)
     }
 }
 
@@ -350,7 +363,6 @@ impl Default for World {
 }
 
 pub(crate) fn make_async_system_pack<F, Fut>(
-    world: &World,
     name: String,
     make_system_future: F,
 ) -> (AsyncSystem, AsyncSystemFuture)
@@ -359,12 +371,10 @@ where
     Fut: Future<Output = anyhow::Result<()>> + Send + Sync + 'static,
 {
     let (resource_request_tx, resource_request_rx) = spsc::unbounded();
-    let (resources_to_system_tx, resources_to_system_rx) =
-        spsc::bounded::<FxHashMap<ResourceId, FetchReadyResource>>(1);
+    let (resources_to_system_tx, resources_to_system_rx) = spsc::bounded(1);
     let facade = Facade {
         resource_request_tx,
         resources_to_system_rx,
-        resources_from_system_tx: world.resource_manager.exclusive_resource_return_sender(),
     };
     let system = AsyncSystem {
         name: name.clone(),
@@ -443,7 +453,7 @@ impl World {
                 }
             }
 
-            let (sys, fut) = make_async_system_pack(&self, asystem.0, asystem.1);
+            let (sys, fut) = make_async_system_pack(asystem.0, asystem.1);
             self.add_async_system_pack(sys, fut);
         }
 
@@ -470,7 +480,7 @@ impl World {
     ) -> anyhow::Result<&mut Self>
     where
         F: FnMut(T) -> anyhow::Result<ShouldContinue> + Send + Sync + 'static,
-        T: CanFetch,
+        T: CanFetch + 'static,
     {
         self.with_system_with_dependencies(name, &[], sys_fn)
     }
@@ -483,7 +493,7 @@ impl World {
     ) -> anyhow::Result<&mut Self>
     where
         F: FnMut(T) -> anyhow::Result<ShouldContinue> + Send + Sync + 'static,
-        T: CanFetch,
+        T: CanFetch + 'static,
     {
         let system = SyncSystem::new(name, sys_fn);
 
@@ -511,7 +521,7 @@ impl World {
                         .map(|err| format!("{}", err))
                         .collect::<Vec<_>>()
                         .join("\n  ");
-                    log::error!("async system '{}' erred: {}", name, msg);
+                    panic!("async system '{}' erred: {}", name, msg);
                 }
             }
         };
@@ -529,8 +539,7 @@ impl World {
         F: FnOnce(Facade) -> Fut,
         Fut: Future<Output = anyhow::Result<()>> + Send + Sync + 'static,
     {
-        let (system, fut) =
-            make_async_system_pack(&self, name.as_ref().to_string(), make_system_future);
+        let (system, fut) = make_async_system_pack(name.as_ref().to_string(), make_system_future);
         self.add_async_system_pack(system, fut);
 
         self
@@ -605,17 +614,9 @@ impl World {
             self.async_systems
                 .iter()
                 .fold(AsyncSchedule::default(), |mut schedule, system| {
-                    let async_request = match system.resource_request_rx.try_recv() {
-                        Ok(request) => AsyncSystemRequest(&system, request),
-                        Err(err) => match err {
-                            // return an async system that requests nothing
-                            async_channel::TryRecvError::Empty => {
-                                AsyncSystemRequest(&system, Request::default())
-                            }
-                            async_channel::TryRecvError::Closed => unreachable!(),
-                        },
-                    };
-                    schedule.add_system(async_request);
+                    if let Some(request) = system.resource_request_rx.try_recv().ok() {
+                        schedule.add_system(AsyncSystemRequest(&system, request));
+                    }
                     schedule
                 });
 
@@ -625,6 +626,10 @@ impl World {
                 schedule.get_execution_order().join("\n")
             );
             schedule.run(&self.async_system_executor, &mut self.resource_manager)?;
+        } else {
+            // do one tick anyway, because most async systems don't require scheduling
+            // (especially the first frame)
+            let _ = self.async_system_executor.try_tick();
         }
 
         // lastly tick all our non-system tasks
@@ -661,27 +666,12 @@ impl World {
 
     /// Attempt to get a mutable reference to one resource.
     pub fn resource_get_mut<T: IsResource>(&mut self) -> anyhow::Result<&mut T> {
-        let id = ResourceId::new::<T>();
-        self.resource_manager.get_mut(&id)
+        self.resource_manager.get_mut::<T>()
     }
 
     pub fn fetch<T: CanFetch>(&mut self) -> anyhow::Result<T> {
         self.resource_manager.unify_resources("World::fetch")?;
-
-        let borrows = T::borrows();
-        let mut resources = FxHashMap::default();
-        self.resource_manager
-            .try_loan_resources("World::fetch", &mut resources, borrows.iter())?;
-        let t = T::construct(
-            self.resource_manager.exclusive_resource_return_sender(),
-            &mut resources,
-        )?;
-        anyhow::ensure!(
-            resources.is_empty(),
-            "{}::construct did not use all requested resources",
-            std::any::type_name::<T>()
-        );
-        Ok(t)
+        T::construct(&mut LoanManager(&mut self.resource_manager))
     }
 
     /// Run all system and non-system futures until they have all finished or
@@ -713,6 +703,7 @@ mod test {
     use apecs::{
         anyhow, spsc, storage::separate::*, system::*, world::*, Read, Write, WriteExpect,
     };
+    use rustc_hash::FxHashMap;
 
     #[test]
     fn can_closure_system() -> anyhow::Result<()> {
@@ -764,9 +755,14 @@ mod test {
     }
 
     #[test]
-    fn async_systems_run_and_return_resources() -> anyhow::Result<()> {
+    fn async_systems_run_and_return_resources() {
+        let _ = env_logger::builder()
+            .is_test(true)
+            .filter_level(log::LevelFilter::Trace)
+            .try_init();
+
         async fn create(tx: spsc::Sender<()>, mut facade: Facade) -> anyhow::Result<()> {
-            println!("create running");
+            log::info!("create running");
             tx.try_send(()).unwrap();
             let (mut entities, mut names, mut numbers): (
                 WriteExpect<Entities>,
@@ -802,22 +798,21 @@ mod test {
         let mut world = World::default();
         world
             .with_async_system("create", |facade| async move { create(tx, facade).await })
-            .with_system("maintain", maintain_map)?;
+            .with_system("maintain", maintain_map)
+            .unwrap();
 
         // create system runs - sending on the channel and making the fetch request
-        world.tick()?;
+        world.tick().unwrap();
         rx.try_recv().unwrap();
 
         // world sends resources to the create system which makes
         // entities+components, then the maintain system updates the book
-        world.tick()?;
+        world.tick().unwrap();
 
-        let book = world.fetch::<Read<FxHashMap<String, u32>>>()?;
+        let book = world.fetch::<Read<FxHashMap<String, u32>>>().unwrap();
         for n in 0..100 {
             assert_eq!(book.get(&format!("entity_{}", n)), Some(&n));
         }
-
-        Ok(())
     }
 
     #[test]
@@ -971,5 +966,13 @@ mod test {
             .unwrap();
         let s = world.resource_get_mut::<&'static str>().unwrap();
         *s = "blah";
+    }
+
+    #[test]
+    fn sanity_channel_ref() {
+        let f = 0.0f32;
+        let (tx, rx) = mpsc::unbounded();
+        tx.try_send(&f).unwrap();
+        assert_eq!(&0.0, rx.try_recv().unwrap());
     }
 }

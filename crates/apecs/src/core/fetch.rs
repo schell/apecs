@@ -1,15 +1,12 @@
 //! Implementations of `CanFetch`.
-use crate as apecs;
+use crate::{self as apecs, resource_manager::LoanManager};
 
 impl apecs::CanFetch for () {
     fn borrows() -> Vec<apecs::schedule::Borrow> {
         vec![]
     }
 
-    fn construct(
-        _: apecs::mpsc::Sender<(apecs::ResourceId, apecs::Resource)>,
-        _: &mut rustc_hash::FxHashMap<apecs::ResourceId, apecs::FetchReadyResource>,
-    ) -> anyhow::Result<Self> {
+    fn construct(_: &mut LoanManager) -> anyhow::Result<Self> {
         Ok(())
     }
 }

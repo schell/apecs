@@ -9,7 +9,7 @@ mod bundle;
 pub use bundle::*;
 use tuple_list::TupleList;
 
-use crate::{mpsc, CanFetch, ResourceId, schedule::Borrow};
+use crate::{mpsc, CanFetch, ResourceId, schedule::Borrow, resource_manager::LoanManager};
 
 /// A collection of entities having the same component types
 #[derive(Debug, Default)]
@@ -674,26 +674,37 @@ where
     T: Tuple + ?Sized,
     T::TupleList: IsQuery;
 
+unsafe impl<T> Send for Query<T>
+    where
+    T: Tuple,
+    T::TupleList: IsQuery,
+    <T::TupleList as IsQuery>::Columns: Send {}
+
+unsafe impl<T> Sync for Query<T>
+where
+    T: Tuple,
+    T::TupleList: IsQuery,
+    <T::TupleList as IsQuery>::Columns: Sync {}
+
 impl<T> CanFetch for Query<T>
 where
-    T: Tuple + ?Sized,
+    T: Tuple + Send + Sync + ?Sized,
     T::TupleList: IsQuery,
+    <T::TupleList as IsQuery>::Columns: Send + Sync + 'static
 {
     fn borrows() -> Vec<Borrow> {
         <T::TupleList as IsQuery>::column_borrows()
     }
 
-    fn construct(
-        resource_return_tx: mpsc::Sender<(crate::ResourceId, crate::Resource)>,
-        fields: &mut FxHashMap<crate::ResourceId, crate::FetchReadyResource>,
-    ) -> anyhow::Result<Self> {
-        todo!()
+    fn construct(loan_mngr: &mut LoanManager) -> anyhow::Result<Self> {
+        let all = loan_mngr.get_mut::<AllArchetypes>()?;
+        Query::<T>::try_from(all)
     }
 }
 
 impl<'a, T> TryFrom<&'a mut AllArchetypes> for Query<T>
 where
-    T: Tuple + ?Sized,
+    T: Tuple + Send + Sync + ?Sized,
     T::TupleList: IsQuery,
 {
     type Error = anyhow::Error;
@@ -720,6 +731,8 @@ where
 #[cfg(test)]
 mod test {
     use std::any::Any;
+
+    use crate::world::World;
 
     use super::*;
 
@@ -849,5 +862,35 @@ mod test {
             let _ = all.remove_any(id);
         }
         assert!(all.is_empty());
+    }
+
+    #[test]
+    fn canfetch_query() {
+        let mut all = AllArchetypes::default();
+        let _ = all.insert_bundle(0, (0.0f32, true));
+        let _ = all.insert_bundle(1, (1.0f32, false));
+        let _ = all.insert_bundle(2, (2.0f32, true));
+        let mut world = World::default();
+        world.with_resource(all).unwrap();
+
+        {
+            let mut query = world.fetch::<Query<(&f32, &bool)>>().unwrap();
+            let (f32s, bools):(Vec<_>, Vec<_>) = query.iter_mut().map(|(f, b)| (*f, *b)).unzip();
+            assert_eq!(vec![0.0, 1.0, 2.0], f32s);
+            assert_eq!(vec![true, false, true], bools);
+        }
+        {
+            let mut query = world.fetch::<Query<(&mut f32, &mut bool)>>().unwrap();
+            for (f, b) in query.iter_mut() {
+                *f *= 3.0;
+                *b = *f < 5.0;
+            }
+        }
+        {
+            let mut query = world.fetch::<Query<(&f32, &bool)>>().unwrap();
+            let (f32s, bools):(Vec<_>, Vec<_>) = query.iter_mut().map(|(f, b)| (*f, *b)).unzip();
+            assert_eq!(vec![0.0, 3.0, 6.0], f32s);
+            assert_eq!(vec![true, true, false], bools);
+        }
     }
 }

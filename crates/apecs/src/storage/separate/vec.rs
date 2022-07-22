@@ -1,6 +1,9 @@
 //! Storage using a naive vector.
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
-use std::slice::IterMut;
+use std::{
+    ops::DerefMut,
+    slice::IterMut
+};
 
 use crate::storage::{Entry, MaybeIter, MaybeParIter, Without};
 
@@ -155,9 +158,9 @@ impl<T: Send + Sync + 'static> VecStorage<T> {
     /// ## NOTE
     /// This will cause the component's entry to be marked as changed.
     pub fn get_mut(&mut self, id: usize) -> Option<&mut T> {
-        self.0
-            .get_mut(id)
-            .and_then(|m| m.as_mut().map(|e| &mut e.value))
+        let me = self.0.get_mut(id)?;
+        let e = me.as_mut()?;
+        Some(e.deref_mut())
     }
 
     pub fn insert(&mut self, id: usize, component: T) -> Option<T> {

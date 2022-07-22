@@ -1,15 +1,13 @@
-use std::{future::Future, pin::Pin, sync::atomic::AtomicU64};
+use std::{collections::VecDeque, future::Future, pin::Pin, sync::atomic::AtomicU64};
 
 use anyhow::Context;
-use rustc_hash::FxHashMap;
 
 use crate::{
-    mpsc,
-    resource_manager::ResourceManager,
-    schedule::{BatchData, Borrow, IsBatch, IsSchedule, IsSystem},
+    resource_manager::{LoanManager, ResourceManager},
+    schedule::{Borrow, IsBatch, IsSchedule, IsSystem, UntypedSystemData},
     spsc,
     world::Facade,
-    CanFetch, FetchReadyResource, Request, Resource, ResourceId,
+    CanFetch, Request, Resource,
 };
 
 static SYSTEM_ITERATION: AtomicU64 = AtomicU64::new(0);
@@ -52,7 +50,7 @@ pub struct AsyncSystem {
     // Unbounded. Used to send resource requests from the system to the world.
     pub resource_request_rx: spsc::Receiver<Request>,
     // Bounded (1). Used to send resources from the world to the system.
-    pub resources_to_system_tx: spsc::Sender<FxHashMap<ResourceId, FetchReadyResource>>,
+    pub resources_to_system_tx: spsc::Sender<Resource>,
 }
 
 /// Whether or not a system should continue execution.
@@ -76,19 +74,13 @@ pub fn err(err: anyhow::Error) -> anyhow::Result<ShouldContinue> {
     Err(err)
 }
 
-pub type SystemFunction = Box<
-    dyn FnMut(
-            mpsc::Sender<(ResourceId, Resource)>,
-            FxHashMap<ResourceId, FetchReadyResource>,
-        ) -> anyhow::Result<ShouldContinue>
-        + Send
-        + Sync
-        + 'static,
->;
+pub type SystemFunction =
+    Box<dyn FnMut(UntypedSystemData) -> anyhow::Result<ShouldContinue> + Send + Sync + 'static>;
 
 pub struct SyncSystem {
     pub name: String,
     pub borrows: Vec<Borrow>,
+    pub prepare: fn(&mut LoanManager<'_>) -> anyhow::Result<UntypedSystemData>,
     pub function: SystemFunction,
 }
 
@@ -111,12 +103,12 @@ impl IsSystem for SyncSystem {
         &self.borrows
     }
 
-    fn run(
-        &mut self,
-        tx: mpsc::Sender<(ResourceId, Resource)>,
-        resources: FxHashMap<ResourceId, FetchReadyResource>,
-    ) -> anyhow::Result<ShouldContinue> {
-        (self.function)(tx, resources)
+    fn prep(&self, loan_mngr: &mut LoanManager<'_>) -> anyhow::Result<UntypedSystemData> {
+        (self.prepare)(loan_mngr)
+    }
+
+    fn run(&mut self, data: UntypedSystemData) -> anyhow::Result<ShouldContinue> {
+        (self.function)(data)
     }
 }
 
@@ -124,14 +116,20 @@ impl SyncSystem {
     pub fn new<T, F>(name: impl AsRef<str>, mut sys_fn: F) -> Self
     where
         F: FnMut(T) -> anyhow::Result<ShouldContinue> + Send + Sync + 'static,
-        T: CanFetch,
+        T: CanFetch + Send + Sync + 'static,
     {
         SyncSystem {
             name: name.as_ref().to_string(),
             borrows: T::borrows(),
-            function: Box::new(move |tx, mut resources| {
-                let data = T::construct(tx, &mut resources)?;
-                sys_fn(data)
+            prepare: |loan_mngr: &mut LoanManager| {
+                let box_t: Box<T> = Box::new(T::construct(loan_mngr)?);
+                let b: UntypedSystemData = box_t;
+                Ok(b)
+            },
+            function: Box::new(move |b: UntypedSystemData| {
+                let box_t: Box<T> = b.downcast().ok().context("cannot downcast")?;
+                let t: T = *box_t;
+                sys_fn(t)
             }),
         }
     }
@@ -230,14 +228,14 @@ impl<'a> IsSystem for AsyncSystemRequest<'a> {
         &self.1.borrows
     }
 
-    fn run(
-        &mut self,
-        _: mpsc::Sender<(ResourceId, Resource)>,
-        resources: FxHashMap<ResourceId, FetchReadyResource>,
-    ) -> anyhow::Result<ShouldContinue> {
+    fn prep(&self, loan_mngr: &mut LoanManager<'_>) -> anyhow::Result<UntypedSystemData> {
+        (self.1.construct)(loan_mngr)
+    }
+
+    fn run(&mut self, data: UntypedSystemData) -> anyhow::Result<ShouldContinue> {
         self.0
             .resources_to_system_tx
-            .try_send(resources)
+            .try_send(data)
             .context(format!(
                 "could not send resources to async system '{}'",
                 self.name()
@@ -286,41 +284,25 @@ impl<'a> IsBatch for AsyncBatch<'a> {
     fn run(
         &mut self,
         _: bool,
-        mut data: BatchData<Self::ExtraRunData>,
+        extra: &'a async_executor::Executor<'static>,
         resource_manager: &mut ResourceManager,
     ) -> anyhow::Result<()> {
+        let mut loan_mngr = LoanManager(resource_manager);
         let mut systems = self.take_systems();
-        systems.retain(|system| {
-            let data: rustc_hash::FxHashMap<ResourceId, FetchReadyResource> =
-                data.resources.pop_front().unwrap();
+        let mut data = VecDeque::new();
+        for sys in systems.iter() {
+            data.push_back(sys.prep(&mut loan_mngr)?);
+        }
+        drop(loan_mngr);
+
+        systems.retain_mut(|system| {
+            let data: UntypedSystemData = data.pop_front().unwrap();
             if system.0.resource_request_rx.is_closed() {
                 return false;
             }
-            // sometimes a system doesn't request resources every frame
-            if !data.is_empty() {
-                // send the resources off, if need be
-                log::trace!("sending resources to async '{}'", system.name());
-                if cfg!(feature = "debug-async") {
-                    for (rez_id, rez) in data.iter() {
-                        log::trace!(
-                            "    - {} {}",
-                            if rez.is_owned() { " " } else { "&" },
-                            rez_id.name
-                        );
-                    }
-                }
-                system
-                    .0
-                    .resources_to_system_tx
-                    .try_send(data)
-                    .with_context(|| {
-                        format!(
-                            "could not send resources to async system '{}'",
-                            system.name()
-                        )
-                    })
-                    .unwrap();
-            }
+            // send the resources off, if need be
+            log::trace!("sending resources to async '{}'", system.name());
+            let _ = system.run(data).unwrap();
             true
         });
 
@@ -328,7 +310,7 @@ impl<'a> IsBatch for AsyncBatch<'a> {
 
         // tick the executor until the loaned resources have been returned
         loop {
-            while data.extra.try_tick() {
+            while extra.try_tick() {
                 let _ = increment_current_iteration();
             }
             let resources_still_loaned = resource_manager.try_unify_resources("async batch")?;

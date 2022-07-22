@@ -15,7 +15,7 @@ impl SyncSystemWithDeps {
     pub fn new<T, F>(name: &str, system: F, deps: Option<&[&str]>) -> Self
     where
         F: FnMut(T) -> anyhow::Result<ShouldContinue> + Send + Sync + 'static,
-        T: CanFetch,
+        T: CanFetch + Send + Sync + 'static,
     {
         let mut vs = vec![];
         if let Some(names) = deps {
@@ -94,7 +94,7 @@ impl Plugin {
         self
     }
 
-    pub fn with_system<T: CanFetch>(
+    pub fn with_system<T: CanFetch + Send + Sync + 'static>(
         mut self,
         name: &str,
         system: impl FnMut(T) -> anyhow::Result<ShouldContinue> + Send + Sync + 'static,

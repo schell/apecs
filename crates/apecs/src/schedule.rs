@@ -4,14 +4,15 @@
 //! other modeluse.
 use rayon::{iter::Either, prelude::*};
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::{collections::VecDeque, iter::FlatMap, slice::Iter, sync::Arc};
+use std::{collections::VecDeque, iter::FlatMap, slice::Iter, sync::Arc, any::Any};
 
 use crate::{
-    mpsc,
-    resource_manager::ResourceManager,
+    resource_manager::{ResourceManager, LoanManager},
     system::{increment_current_iteration, ShouldContinue},
     FetchReadyResource, Resource, ResourceId,
 };
+
+pub type UntypedSystemData = Box<dyn Any + Send + Sync>;
 
 pub trait IsSystem: std::fmt::Debug {
     fn name(&self) -> &str;
@@ -31,10 +32,11 @@ pub trait IsSystem: std::fmt::Debug {
         false
     }
 
+    fn prep(&self, loan_mngr: &mut LoanManager<'_>) -> anyhow::Result<UntypedSystemData>;
+
     fn run(
         &mut self,
-        resource_return: mpsc::Sender<(ResourceId, Resource)>,
-        resources: FxHashMap<ResourceId, FetchReadyResource>,
+        data: UntypedSystemData,
     ) -> anyhow::Result<ShouldContinue>;
 }
 
@@ -62,7 +64,7 @@ impl<T> BatchData<T> {
 /// don't conflict).
 pub trait IsBatch: std::fmt::Debug + Default {
     type System: IsSystem + Send + Sync;
-    type ExtraRunData: Clone;
+    type ExtraRunData: Send + Sync + Clone;
 
     fn contains_system(&self, name: &str) -> bool {
         for system in self.systems() {
@@ -92,52 +94,31 @@ pub trait IsBatch: std::fmt::Debug + Default {
     /// Sets the barrier this batch runs after.
     fn set_barrier(&mut self, barrier: usize);
 
-    /// Prepare a vector of system data for each system in the batch given
-    /// current world resources and previously loaned resources.
-    fn prepare_batch_data(
-        &self,
-        resource_manager: &mut ResourceManager,
-        extra: Self::ExtraRunData,
-    ) -> anyhow::Result<BatchData<Self::ExtraRunData>> {
-        resource_manager.unify_resources(&format!(
-            "{}::prepare_batch_data",
-            std::any::type_name::<Self>()
-        ))?;
-
-        let mut data = BatchData::new(extra);
-        for system in self.systems() {
-            let mut system_resources = FxHashMap::default();
-            resource_manager.try_loan_resources(
-                system.name(),
-                &mut system_resources,
-                system.borrows().iter(),
-            )?;
-            data.resources.push_back(system_resources);
-        }
-
-        Ok(data)
-    }
-
     fn take_systems(&mut self) -> Vec<Self::System>;
 
     fn set_systems(&mut self, systems: Vec<Self::System>);
 
     /// Run the batch in parallel and then unify the resources to make the world
-    /// "whole". Return the names of the systems that should be trimmed.
+    /// "whole".
     fn run(
         &mut self,
         parallelize: bool,
-        data: BatchData<Self::ExtraRunData>,
+        _: Self::ExtraRunData,
         resource_manager: &mut ResourceManager,
     ) -> anyhow::Result<()> {
+        let mut loan_mngr = LoanManager(resource_manager);
+        let systems = self.take_systems();
+        let mut data = vec![];
+        for sys in systems.iter() {
+            data.push(sys.prep(&mut loan_mngr)?);
+        }
         let (remaining_systems, errs): (Vec<_>, Vec<_>) = if parallelize {
-            self.take_systems()
+            (systems, data)
                 .into_par_iter()
-                .zip(data.resources.into_par_iter())
                 .filter_map(|(mut system, data)| {
                     log::trace!("running par system '{}'", system.name());
                     let _ = increment_current_iteration();
-                    match system.run(resource_manager.exclusive_resource_return_sender(), data) {
+                    match system.run(data) {
                         Ok(ShouldContinue::Yes) => Some(Either::Left(system)),
                         Ok(ShouldContinue::No) => None,
                         Err(err) => Some(Either::Right(err)),
@@ -147,13 +128,12 @@ pub trait IsBatch: std::fmt::Debug + Default {
         } else {
             let mut remaining_systems = vec![];
             let mut errs = vec![];
-            self.take_systems()
-                .into_iter()
-                .zip(data.resources.into_iter())
+            systems.into_iter()
+                .zip(data.into_iter())
                 .for_each(|(mut system, data)| {
                     log::trace!("running system '{}'", system.name());
                     let _ = increment_current_iteration();
-                    match system.run(resource_manager.exclusive_resource_return_sender(), data) {
+                    match system.run(data) {
                         Ok(ShouldContinue::Yes) => {
                             remaining_systems.push(system);
                         }
@@ -173,11 +153,6 @@ pub trait IsBatch: std::fmt::Debug + Default {
                 Ok(()) => Err(err),
                 Err(prev) => Err(prev.context(format!("and {}", err))),
             })?;
-
-        anyhow::ensure!(
-            data.borrowed_resources.is_empty(),
-            "shared batch resources are still in the wild"
-        );
 
         Ok(())
     }
@@ -271,12 +246,11 @@ pub trait IsSchedule: std::fmt::Debug {
         extra: <Self::Batch as IsBatch>::ExtraRunData,
         resource_manager: &mut ResourceManager,
     ) -> anyhow::Result<()> {
+        resource_manager.unify_resources("IsSchedule::run before all")?;
         let parallelize = self.get_should_parallelize();
         for batch in self.batches_mut() {
-            // make the batch data
-            // TODO: move making batch data down into IsBatch::run
-            let batch_data = batch.prepare_batch_data(resource_manager, extra.clone())?;
-            batch.run(parallelize, batch_data, resource_manager)?;
+            batch.run(parallelize, extra.clone(), resource_manager)?;
+            resource_manager.unify_resources("IsSchedule::run after one")?;
         }
 
         Ok(())

@@ -45,7 +45,7 @@ impl SeparateStorageExt for World {
 pub mod test {
     use crate::{
         self as apecs,
-        storage::{separate::*, Entry, IsEntry, Maybe},
+        storage::{separate::*, Entry, Maybe},
         system::{ok, ShouldContinue},
         world::*,
         CanFetch,
@@ -144,12 +144,8 @@ pub mod test {
             ok()
         }
 
-        fn run<A, B, const IS_PAR: bool>() -> anyhow::Result<()> {
-            let desc = format!(
-                "{}-{}",
-                std::any::type_name::<A>(),
-                if IS_PAR { "parallel" } else { "seq" }
-            );
+        fn run<const IS_PAR: bool>() -> anyhow::Result<()> {
+            let desc = format!("{}", if IS_PAR { "parallel" } else { "seq" });
 
             let mut world = World::default();
             world
@@ -196,8 +192,8 @@ pub mod test {
             Ok(())
         }
 
-        run::<VecStorage<f32>, VecStorage<&'static str>, false>().unwrap();
-        run::<VecStorage<f32>, VecStorage<&'static str>, true>().unwrap();
+        run::<false>().unwrap();
+        run::<true>().unwrap();
     }
 
     #[test]

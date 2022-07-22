@@ -1,8 +1,7 @@
 //! Core types and processes
-use crate::{plugins::Plugin, schedule::Borrow};
+use crate::{plugins::Plugin, resource_manager::LoanManager, schedule::Borrow};
 use anyhow::Context;
 use rayon::iter::IntoParallelIterator;
-use rustc_hash::FxHashMap;
 use std::{
     any::{Any, TypeId},
     marker::PhantomData,
@@ -366,9 +365,27 @@ where
     }
 }
 
-#[derive(Debug, Default)]
 pub struct Request {
     pub borrows: Vec<Borrow>,
+    pub construct: fn(&mut LoanManager<'_>) -> anyhow::Result<Resource>,
+}
+
+impl std::fmt::Debug for Request {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Request")
+            .field("borrows", &self.borrows)
+            .field("construct", &"fn(&mut LoanManager<'_> -> anyhow::Result<Resource>)")
+            .finish()
+    }
+}
+
+impl Default for Request {
+    fn default() -> Self {
+        Self {
+            borrows: Default::default(),
+            construct: |_| anyhow::bail!("default construct"),
+        }
+    }
 }
 
 pub struct LazyResource(ResourceId, Box<dyn FnOnce() -> Resource>);
@@ -408,13 +425,11 @@ impl ResourceRequirement {
 }
 
 /// Types that can be fetched from the [`World`].
-pub trait CanFetch: Sized {
+pub trait CanFetch: Send + Sync + Sized {
     fn borrows() -> Vec<Borrow>;
 
-    fn construct(
-        resource_return_tx: mpsc::Sender<(ResourceId, Resource)>,
-        fields: &mut FxHashMap<ResourceId, FetchReadyResource>,
-    ) -> anyhow::Result<Self>;
+    /// Attempt to construct `Self` with the given `LoanManager`.
+    fn construct(loan_mngr: &mut LoanManager) -> anyhow::Result<Self>;
 
     /// Return a plugin containing the systems and sub-resources required to
     /// create and use the type.
@@ -435,11 +450,8 @@ impl<'a, T: IsResource + Default> CanFetch for Write<T> {
         }]
     }
 
-    fn construct(
-        resource_return_tx: mpsc::Sender<(ResourceId, Resource)>,
-        fields: &mut FxHashMap<ResourceId, FetchReadyResource>,
-    ) -> anyhow::Result<Self> {
-        let WriteExpect(fetched) = WriteExpect::construct(resource_return_tx, fields)?;
+    fn construct(loan_mngr: &mut LoanManager) -> anyhow::Result<Self> {
+        let WriteExpect(fetched) = WriteExpect::construct(loan_mngr)?;
         Ok(Write(fetched))
     }
 
@@ -456,17 +468,12 @@ impl<'a, T: IsResource> CanFetch for WriteExpect<T> {
         }]
     }
 
-    fn construct(
-        resource_return_tx: mpsc::Sender<(ResourceId, Resource)>,
-        fields: &mut FxHashMap<ResourceId, FetchReadyResource>,
-    ) -> anyhow::Result<Self> {
-        let id = ResourceId::new::<T>();
-        let t: FetchReadyResource = fields.remove(&id).with_context(|| {
-            format!(
-                "WriteExpect::construct could not find '{}' in resources",
-                std::any::type_name::<T>(),
-            )
-        })?;
+    fn construct(loan_mngr: &mut LoanManager) -> anyhow::Result<Self> {
+        let borrow = Borrow {
+            id: ResourceId::new::<T>(),
+            is_exclusive: true,
+        };
+        let t: FetchReadyResource = loan_mngr.get_loaned("WriteExpect::construct", &borrow)?;
         let t = t.into_owned().context("resource is not owned")?;
         let inner: Option<Box<T>> = Some(t.downcast::<T>().map_err(|_| {
             anyhow::anyhow!(
@@ -475,7 +482,7 @@ impl<'a, T: IsResource> CanFetch for WriteExpect<T> {
             )
         })?);
         let fetched = Fetched {
-            resource_return_tx,
+            resource_return_tx: loan_mngr.resource_return_tx(),
             inner,
         };
         Ok(WriteExpect(fetched))
@@ -494,11 +501,8 @@ impl<'a, T: IsResource + Default> CanFetch for Read<T> {
         }]
     }
 
-    fn construct(
-        resource_return_tx: mpsc::Sender<(ResourceId, Resource)>,
-        fields: &mut FxHashMap<ResourceId, FetchReadyResource>,
-    ) -> anyhow::Result<Self> {
-        let ReadExpect { inner, .. } = ReadExpect::<T>::construct(resource_return_tx, fields)?;
+    fn construct(loan_mngr: &mut LoanManager) -> anyhow::Result<Self> {
+        let ReadExpect { inner, .. } = ReadExpect::<T>::construct(loan_mngr)?;
         Ok(Read {
             inner,
             _phantom: PhantomData,
@@ -518,17 +522,12 @@ impl<'a, T: IsResource> CanFetch for ReadExpect<T> {
         }]
     }
 
-    fn construct(
-        _: mpsc::Sender<(ResourceId, Resource)>,
-        fields: &mut FxHashMap<ResourceId, FetchReadyResource>,
-    ) -> anyhow::Result<Self> {
-        let id = ResourceId::new::<T>();
-        let t: FetchReadyResource = fields.remove(&id).with_context(|| {
-            format!(
-                "ReadExpect::construct could not find '{}' in resources",
-                std::any::type_name::<T>(),
-            )
-        })?;
+    fn construct(loan_mngr: &mut LoanManager) -> anyhow::Result<Self> {
+        let borrow = Borrow {
+            id: ResourceId::new::<T>(),
+            is_exclusive: false,
+        };
+        let t: FetchReadyResource = loan_mngr.get_loaned("ReadExpect::construct", &borrow)?;
         let inner = t.into_ref().context("resource is not borrowed")?;
 
         Ok(ReadExpect {

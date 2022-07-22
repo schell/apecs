@@ -49,13 +49,13 @@ fn gen_from_body(ast: &Data, name: &Ident) -> (proc_macro2::TokenStream, Vec<Typ
 
             quote! {
                 #name {
-                    #( #identifiers: apecs::CanFetch::construct(tx.clone(), fields)? ),*
+                    #( #identifiers: apecs::CanFetch::construct(loan_mngr)? ),*
                 }
             }
         }
         DataType::Tuple => {
             let count = tys.len();
-            let fetch = vec![quote! { apecs::CanFetch::construct(tx.clone(), fields) }; count];
+            let fetch = vec![quote! { apecs::CanFetch::construct(loan_mngr) }; count];
 
             quote! {
                 #name ( #( #fetch ),* )
@@ -90,10 +90,7 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
                 r
             }
 
-            fn construct(
-                tx: apecs::mpsc::Sender<(apecs::ResourceId, apecs::Resource)>,
-                fields: &mut apecs::FxHashMap<apecs::ResourceId, apecs::FetchReadyResource>,
-            ) -> apecs::anyhow::Result<Self> {
+            fn construct(loan_mngr: &mut apecs::resource_manager::LoanManager) -> apecs::anyhow::Result<Self> {
                 Ok(#construct_return)
             }
 
@@ -153,12 +150,9 @@ pub fn impl_canfetch_tuple(input: proc_macro::TokenStream) -> proc_macro::TokenS
                 bs
             }
 
-            fn construct(
-                tx: apecs::mpsc::Sender<(apecs::ResourceId, apecs::Resource)>,
-                fields: &mut apecs::FxHashMap<apecs::ResourceId, apecs::FetchReadyResource>,
-            ) -> apecs::anyhow::Result<Self> {
+            fn construct(loan_mngr: &mut apecs::resource_manager::LoanManager) -> apecs::anyhow::Result<Self> {
                 Ok((
-                    #(#tys::construct(tx.clone(), fields)?),*
+                    #(#tys::construct(loan_mngr)?),*
                 ))
             }
 

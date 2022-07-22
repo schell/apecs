@@ -70,14 +70,25 @@ impl ResourceManager {
             .with_context(|| "could not downcast resource")
     }
 
-    pub fn get_mut<T: IsResource>(&mut self, key: &ResourceId) -> anyhow::Result<&mut T> {
+    pub fn get_mut<T: IsResource>(&mut self) -> anyhow::Result<&mut T> {
+        let key = ResourceId::new::<T>();
         let box_t: &mut Resource = self
             .world_resources
-            .get_mut(key)
+            .get_mut(&key)
             .with_context(|| format!("resource {} is missing", key.name))?;
         box_t
             .downcast_mut()
             .with_context(|| "could not downcast resource")
+    }
+
+    fn missing_msg(label: &str, borrow: &Borrow, extra: &str) -> String {
+        format!(
+            r#"'{}' requested missing resource "{}" encountered while building request\n{}
+"#,
+            label,
+            borrow.rez_id().name,
+            extra
+        )
     }
 
     /// Attempt to loan the requested resources by adding them to the given
@@ -89,47 +100,7 @@ impl ResourceManager {
         borrows: impl Iterator<Item = &'a Borrow>,
     ) -> anyhow::Result<()> {
         for borrow in borrows {
-            let missing_msg = |extra: &str| {
-                format!(
-                    r#"'{}' requested missing resource "{}" encountered while building request\n{}
-"#,
-                    label,
-                    borrow.rez_id().name,
-                    extra
-                )
-            };
-
-            let rez_id = borrow.rez_id();
-            let ready_rez: FetchReadyResource = match self.world_resources.remove(&rez_id) {
-                Some(rez) => {
-                    if borrow.is_exclusive() {
-                        assert!(self.loaned_muts.insert(rez_id), "already mutably borrowed",);
-                        FetchReadyResource::Owned(rez)
-                    } else {
-                        let arc_rez = Arc::new(rez);
-                        if !self.loaned_refs.contains_key(&rez_id) {
-                            let _ = self.loaned_refs.insert(rez_id, arc_rez.clone());
-                        }
-                        FetchReadyResource::Ref(arc_rez)
-                    }
-                }
-                None => {
-                    // it's not in the main map, so maybe it was previously borrowed
-                    if borrow.is_exclusive() {
-                        anyhow::bail!(missing_msg(
-                            "the borrow is exclusive and the resource is missing"
-                        ))
-                    } else {
-                        let rez: &Arc<Resource> =
-                            self.loaned_refs.get(&rez_id).context(missing_msg(
-                                "the borrow is not exclusive but the resource is missing from \
-                                 previously borrowed resources",
-                            ))?;
-                        FetchReadyResource::Ref(rez.clone())
-                    }
-                }
-            };
-
+            let ready_rez = self.get_loaned(label, borrow)?;
             let prev_inserted_rez = additive_map.insert(borrow.rez_id(), ready_rez);
             anyhow::ensure!(
                 prev_inserted_rez.is_none(),
@@ -139,6 +110,49 @@ impl ResourceManager {
         }
 
         Ok(())
+    }
+
+    pub fn get_loaned(
+        &mut self,
+        label: &str,
+        borrow: &Borrow,
+    ) -> anyhow::Result<FetchReadyResource> {
+        let rez_id = borrow.rez_id();
+        let ready_rez: FetchReadyResource = match self.world_resources.remove(&rez_id) {
+            Some(rez) => {
+                if borrow.is_exclusive() {
+                    assert!(self.loaned_muts.insert(rez_id), "already mutably borrowed",);
+                    FetchReadyResource::Owned(rez)
+                } else {
+                    let arc_rez = Arc::new(rez);
+                    if !self.loaned_refs.contains_key(&rez_id) {
+                        let _ = self.loaned_refs.insert(rez_id, arc_rez.clone());
+                    }
+                    FetchReadyResource::Ref(arc_rez)
+                }
+            }
+            None => {
+                // it's not in the main map, so maybe it was previously borrowed
+                if borrow.is_exclusive() {
+                    anyhow::bail!(Self::missing_msg(
+                        label,
+                        &borrow,
+                        "the borrow is exclusive and the resource is missing"
+                    ))
+                } else {
+                    let rez: &Arc<Resource> =
+                        self.loaned_refs.get(&rez_id).context(Self::missing_msg(
+                            label,
+                            &borrow,
+                            "the borrow is not exclusive but the resource is missing from \
+                             previously borrowed resources",
+                        ))?;
+                    FetchReadyResource::Ref(rez.clone())
+                }
+            }
+        };
+
+        Ok(ready_rez)
     }
 
     /// Returns whether any resources are out on loan
@@ -221,6 +235,29 @@ impl ResourceManager {
     }
 }
 
+pub struct LoanManager<'a>(pub(crate) &'a mut ResourceManager);
+
+impl<'a> LoanManager<'a> {
+    /// Attempt to get a loan on the resources specified by the given `Borrow`.
+    pub fn get_loaned(
+        &mut self,
+        label: &str,
+        borrow: &Borrow,
+    ) -> anyhow::Result<FetchReadyResource> {
+        self.0.get_loaned(label, borrow)
+    }
+
+    /// Attempt to get a mutable reference to a resource.
+    pub fn get_mut<T: IsResource>(&mut self) -> anyhow::Result<&mut T> {
+        self.0.get_mut::<T>()
+    }
+
+    /// Get a clone of the resource return channel sender.
+    pub fn resource_return_tx(&self) -> mpsc::Sender<(ResourceId, Resource)> {
+        self.0.exclusive_resource_return_sender()
+    }
+}
+
 #[cfg(test)]
 mod test {
     use crate::{CanFetch, Write};
@@ -232,7 +269,7 @@ mod test {
         let mut mngr = ResourceManager::new();
         assert!(mngr.add(vec!["one", "two"]).is_none());
         {
-            let vs: &mut Vec<&str> = mngr.get_mut(&ResourceId::new::<Vec<&str>>()).unwrap();
+            let vs: &mut Vec<&str> = mngr.get_mut::<Vec<&str>>().unwrap();
             vs.push("three");
         }
     }
@@ -241,45 +278,15 @@ mod test {
     fn can_fetch_roundtrip() {
         let mut mngr = ResourceManager::new();
         mngr.add(vec!["one"]);
-
-        let mut borrows = Write::<Vec<&str>>::reads()
-            .into_iter()
-            .map(|id| Borrow {
-                id,
-                is_exclusive: false,
-            })
-            .collect::<Vec<_>>();
-        borrows.extend(Write::<Vec<&str>>::writes().into_iter().map(|id| Borrow {
-            id,
-            is_exclusive: true,
-        }));
-
-        let mut ready_rezs = FxHashMap::default();
-        mngr.try_loan_resources("test", &mut ready_rezs, borrows.iter())
-            .unwrap();
-
         {
-            let mut vs = Write::<Vec<&str>>::construct(
-                mngr.exclusive_resource_return_sender(),
-                &mut ready_rezs,
-            )
-            .unwrap();
+            let mut vs = Write::<Vec<&str>>::construct(&mut LoanManager(&mut mngr)).unwrap();
             vs.push("two");
         }
-
         mngr.unify_resources("test").unwrap();
-        mngr.try_loan_resources("test", &mut ready_rezs, borrows.iter())
-            .unwrap();
-
         {
-            let mut vs = Write::<Vec<&str>>::construct(
-                mngr.exclusive_resource_return_sender(),
-                &mut ready_rezs,
-            )
-            .unwrap();
+            let mut vs = Write::<Vec<&str>>::construct(&mut LoanManager(&mut mngr)).unwrap();
             vs.push("three");
         }
-
         mngr.unify_resources("test").unwrap();
     }
 }
