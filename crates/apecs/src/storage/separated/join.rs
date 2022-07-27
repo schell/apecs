@@ -7,7 +7,7 @@ use std::cmp::Ordering;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use tuple_list::{Tuple, TupleList};
 
-use crate::storage::{Entry, HasId, Maybe};
+use crate::storage::{Entry, HasEntityInfo, Maybe, HasId};
 
 /// Converts a `TupleList` of `IntoIterator`s into a `TupleList` of `Iterator`s.
 pub trait TupleListIntoIter {
@@ -54,25 +54,25 @@ impl CompareId for usize {
 
 impl<T> CompareId for Entry<T> {
     fn cmp_id(&self, id: &usize) -> Ordering {
-        self.id().cmp(id)
+        self.info.key.cmp(id)
     }
 }
 
 impl<T> CompareId for &Entry<T> {
     fn cmp_id(&self, id: &usize) -> Ordering {
-        self.id().cmp(id)
+        self.info.key.cmp(id)
     }
 }
 
 impl<T> CompareId for &mut Entry<T> {
     fn cmp_id(&self, id: &usize) -> Ordering {
-        self.id().cmp(id)
+        self.info.key.cmp(id)
     }
 }
 
 impl<T> CompareId for Maybe<T> {
     fn cmp_id(&self, id: &usize) -> Ordering {
-        self.id().cmp(id)
+        self.key.cmp(id)
     }
 }
 

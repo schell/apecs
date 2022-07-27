@@ -4,17 +4,20 @@ use std::marker::PhantomData;
 use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 use rustc_hash::FxHashSet;
 
-use crate::{storage::Entry, system::current_iteration};
+use crate::{
+    storage::{HasEntityInfo, HasId},
+    system::current_iteration,
+};
 
-pub struct TrackedIter<'a, T, I>(u64, I, fn(&'a Entry<T>, u64) -> bool);
+pub struct TrackedIter<I: Iterator>(u64, I, fn(&I::Item, u64) -> bool);
 
-impl<'a, T, I: Iterator<Item = &'a Entry<T>>> Iterator for TrackedIter<'a, T, I> {
+impl<I: Iterator> Iterator for TrackedIter<I> {
     type Item = I::Item;
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             let e = self.1.next()?;
-            if self.2(e, self.0) {
+            if self.2(&e, self.0) {
                 return Some(e);
             }
         }
@@ -51,6 +54,10 @@ impl<T> Default for Tracker<T> {
 }
 
 impl<T: Send + Sync + 'static> Tracker<T> {
+    pub fn last_update(&self) -> u64 {
+        self.last_changed
+    }
+
     /// Clear the tracker.
     pub fn clear(&mut self) {
         self.last_changed = current_iteration();
@@ -58,107 +65,108 @@ impl<T: Send + Sync + 'static> Tracker<T> {
 
     /// Return an iterator over all items in the store that
     /// have been changed or added since the last time this tracker was cleared.
-    pub fn changed_iter<'b>(
+    pub fn changed_iter<E: AsRef<T> + HasEntityInfo>(
         &self,
-        store: impl IntoIterator<Item = &'b Entry<T>>,
-    ) -> impl Iterator<Item = &'b Entry<T>> {
-        TrackedIter(
-            self.last_changed,
-            store.into_iter(),
-            Entry::has_changed_since,
-        )
-    }
-
-    /// Return a parallel iterator over all items in the store that
-    /// have been changed or added since the last time this tracker was cleared.
-    pub fn changed_par_iter<'b, S>(
-        &self,
-        store: S,
-    ) -> impl ParallelIterator<Item = Option<&'b Entry<T>>> + IndexedParallelIterator
-    where
-        S: IntoParallelIterator<Item = Option<&'b Entry<T>>>,
-        <S as IntoParallelIterator>::Iter: IndexedParallelIterator,
-    {
-        let last_changed = self.last_changed;
-        store.into_par_iter().map(move |me| {
-            let e = me?;
-            if e.has_changed_since(last_changed) {
-                Some(e)
-            } else {
-                None
-            }
+        store: impl IntoIterator<Item = E>,
+    ) -> impl Iterator<Item = E> {
+        TrackedIter(self.last_changed, store.into_iter(), |item, changed| {
+            item.has_changed_since(changed)
         })
     }
+
+    ///// Return a parallel iterator over all items in the store that
+    ///// have been changed or added since the last time this tracker was cleared.
+    // pub fn changed_par_iter<'b, S>(
+    //    &self,
+    //    store: S,
+    //) -> impl ParallelIterator<Item = Option<&'b Entry<T>>> +
+    //) IndexedParallelIterator
+    // where
+    //    S: IntoParallelIterator<Item = Option<&'b Entry<T>>>,
+    //    <S as IntoParallelIterator>::Iter: IndexedParallelIterator,
+    //{
+    //    let last_changed = self.last_changed;
+    //    store.into_par_iter().map(move |me| {
+    //        let e = me?;
+    //        if e.has_changed_since(last_changed) {
+    //            Some(e)
+    //        } else {
+    //            None
+    //        }
+    //    })
+    //}
 
     /// Return an iterator over all items in the store that
     /// have been added since the last time this tracker was cleared.
-    pub fn added_iter<'b>(
+    pub fn added_iter<E: AsRef<T> + HasEntityInfo>(
         &self,
-        store: impl IntoIterator<Item = &'b Entry<T>>,
-    ) -> impl Iterator<Item = &'b Entry<T>> {
-        TrackedIter(self.last_changed, store.into_iter(), Entry::was_added_since)
-    }
-
-    /// Return a parallel iterator over all items in the store that
-    /// have been added since the last time this tracker was cleared.
-    pub fn added_par_iter<'b, S>(
-        &self,
-        store: S,
-    ) -> impl ParallelIterator<Item = Option<&'b Entry<T>>> + IndexedParallelIterator
-    where
-        S: IntoParallelIterator<Item = Option<&'b Entry<T>>>,
-        <S as IntoParallelIterator>::Iter: IndexedParallelIterator,
-    {
-        let last_changed = self.last_changed;
-        store.into_par_iter().map(move |me| {
-            let e = me?;
-            if e.has_changed_since(last_changed) && e.added {
-                Some(e)
-            } else {
-                None
-            }
+        store: impl IntoIterator<Item = E>,
+    ) -> impl Iterator<Item = E> {
+        TrackedIter(self.last_changed, store.into_iter(), |item, changed| {
+            item.was_added_since(changed)
         })
     }
+
+    ///// Return a parallel iterator over all items in the store that
+    ///// have been added since the last time this tracker was cleared.
+    // pub fn added_par_iter<'b, S>(
+    //    &self,
+    //    store: S,
+    //) -> impl ParallelIterator<Item = Option<&'b Entry<T>>> +
+    //) IndexedParallelIterator
+    // where
+    //    S: IntoParallelIterator<Item = Option<&'b Entry<T>>>,
+    //    <S as IntoParallelIterator>::Iter: IndexedParallelIterator,
+    //{
+    //    let last_changed = self.last_changed;
+    //    store.into_par_iter().map(move |me| {
+    //        let e = me?;
+    //        if e.has_changed_since(last_changed) && e.added {
+    //            Some(e)
+    //        } else {
+    //            None
+    //        }
+    //    })
+    //}
 
     /// Return an iterator over all items in the store that
     /// have been modified since the last time this tracker was cleared.
     ///
     /// Does not include items that have been added since the last time
     /// this tracker was cleared.
-    pub fn modified_iter<'b>(
+    pub fn modified_iter<E: AsRef<T> + HasEntityInfo>(
         &self,
-        store: impl IntoIterator<Item = &'b Entry<T>>,
-    ) -> impl Iterator<Item = &'b Entry<T>> {
-        TrackedIter(
-            self.last_changed,
-            store.into_iter(),
-            Entry::was_modified_since,
-        )
-    }
-
-    /// Return a parallel iterator over all items in the store that
-    /// have been modified since the last time this tracker was cleared.
-    ///
-    /// Does not include items that have been added since the last time
-    /// this tracker was cleared.
-    pub fn modified_par_iter<'b, S>(
-        &self,
-        store: S,
-    ) -> impl ParallelIterator<Item = Option<&'b Entry<T>>> + IndexedParallelIterator
-    where
-        S: IntoParallelIterator<Item = Option<&'b Entry<T>>>,
-        <S as IntoParallelIterator>::Iter: IndexedParallelIterator,
-    {
-        let last_changed = self.last_changed;
-        store.into_par_iter().map(move |me| {
-            let e = me?;
-            if e.has_changed_since(last_changed) && !e.added {
-                Some(e)
-            } else {
-                None
-            }
+        store: impl IntoIterator<Item = E>,
+    ) -> impl Iterator<Item = E> {
+        TrackedIter(self.last_changed, store.into_iter(), |item, changed| {
+            item.was_modified_since(changed)
         })
     }
+
+    ///// Return a parallel iterator over all items in the store that
+    ///// have been modified since the last time this tracker was cleared.
+    /////
+    ///// Does not include items that have been added since the last time
+    ///// this tracker was cleared.
+    // pub fn modified_par_iter<'b, S>(
+    //    &self,
+    //    store: S,
+    //) -> impl ParallelIterator<Item = Option<&'b Entry<T>>> +
+    //) IndexedParallelIterator
+    // where
+    //    S: IntoParallelIterator<Item = Option<&'b Entry<T>>>,
+    //    <S as IntoParallelIterator>::Iter: IndexedParallelIterator,
+    //{
+    //    let last_changed = self.last_changed;
+    //    store.into_par_iter().map(move |me| {
+    //        let e = me?;
+    //        if e.has_changed_since(last_changed) && !e.added {
+    //            Some(e)
+    //        } else {
+    //            None
+    //        }
+    //    })
+    //}
 
     /// Return the ids of deleted items **since the last time this function was
     /// called**.
@@ -166,10 +174,13 @@ impl<T: Send + Sync + 'static> Tracker<T> {
     /// ## Warning
     /// This does **not** return the deleted ids since the last time the tracker
     /// was cleared.
-    pub fn deleted<'b>(&mut self, store: impl IntoIterator<Item = &'b Entry<T>>) -> Vec<usize> {
+    pub fn deleted<E: AsRef<T> + HasId>(
+        &mut self,
+        store: impl IntoIterator<Item = E>,
+    ) -> Vec<usize> {
         let old_cache = std::mem::replace(
             &mut self.id_cache,
-            FxHashSet::from_iter(store.into_iter().map(Entry::id)),
+            FxHashSet::from_iter(store.into_iter().map(|item| item.id())),
         );
         old_cache
             .difference(&self.id_cache)
@@ -183,47 +194,18 @@ mod test {
     use crate::{
         anyhow,
         storage::separated::join::*,
-        storage::{separated::*, Entry},
+        storage::{
+            archetype::{AllArchetypes, Query},
+            separated::*,
+        },
         system::increment_current_iteration,
     };
 
     use super::*;
 
-    trait TestStore<C: 'static>: Default {
-        type Iter<'a>: Iterator<Item = &'a Entry<C>>
-        where
-            Self: 'a;
-
-        fn insert(&mut self, entity_id: usize, comp: C);
-        fn remove(&mut self, entity_id: usize);
-        fn iter(&self) -> Self::Iter<'_>;
-        fn get_mut(&mut self, entity_id: usize) -> Option<&mut C>;
-    }
-
-    impl<C: Send + Sync + 'static> TestStore<C> for VecStorage<C> {
-        type Iter<'a> = VecStorageIter<'a, C>
-            where Self: 'a;
-
-        fn insert(&mut self, entity_id: usize, comp: C) {
-            let _ = VecStorage::insert(self, entity_id, comp);
-        }
-
-        fn remove(&mut self, entity_id: usize) {
-            let _ = VecStorage::remove(self, entity_id);
-        }
-
-        fn iter(&self) -> Self::Iter<'_> {
-            VecStorage::iter(self)
-        }
-
-        fn get_mut(&mut self, entity_id: usize) -> Option<&mut C> {
-            VecStorage::get_mut(self, entity_id)
-        }
-    }
-
-    fn sanity_check_deleted<S: TestStore<f32>>() {
+    fn sanity_check_deleted_vec() {
         let mut tracker: Tracker<f32> = Tracker::default();
-        let mut store: S = S::default();
+        let mut store = VecStorage::<f32>::default();
         store.insert(0, 0.0);
         store.insert(1, 0.0);
         store.insert(2, 0.0);
@@ -236,7 +218,14 @@ mod test {
         );
 
         let _ = store.remove(1);
-        assert_eq!(vec![0, 2], store.iter().map(Entry::id).collect::<Vec<_>>());
+        assert_eq!(
+            vec![0, 2],
+            store
+                .iter()
+                .into_iter()
+                .map(|item| item.id())
+                .collect::<Vec<_>>()
+        );
         assert_eq!(vec![1], tracker.deleted(store.iter()));
         store.insert(3, 0.0);
         store.insert(4, 0.0);
@@ -248,10 +237,9 @@ mod test {
         assert_eq!(vec![0, 2, 3], tracker.deleted(store.iter()));
     }
 
-    fn sanity_check_added<S: TestStore<f32>>() -> anyhow::Result<()> {
-        println!("sanity_check_added<{}>", std::any::type_name::<S>());
+    fn sanity_check_added_vec() -> anyhow::Result<()> {
         let mut tracker: Tracker<f32> = Tracker::default();
-        let mut store: S = S::default();
+        let mut store = VecStorage::<f32>::default();
         store.insert(0, 0.0);
         store.insert(1, 0.0);
         store.insert(2, 0.0);
@@ -321,15 +309,17 @@ mod test {
         Ok(())
     }
 
-    fn get_change_state<'a, T: 'a, I: Iterator<Item = &'a Entry<T>>>(
-        iter: I,
-    ) -> Vec<(usize, bool)> {
-        iter.map(|e| (e.id(), e.added)).collect()
+    fn get_change_state<I>(iter: I) -> Vec<(usize, bool)>
+    where
+        I: Iterator,
+        <I as Iterator>::Item: HasId + HasEntityInfo,
+    {
+        iter.map(|e| (e.id(), e.info().added)).collect()
     }
 
-    fn sanity_check<S: TestStore<f32>>() {
+    fn sanity_check_vec() {
         let mut tracker = Tracker::<f32>::default();
-        let mut store = S::default();
+        let mut store = VecStorage::<f32>::default();
         store.insert(0, 0.0);
         store.insert(1, 0.0);
         store.insert(2, 0.0);
@@ -349,7 +339,7 @@ mod test {
 
         let changed = tracker
             .changed_iter(store.iter())
-            .map(|e| (e.id(), *e.value()))
+            .map(|e| (e.id(), *e.as_ref()))
             .collect::<Vec<_>>();
         assert_eq!(vec![(1, 1.0)], changed);
 
@@ -359,7 +349,7 @@ mod test {
 
         let changed = tracker
             .changed_iter(store.iter())
-            .map(|e| (e.id(), *e.value()))
+            .map(|e| (e.id(), *e.as_ref()))
             .collect::<Vec<_>>();
         assert_eq!(vec![(1, 1.0), (2, 2.0)], changed);
 
@@ -378,16 +368,74 @@ mod test {
             vec![(0, 0.0), (2, 200.0)],
             tracker
                 .changed_iter(store.iter())
-                .map(|e| (e.id(), *e.value()))
+                .map(|e| (e.id(), *e.as_ref()))
                 .collect::<Vec<_>>()
         );
     }
 
     #[test]
     fn sanity_check_separated() {
-        sanity_check::<VecStorage<f32>>();
-        sanity_check_added::<VecStorage<f32>>().unwrap();
-        sanity_check_deleted::<VecStorage<f32>>();
+        sanity_check_vec();
+        sanity_check_added_vec().unwrap();
+        sanity_check_deleted_vec();
+    }
+
+    #[test]
+    fn can_track_archetypes() {
+        let mut store = AllArchetypes::default();
+        store.insert(0, 0.0f32);
+        store.insert(1, 1.0f32);
+        store.insert(2, 2.0f32);
+        let mut tracker = Tracker::<f32>::default();
+        {
+            let mut query = Query::<(&f32,)>::try_from(&mut store).unwrap();
+            assert_eq!(
+                vec![(0, 0.0), (1, 1.0), (2, 2.0)],
+                query
+                    .run()
+                    .filter_map(|(f,)| if f.has_changed_since(tracker.last_update()) {
+                        Some((f.id(), *f))
+                    } else {
+                        None
+                    })
+                    .collect::<Vec<_>>()
+            );
+        }
+        tracker.clear();
+        increment_current_iteration();
+        *store.get_mut::<f32>(&1).unwrap() = 100.0;
+        {
+            let mut query = Query::<(&f32,)>::try_from(&mut store).unwrap();
+            assert_eq!(
+                vec![(1, 100.0)],
+                query
+                    .run()
+                    .filter_map(|(f,)| if f.has_changed_since(tracker.last_update()) {
+                        Some((f.id(), *f))
+                    } else {
+                        None
+                    })
+                    .collect::<Vec<_>>()
+            );
+        }
+        tracker.clear();
+        increment_current_iteration();
+        store.remove_any(0);
+        store.remove_any(2);
+        {
+            let mut query = Query::<(&f32,)>::try_from(&mut store).unwrap();
+            assert_eq!(
+                vec![(1, 100.0)],
+                query
+                    .run()
+                    .filter_map(|(f,)| if f.has_changed_since(tracker.last_update()) {
+                        Some((f.id(), *f))
+                    } else {
+                        None
+                    })
+                    .collect::<Vec<_>>()
+            );
+        }
     }
 
     #[test]

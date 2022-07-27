@@ -53,7 +53,7 @@ impl BenchmarkArchetype {
 
     pub fn run(&mut self) {
         let mut query: Query<(&Velocity, &mut Position)> = Query::try_from(&mut self.0).unwrap();
-        for (velocity, position) in query.iter_mut() {
+        for (velocity, mut position) in query.run() {
             position.0 += velocity.0;
         }
     }

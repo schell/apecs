@@ -45,7 +45,7 @@ impl SeparateStorageExt for World {
 pub mod test {
     use crate::{
         self as apecs,
-        storage::{separated::*, Entry, Maybe},
+        storage::{separated::*, Entry, Maybe, HasId},
         system::{ok, ShouldContinue},
         world::*,
         CanFetch,
@@ -111,8 +111,8 @@ pub mod test {
         let c = entities.create();
         strings.insert(c.id(), "C".to_string());
 
-        for (entity, s, n) in (&entities, &mut strings, &numbers).join() {
-            s.set_value(format!("{}{}{}", s.value(), entity, n.value()));
+        for (s, n) in (&mut strings, &numbers).join() {
+            s.set_value(format!("{}{}{}", s.value(), s.id(), n.value()));
         }
 
         assert_eq!(strings.get(a.id()), Some(&"A01".to_string()));

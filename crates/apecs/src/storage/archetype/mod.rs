@@ -1,5 +1,10 @@
 //! Entity components stored together in contiguous arrays.
-use std::{any::TypeId, marker::PhantomData, ops::DerefMut};
+use std::{
+    any::TypeId,
+    marker::PhantomData,
+    ops::{DerefMut, Range},
+    sync::Arc,
+};
 
 use any_vec::{any_value::AnyValueMut, mem::Heap, traits::*, AnyVec, AnyVecMut, AnyVecRef};
 use anyhow::Context;
@@ -9,16 +14,88 @@ mod bundle;
 pub use bundle::*;
 use tuple_list::TupleList;
 
-use crate::{mpsc, CanFetch, ResourceId, schedule::Borrow, resource_manager::LoanManager};
+use crate::{mpsc, resource_manager::LoanManager, schedule::Borrow, CanFetch, ResourceId};
+
+use super::{EntityInfo, HasEntityInfoMut, Mut, Ref};
+
+#[derive(Debug)]
+pub struct InnerColumn(AnyVec<dyn Sync + Send + 'static>, Vec<EntityInfo>);
+
+impl InnerColumn {
+    pub fn iter<'a, T: 'static>(&'a self) -> InnerColumnIter<'a, T> {
+        self.0
+            .downcast_ref::<T>()
+            .unwrap()
+            .into_iter()
+            .zip(self.1.iter())
+            .map(|(c, e)| Ref(e, c))
+    }
+
+    pub fn iter_mut<'a, T: 'static>(&'a mut self) -> InnerColumnIterMut<'a, T> {
+        self.0
+            .downcast_mut::<T>()
+            .unwrap()
+            .into_iter()
+            .zip(self.1.iter_mut())
+            .map(|(c, e)| Mut(e, c))
+    }
+}
+
+pub type InnerColumnIter<'a, T> = std::iter::Map<
+    std::iter::Zip<std::slice::Iter<'a, T>, std::slice::Iter<'a, EntityInfo>>,
+    fn((&'a T, &'a EntityInfo)) -> Ref<'a, T>,
+>;
+
+pub type InnerColumnIterMut<'a, T> = std::iter::Map<
+    std::iter::Zip<std::slice::IterMut<'a, T>, std::slice::IterMut<'a, EntityInfo>>,
+    fn((&'a mut T, &'a mut EntityInfo)) -> Mut<'a, T>,
+>;
 
 /// A collection of entities having the same component types
 #[derive(Debug, Default)]
 pub struct Archetype {
     pub(crate) types: FxHashSet<TypeId>,
-    pub(crate) entities: Vec<usize>,
     // map of entity_id to storage index
     pub(crate) entity_lookup: FxHashMap<usize, usize>,
-    pub(crate) data: FxHashMap<TypeId, AnyVec<dyn Sync + Send>>,
+    pub(crate) data: FxHashMap<TypeId, InnerColumn>,
+    pub(crate) loaned_data: FxHashMap<TypeId, Arc<InnerColumn>>,
+}
+
+#[derive(Default)]
+pub struct ArchetypeBuilder {
+    entities: Vec<EntityInfo>,
+    archetype: Archetype,
+}
+
+impl ArchetypeBuilder {
+    pub fn with_entities(mut self, entities: impl Iterator<Item = EntityInfo>) -> Self {
+        self.entities = entities.collect();
+        self
+    }
+
+    pub fn with_components<T: Send + Sync + 'static>(
+        mut self,
+        comps: impl ExactSizeIterator<Item = T>,
+    ) -> Self {
+        let ty = TypeId::of::<T>();
+        let mut anyvec: AnyVec<dyn Sync + Send + 'static> = AnyVec::with_capacity::<T>(comps.len());
+        {
+            let mut tvec = anyvec.downcast_mut::<T>().unwrap();
+            comps.for_each(|c| tvec.push(c));
+        }
+        let _ = self.archetype.data.insert(ty, InnerColumn(anyvec, vec![]));
+        self
+    }
+
+    pub fn build(mut self) -> Archetype {
+        for col in self.archetype.data.values_mut() {
+            col.1 = self.entities.clone();
+        }
+        self.archetype.entity_lookup =
+            FxHashMap::from_iter(self.entities.into_iter().map(|e| e.key).zip(0..));
+
+        self.archetype
+    }
 }
 
 impl TryFrom<()> for Archetype {
@@ -52,7 +129,7 @@ where
                 .context("could not downcast")?;
             vec.push(head);
         }
-        let _ = archetype.data.insert(ty, anyvec);
+        let _ = archetype.data.insert(ty, InnerColumn(anyvec, vec![]));
         Ok(archetype)
     }
 }
@@ -69,7 +146,11 @@ impl TryFrom<AnyBundle> for Archetype {
         let types = FxHashSet::from_iter(types);
         Ok(Archetype {
             types,
-            data: bundle.0,
+            data: bundle
+                .0
+                .into_iter()
+                .map(|(ty, v)| (ty, InnerColumn(v, vec![])))
+                .collect(),
             ..Default::default()
         })
     }
@@ -86,11 +167,11 @@ impl Archetype {
     }
 
     pub fn len(&self) -> usize {
-        self.entities.len()
+        self.entity_lookup.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entities.is_empty()
+        self.entity_lookup.is_empty()
     }
 
     /// Whether this archetype contains the entity
@@ -121,29 +202,91 @@ impl Archetype {
         self.types.is_superset(types)
     }
 
-    pub fn get_column<T: 'static>(&self) -> anyhow::Result<AnyVecRef<'_, T, Heap>> {
+    fn append(&mut self, mut archetype: Archetype) -> anyhow::Result<()> {
+        for (ty, col) in self.data.iter_mut() {
+            let mut acol = archetype.data.remove(ty).context("merge missing col")?;
+            while let Some(comp) = acol.0.pop() {
+                col.0.push(comp);
+            }
+            col.1.extend(acol.1);
+        }
+
+        anyhow::ensure!(
+            archetype.data.is_empty(),
+            "merged archetype has unmerged components"
+        );
+
+        Ok(())
+    }
+
+    fn get_column<T: 'static>(&self) -> anyhow::Result<AnyVecRef<'_, T, Heap>> {
         let ty = TypeId::of::<T>();
-        let storage = self
+        let column = self
             .data
             .get(&ty)
+            .or_else(|| self.loaned_data.get(&ty).map(AsRef::as_ref))
             .with_context(|| format!("no such column {}", std::any::type_name::<T>()))?;
-        storage
+        column
+            .0
             .downcast_ref::<T>()
             .with_context(|| format!("could not downcast to {}", std::any::type_name::<T>()))
     }
 
-    pub fn get_column_mut<T: 'static>(&mut self) -> anyhow::Result<AnyVecMut<'_, T, Heap>> {
+    fn get_column_mut<T: 'static>(
+        &mut self,
+    ) -> anyhow::Result<(AnyVecMut<'_, T, Heap>, &mut [EntityInfo])> {
+        self.unify_resources();
         let ty = TypeId::of::<T>();
-        let storage = self
+        let column = self
             .data
             .get_mut(&ty)
             .with_context(|| format!("no such column {}", std::any::type_name::<T>()))?;
-        storage
-            .downcast_mut::<T>()
-            .with_context(|| format!("could not downcast to {}", std::any::type_name::<T>()))
+        Ok((
+            column
+                .0
+                .downcast_mut::<T>()
+                .with_context(|| format!("could not downcast to {}", std::any::type_name::<T>()))?,
+            column.1.as_mut_slice(),
+        ))
     }
 
-    pub fn take_column(&mut self, ty: &TypeId) -> Option<AnyVec<dyn Send + Sync>> {
+    fn borrow_column(&mut self, ty: &TypeId) -> Option<Arc<InnerColumn>> {
+        log::trace!("borrow {:?}", ty);
+        match self.data.remove(ty) {
+            Some(col) => {
+                let col = Arc::new(col);
+                self.loaned_data.insert(*ty, col.clone());
+                Some(col)
+            }
+            None => self.loaned_data.get(ty).cloned(),
+        }
+    }
+
+    fn unify_resources(&mut self) {
+        let tys = self
+            .loaned_data
+            .iter()
+            .filter_map(|(ty, col)| {
+                if Arc::strong_count(&col) == 1 {
+                    Some(*ty)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        log::trace!("archetype is unifying {} resources", tys.len());
+
+        for ty in tys.into_iter() {
+            // these ops are ok because we already checked the strong count
+            let col: Arc<_> = self.loaned_data.remove(&ty).unwrap();
+            let col: InnerColumn = Arc::try_unwrap(col).unwrap();
+            let prev = self.data.insert(ty, col);
+            debug_assert!(prev.is_none());
+        }
+    }
+
+    fn take_column(&mut self, ty: &TypeId) -> Option<InnerColumn> {
+        self.unify_resources();
         self.data.remove(ty)
     }
 
@@ -171,21 +314,21 @@ impl Archetype {
         Ok(if let Some(index) = self.entity_lookup.get(&entity_id) {
             for (ty, component_vec) in bundle.0.iter_mut() {
                 let column = self.data.get_mut(ty).context("missing column")?;
-                let mut element_a = column.at_mut(*index);
+                let mut element_a = column.0.at_mut(*index);
                 let mut element_b = component_vec.at_mut(0);
                 element_a.swap(element_b.deref_mut());
             }
             Some(bundle)
         } else {
+            let last_index = self.entity_lookup.len();
+            assert!(self.entity_lookup.insert(entity_id, last_index).is_none());
             for (ty, mut component_vec) in bundle.0.into_iter() {
                 let column = self.data.get_mut(&ty).context("missing column")?;
-                column.push(component_vec.pop().unwrap());
+                column.0.push(component_vec.pop().unwrap());
+                debug_assert!(column.0.len() == last_index + 1);
+                column.1.push(EntityInfo::new(entity_id));
+                debug_assert!(column.1.len() == last_index + 1);
             }
-            assert!(self
-                .entity_lookup
-                .insert(entity_id, self.entities.len())
-                .is_none());
-            self.entities.push(entity_id);
             None
         })
     }
@@ -207,27 +350,32 @@ impl Archetype {
     /// type-erased representation
     pub fn remove_any(&mut self, entity_id: usize) -> anyhow::Result<Option<AnyBundle>> {
         if let Some(index) = self.entity_lookup.remove(&entity_id) {
-            let should_reset_index = index != self.entities.len() - 1;
-            assert_eq!(self.entities.swap_remove(index), entity_id);
-            if should_reset_index {
-                // the index of the last entity was swapped for that of the removed index, so
-                // we need to update the lookup
-                self.entity_lookup.insert(self.entities[index], index);
-            }
+            // NOTE: last_index is the length of entity_lookup because we removed the entity
+            // in question already!
+            let last_index = self.entity_lookup.len();
+            let mut should_reset_index = index != last_index;
             let anybundle =
                 self.data
                     .iter_mut()
-                    .fold(AnyBundle::default(), |mut bundle, (_ty, store)| {
-                        let mut temp_store = store.clone_empty();
+                    .fold(AnyBundle::default(), |mut bundle, (_ty, column)| {
+                        assert_eq!(column.1.swap_remove(index).key, entity_id);
+                        if should_reset_index {
+                            // the index of the last entity was swapped for that of the removed
+                            // index, so we need to update the lookup
+                            self.entity_lookup.insert(column.1[index].key, index);
+                            should_reset_index = false;
+                        }
+
+                        let mut temp_store = column.0.clone_empty();
                         debug_assert!(
-                            index < store.len(),
+                            index < column.0.len(),
                             "store len {} does not contain index {}",
-                            store.len(),
+                            column.0.len(),
                             index
                         );
-                        let value = store.swap_remove(index);
+                        let value = column.0.swap_remove(index);
                         temp_store.push(value);
-                        bundle.0.insert(store.element_typeid(), temp_store);
+                        bundle.0.insert(column.0.element_typeid(), temp_store);
                         bundle
                     });
             Ok(Some(anybundle))
@@ -247,21 +395,25 @@ impl Archetype {
     }
 
     /// Get a mutable component reference.
+    ///
+    /// ## Note
+    /// This will mark the component changed.
     pub fn get_mut<T: 'static>(&mut self, entity_id: usize) -> anyhow::Result<Option<&mut T>> {
         if let Some(index) = self.entity_lookup.get(&entity_id).copied() {
-            let mut storage = self.get_column_mut::<T>()?;
-            Ok(storage.get_mut(index))
+            let mut column = self.get_column_mut::<T>()?;
+            if let Some(e) = column.1.get_mut(index) {
+                e.mark_changed();
+                Ok(column.0.get_mut(index))
+            } else {
+                Ok(None)
+            }
         } else {
             Ok(None)
         }
     }
 }
 
-struct QueryReturn(
-    TypeId,
-    Vec<ArchetypeColumnInfo>,
-    Vec<AnyVec<dyn Send + Sync>>,
-);
+struct QueryReturn(TypeId, Vec<ArchetypeIndex>, Vec<InnerColumn>);
 
 #[derive(Debug)]
 pub struct AllArchetypes {
@@ -282,8 +434,7 @@ impl AllArchetypes {
     fn unify_resources(&mut self) {
         while let Some(QueryReturn(ty, infos, data)) = self.query_return_chan.1.try_recv().ok() {
             for (info, datum) in infos.into_iter().zip(data.into_iter()) {
-                let archetype = &mut self.archetypes[info.archetype_index];
-                archetype.entities = info.entity_info;
+                let archetype = &mut self.archetypes[info.0];
                 let prev = archetype.data.insert(ty, datum);
                 debug_assert!(
                     prev.is_none(),
@@ -296,13 +447,9 @@ impl AllArchetypes {
     pub fn get_column<T: 'static>(&mut self) -> Option<QueryColumn<T>> {
         self.unify_resources();
         let ty = TypeId::of::<T>();
-        let mut column = QueryColumn::<T>::new(self.query_return_chan.0.clone()); //
+        let mut column = QueryColumn::<T>::default();
         for (i, arch) in self.archetypes.iter_mut().enumerate() {
-            if let Some(col) = arch.take_column(&ty) {
-                column.info.push(ArchetypeColumnInfo {
-                    archetype_index: i,
-                    entity_info: std::mem::take(&mut arch.entities),
-                });
+            if let Some(col) = arch.borrow_column(&ty) {
                 column.data.push(col);
             }
         }
@@ -314,7 +461,42 @@ impl AllArchetypes {
     }
 
     pub fn get_column_mut<T: 'static>(&mut self) -> Option<QueryColumnMut<T>> {
-        Some(QueryColumnMut(self.get_column()?))
+        self.unify_resources();
+        let ty = TypeId::of::<T>();
+        let mut column = QueryColumnMut::<T>::new(self.query_return_chan.0.clone()); //
+        for (i, arch) in self.archetypes.iter_mut().enumerate() {
+            if let Some(col) = arch.take_column(&ty) {
+                column.info.push(ArchetypeIndex(i));
+                column.data.push(col);
+            }
+        }
+        if column.data.is_empty() {
+            None
+        } else {
+            Some(column)
+        }
+    }
+
+    fn find_matching_mut<B: IsBundleTypeInfo + 'static>(&mut self) -> Option<&mut Archetype> {
+        let types = B::get_type_info().unwrap();
+        self.find_matching_any_mut(&types)
+    }
+
+    fn find_matching_any_mut(&mut self, types: &FxHashSet<TypeId>) -> Option<&mut Archetype> {
+        for arch in self.archetypes.iter_mut() {
+            if &arch.types == types {
+                return Some(arch);
+            }
+        }
+        None
+    }
+
+    pub fn insert_archetype(&mut self, archetype: Archetype) {
+        if let Some(local) = self.find_matching_any_mut(&archetype.types) {
+            local.append(archetype).unwrap();
+        } else {
+            self.archetypes.push(archetype);
+        }
     }
 
     /// Inserts the bundle components for the given entity.
@@ -326,6 +508,7 @@ impl AllArchetypes {
         B: IsBundleTypeInfo + 'static,
         B::TupleList: TryFromAnyBundle,
         AnyBundle: From<B::TupleList>,
+        B::TupleList: EmptyBundle,
     {
         let mut bundle_types: FxHashSet<TypeId> = bundle::type_info::<B>().unwrap();
         let mut any_bundle = AnyBundle::from_tuple(bundle);
@@ -334,7 +517,7 @@ impl AllArchetypes {
         // first find if the entity already exists
         for arch in self.archetypes.iter_mut() {
             if arch.contains_entity(&entity_id) {
-                if arch.contains_bundle_components(&bundle_types) {
+                if arch.matches_bundle::<B>().unwrap() {
                     // we found a perfect match, simply store the bundle,
                     // returning the previous components
                     let prev = arch.insert_any(entity_id, any_bundle).unwrap().unwrap();
@@ -366,7 +549,9 @@ impl AllArchetypes {
         // we couldn't find any existing archetypes that can hold the bundle, so make a
         // new one
         let mut new_arch = Archetype::try_from(any_bundle).unwrap();
-        new_arch.entities = vec![entity_id];
+        for (_ty, column) in new_arch.data.iter_mut() {
+            column.1.push(EntityInfo::new(entity_id));
+        }
         new_arch.entity_lookup = FxHashMap::from_iter([(entity_id, 0)]);
         self.archetypes.push(new_arch);
         prev_bundle.and_then(|b| b.try_into_tuple().ok())
@@ -390,6 +575,7 @@ impl AllArchetypes {
     }
 
     pub fn get_mut<T: 'static>(&mut self, entity_id: &usize) -> Option<&mut T> {
+        self.unify_resources();
         for arch in self.archetypes.iter_mut() {
             if arch.has::<T>() && arch.contains_entity(entity_id) {
                 return arch.get_mut::<T>(*entity_id).unwrap();
@@ -459,7 +645,9 @@ impl AllArchetypes {
         // we couldn't find any existing archetypes that can hold the bundle, so make a
         // new one
         let mut new_arch = Archetype::try_from(bundle).unwrap();
-        new_arch.entities = vec![entity_id];
+        for (_ty, column) in new_arch.data.iter_mut() {
+            column.1.push(EntityInfo::new(entity_id));
+        }
         new_arch.entity_lookup = FxHashMap::from_iter([(entity_id, 0)]);
         self.archetypes.push(new_arch);
 
@@ -477,21 +665,48 @@ impl AllArchetypes {
     }
 }
 
-struct ArchetypeColumnInfo {
-    // This column's archetype index in the AllArchetypes struct
-    archetype_index: usize,
-    // Extra info, aligned with column data
-    entity_info: Vec<usize>,
-}
+// This column's archetype index in the AllArchetypes struct
+struct ArchetypeIndex(usize);
 
 pub struct QueryColumn<T: 'static> {
-    info: Vec<ArchetypeColumnInfo>,
-    data: Vec<AnyVec<dyn Send + Sync>>,
+    data: Vec<Arc<InnerColumn>>,
+    _phantom: PhantomData<T>,
+}
+
+impl<T: 'static> Default for QueryColumn<T> {
+    fn default() -> Self {
+        Self {
+            data: Default::default(),
+            _phantom: Default::default(),
+        }
+    }
+}
+
+pub type QueryColumnIter<'a, T> = std::iter::FlatMap<
+    std::slice::Iter<'a, Arc<InnerColumn>>,
+    InnerColumnIter<'a, T>,
+    fn(&'a Arc<InnerColumn>) -> InnerColumnIter<'a, T>,
+>;
+
+pub struct QueryColumnMut<T: 'static> {
+    info: Vec<ArchetypeIndex>,
+    data: Vec<InnerColumn>,
     query_return_tx: mpsc::Sender<QueryReturn>,
     _phantom: PhantomData<T>,
 }
 
-impl<T: 'static> QueryColumn<T> {
+impl<T: 'static> Default for QueryColumnMut<T> {
+    fn default() -> Self {
+        Self {
+            info: Default::default(),
+            data: Default::default(),
+            query_return_tx: mpsc::bounded(1).0,
+            _phantom: Default::default(),
+        }
+    }
+}
+
+impl<T: 'static> QueryColumnMut<T> {
     fn new(query_return_tx: mpsc::Sender<QueryReturn>) -> Self {
         Self {
             info: Default::default(),
@@ -502,7 +717,7 @@ impl<T: 'static> QueryColumn<T> {
     }
 }
 
-impl<T: 'static> Drop for QueryColumn<T> {
+impl<T: 'static> Drop for QueryColumnMut<T> {
     fn drop(&mut self) {
         if self.query_return_tx.is_closed() {
             log::warn!(
@@ -510,6 +725,7 @@ impl<T: 'static> Drop for QueryColumn<T> {
                  this will result in a loss of component data"
             );
         } else {
+            log::trace!("sending column of {} back", std::any::type_name::<T>());
             let ty = TypeId::of::<T>();
             let info = std::mem::take(&mut self.info);
             let data = std::mem::take(&mut self.data);
@@ -520,58 +736,18 @@ impl<T: 'static> Drop for QueryColumn<T> {
     }
 }
 
-pub struct QueryColumnIter<'a, T: 'static>(
-    Option<std::slice::Iter<'a, T>>,
-    Vec<AnyVecRef<'a, T, Heap>>,
-);
-
-impl<'a, T: 'static> Iterator for QueryColumnIter<'a, T> {
-    type Item = &'a T;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.0.is_none() {
-            if self.1.is_empty() {
-                return None;
-            } else {
-                self.0 = self.1.pop().map(|v| v.iter());
-            }
-        }
-
-        let iter = self.0.as_mut().unwrap();
-        iter.next()
-    }
-}
-
-pub struct QueryColumnMut<T: 'static>(QueryColumn<T>);
-
-pub struct QueryColumnIterMut<'a, T: 'static>(
-    Option<std::slice::IterMut<'a, T>>,
-    Vec<AnyVecMut<'a, T, Heap>>,
-);
-
-impl<'a, T: 'static> Iterator for QueryColumnIterMut<'a, T> {
-    type Item = &'a mut T;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.0.is_none() {
-            if self.1.is_empty() {
-                return None;
-            } else {
-                self.0 = self.1.pop().map(|mut v| v.iter_mut());
-            }
-        }
-
-        let iter = self.0.as_mut().unwrap();
-        iter.next()
-    }
-}
+pub type QueryColumnIterMut<'a, T> = std::iter::FlatMap<
+    std::slice::IterMut<'a, InnerColumn>,
+    InnerColumnIterMut<'a, T>,
+    fn(&'a mut InnerColumn) -> InnerColumnIterMut<'a, T>,
+>;
 
 pub trait IsQuery {
-    type Columns;
+    type Columns: Default;
     type Item<'t>;
     type ColumnsIter<'t>: Iterator<Item = Self::Item<'t>>;
 
-    fn pop_columns(archetypes: &mut AllArchetypes) -> Option<Self::Columns>;
+    fn pop_columns(archetypes: &mut AllArchetypes) -> Self::Columns;
     fn columns_iter(columns: &mut Self::Columns) -> Self::ColumnsIter<'_>;
     fn column_borrows() -> Vec<Borrow>;
 }
@@ -581,8 +757,8 @@ impl IsQuery for () {
     type Item<'t> = ();
     type ColumnsIter<'t> = std::iter::Cycle<std::iter::Once<()>>;
 
-    fn pop_columns(_: &mut AllArchetypes) -> Option<Self::Columns> {
-        Some(())
+    fn pop_columns(_: &mut AllArchetypes) -> Self::Columns {
+        ()
     }
 
     fn columns_iter(_: &mut Self::Columns) -> Self::ColumnsIter<'_> {
@@ -596,50 +772,45 @@ impl IsQuery for () {
 
 impl<'a, T: Send + Sync + 'static> IsQuery for &'a T {
     type Columns = QueryColumn<T>;
-    type Item<'t> = &'t T;
+    type Item<'t> = Ref<'t, T>;
     type ColumnsIter<'t> = QueryColumnIter<'t, T>;
 
-    fn pop_columns(archetypes: &mut AllArchetypes) -> Option<Self::Columns> {
-        Some(archetypes.get_column::<T>()?)
+    fn pop_columns(archetypes: &mut AllArchetypes) -> Self::Columns {
+        archetypes.get_column::<T>().unwrap_or_default()
     }
 
-    fn columns_iter(cols: &mut Self::Columns) -> Self::ColumnsIter<'_> {
-        let mut vs = cols
-            .data
-            .iter()
-            .map(|v| v.downcast_ref().unwrap())
-            .collect::<Vec<_>>();
-        let first = vs.pop().map(|v| v.iter());
-        QueryColumnIter(first, vs)
+    fn columns_iter(cols: &mut QueryColumn<T>) -> Self::ColumnsIter<'_> {
+        cols.data.iter().flat_map(|col| col.iter())
     }
 
     fn column_borrows() -> Vec<Borrow> {
-        vec![Borrow{ id: ResourceId::new::<QueryColumn<T>>(), is_exclusive: false}]
+        vec![Borrow {
+            id: ResourceId::new::<QueryColumn<T>>(),
+            is_exclusive: false,
+        }]
     }
 }
 
 impl<'a, T: Send + Sync + 'static> IsQuery for &'a mut T {
     type Columns = QueryColumnMut<T>;
-    type Item<'t> = &'t mut T;
+    type Item<'t> = Mut<'t, T>;
     type ColumnsIter<'t> = QueryColumnIterMut<'t, T>;
 
-    fn pop_columns(archetypes: &mut AllArchetypes) -> Option<Self::Columns> {
-        Some(archetypes.get_column_mut::<T>()?)
+    fn pop_columns(archetypes: &mut AllArchetypes) -> Self::Columns {
+        archetypes.get_column_mut::<T>().unwrap_or_default()
     }
 
-    fn columns_iter(cols: &mut Self::Columns) -> Self::ColumnsIter<'_> {
-        let mut vs = cols
-            .0
-            .data
+    fn columns_iter(cols: &mut QueryColumnMut<T>) -> Self::ColumnsIter<'_> {
+        cols.data
             .iter_mut()
-            .map(|v| v.downcast_mut().unwrap())
-            .collect::<Vec<_>>();
-        let first = vs.pop().map(|mut v| v.iter_mut());
-        QueryColumnIterMut(first, vs)
+            .flat_map((|ic| ic.iter_mut()) as fn(&mut InnerColumn) -> InnerColumnIterMut<'_, T>)
     }
 
     fn column_borrows() -> Vec<Borrow> {
-        vec![Borrow{id: ResourceId::new::<QueryColumnMut<T>>(), is_exclusive: true}]
+        vec![Borrow {
+            id: ResourceId::new::<QueryColumnMut<T>>(),
+            is_exclusive: true,
+        }]
     }
 }
 
@@ -652,10 +823,10 @@ where
     type Item<'a> = (Head::Item<'a>, Tail::Item<'a>);
     type ColumnsIter<'a> = std::iter::Zip<Head::ColumnsIter<'a>, Tail::ColumnsIter<'a>>;
 
-    fn pop_columns(archetypes: &mut AllArchetypes) -> Option<Self::Columns> {
-        let head = Head::pop_columns(archetypes)?;
-        let tail = Tail::pop_columns(archetypes)?;
-        Some((head, tail))
+    fn pop_columns(archetypes: &mut AllArchetypes) -> Self::Columns {
+        let head = Head::pop_columns(archetypes);
+        let tail = Tail::pop_columns(archetypes);
+        (head, tail)
     }
 
     fn columns_iter(cols: &mut Self::Columns) -> Self::ColumnsIter<'_> {
@@ -674,23 +845,11 @@ where
     T: Tuple + ?Sized,
     T::TupleList: IsQuery;
 
-unsafe impl<T> Send for Query<T>
-    where
-    T: Tuple,
-    T::TupleList: IsQuery,
-    <T::TupleList as IsQuery>::Columns: Send {}
-
-unsafe impl<T> Sync for Query<T>
-where
-    T: Tuple,
-    T::TupleList: IsQuery,
-    <T::TupleList as IsQuery>::Columns: Sync {}
-
 impl<T> CanFetch for Query<T>
 where
     T: Tuple + Send + Sync + ?Sized,
     T::TupleList: IsQuery,
-    <T::TupleList as IsQuery>::Columns: Send + Sync + 'static
+    <T::TupleList as IsQuery>::Columns: Send + Sync + 'static,
 {
     fn borrows() -> Vec<Borrow> {
         <T::TupleList as IsQuery>::column_borrows()
@@ -698,22 +857,30 @@ where
 
     fn construct(loan_mngr: &mut LoanManager) -> anyhow::Result<Self> {
         let all = loan_mngr.get_mut::<AllArchetypes>()?;
-        Query::<T>::try_from(all)
+        Ok(Query::<T>::from(all))
     }
 }
 
-impl<'a, T> TryFrom<&'a mut AllArchetypes> for Query<T>
+impl<'a, T> From<&'a mut AllArchetypes> for Query<T>
 where
     T: Tuple + Send + Sync + ?Sized,
     T::TupleList: IsQuery,
 {
-    type Error = anyhow::Error;
-
-    fn try_from(store: &'a mut AllArchetypes) -> Result<Self, Self::Error> {
-        let columns = <T::TupleList as IsQuery>::pop_columns(store).context("missing columns")?;
-        Ok(Query(columns))
+    fn from(store: &'a mut AllArchetypes) -> Self {
+        let columns = <T::TupleList as IsQuery>::pop_columns(store);
+        Query(columns)
     }
 }
+
+pub type QueryIter<'a, T> = std::iter::Map<
+    <<T as Tuple>::TupleList as IsQuery>::ColumnsIter<'a>,
+    fn(
+        <<T as Tuple>::TupleList as IsQuery>::Item<'a>,
+    ) -> <<<T as Tuple>::TupleList as IsQuery>::Item<'a> as TupleList>::Tuple,
+>;
+
+pub type QueryIterItem<'a, T> =
+    <<<T as Tuple>::TupleList as IsQuery>::Item<'a> as TupleList>::Tuple;
 
 impl<T> Query<T>
 where
@@ -721,9 +888,7 @@ where
     T::TupleList: IsQuery,
     for<'a> <T::TupleList as IsQuery>::Item<'a>: TupleList,
 {
-    pub fn iter_mut<'a>(
-        &'a mut self,
-    ) -> impl Iterator<Item = <<T::TupleList as IsQuery>::Item<'a> as TupleList>::Tuple> {
+    pub fn run(&mut self) -> QueryIter<T> {
         <T::TupleList as IsQuery>::columns_iter(&mut self.0).map(|tlist| tlist.into_tuple())
     }
 }
@@ -732,7 +897,7 @@ where
 mod test {
     use std::any::Any;
 
-    use crate::world::World;
+    use crate::{storage::*, world::World};
 
     use super::*;
 
@@ -812,13 +977,15 @@ mod test {
         store.insert_bundle(2, (2.0f32, "two".to_string(), false));
         {
             let mut query: Query<(&f32,)> = Query::try_from(&mut store).unwrap();
-            let f32s = query.iter_mut().map(|(f,)| *f).collect::<Vec<_>>();
+            let f32s = query.run().map(|(f,)| *f).collect::<Vec<_>>();
+            let f32s_again = query.run().map(|(f,)| *f).collect::<Vec<_>>();
             assert_eq!(vec![0.0f32, 1.0, 2.0f32], f32s);
+            assert_eq!(vec![0.0f32, 1.0, 2.0f32], f32s_again);
         }
         {
             let mut query: Query<(&mut bool, &f32)> = Query::try_from(&mut store).unwrap();
 
-            for (i, (is_on, f)) in query.iter_mut().enumerate() {
+            for (i, (mut is_on, f)) in query.run().enumerate() {
                 *is_on = !*is_on;
                 assert!(*is_on);
                 assert!(*f as usize == i);
@@ -828,7 +995,7 @@ mod test {
         {
             let mut query: Query<(&String, &mut bool, &mut f32)> =
                 Query::try_from(&mut store).unwrap();
-            for (s, is_on, f) in query.iter_mut() {
+            for (s, mut is_on, mut f) in query.run() {
                 *is_on = true;
                 *f = s.len() as f32;
             }
@@ -836,9 +1003,9 @@ mod test {
 
         {
             let mut query: Query<(&bool, &f32, &String)> = Query::try_from(&mut store).unwrap();
-            for (is_on, f, s) in query.iter_mut() {
-                assert!(is_on);
-                assert_eq!(*f, s.len() as f32);
+            for (is_on, f, s) in query.run() {
+                assert!(*is_on);
+                assert_eq!(*f, s.len() as f32, "{}.len() != {}", *s, *f);
             }
         }
     }
@@ -866,6 +1033,11 @@ mod test {
 
     #[test]
     fn canfetch_query() {
+        let _ = env_logger::builder()
+            .is_test(true)
+            .filter_level(log::LevelFilter::Trace)
+            .try_init();
+
         let mut all = AllArchetypes::default();
         let _ = all.insert_bundle(0, (0.0f32, true));
         let _ = all.insert_bundle(1, (1.0f32, false));
@@ -874,23 +1046,94 @@ mod test {
         world.with_resource(all).unwrap();
 
         {
+            log::debug!("fetching query");
             let mut query = world.fetch::<Query<(&f32, &bool)>>().unwrap();
-            let (f32s, bools):(Vec<_>, Vec<_>) = query.iter_mut().map(|(f, b)| (*f, *b)).unzip();
+            log::debug!("using query 1");
+            let (f32s, bools): (Vec<_>, Vec<_>) = query.run().map(|(f, b)| (*f, *b)).unzip();
+            assert_eq!(vec![0.0, 1.0, 2.0], f32s);
+            assert_eq!(vec![true, false, true], bools);
+            // do it again
+            log::debug!("using query 2");
+            let (f32s, bools): (Vec<_>, Vec<_>) = query.run().map(|(f, b)| (*f, *b)).unzip();
             assert_eq!(vec![0.0, 1.0, 2.0], f32s);
             assert_eq!(vec![true, false, true], bools);
         }
         {
             let mut query = world.fetch::<Query<(&mut f32, &mut bool)>>().unwrap();
-            for (f, b) in query.iter_mut() {
+            for (mut f, mut b) in query.run() {
                 *f *= 3.0;
                 *b = *f < 5.0;
             }
+            let (f32s, bools): (Vec<_>, Vec<_>) = query.run().map(|(f, b)| (*f, *b)).unzip();
+            assert_eq!(
+                (vec![0.0, 3.0, 6.0], vec![true, true, false]),
+                (f32s, bools)
+            );
         }
         {
             let mut query = world.fetch::<Query<(&f32, &bool)>>().unwrap();
-            let (f32s, bools):(Vec<_>, Vec<_>) = query.iter_mut().map(|(f, b)| (*f, *b)).unzip();
-            assert_eq!(vec![0.0, 3.0, 6.0], f32s);
-            assert_eq!(vec![true, true, false], bools);
+            let (f32s, bools): (Vec<_>, Vec<_>) = query.run().map(|(f, b)| (*f, *b)).unzip();
+            assert_eq!(
+                (vec![0.0, 3.0, 6.0], vec![true, true, false]),
+                (f32s, bools)
+            );
+        }
+    }
+
+    #[test]
+    fn mut_sanity() {
+        let mut a = 0.0f32;
+        let mut e = EntityInfo::new(0);
+        {
+            let mut m = Mut(&mut e, &mut a);
+            *m = 1.0;
+        }
+
+        assert_eq!(1.0, a);
+    }
+
+    #[test]
+    fn any_vec_into_iter_sanity() {
+        let mut vec: AnyVec<dyn Send + Sync> = AnyVec::new::<f32>();
+        {
+            let mut v = vec.downcast_mut::<f32>().unwrap();
+            v.push(0.0);
+            v.push(1.0);
+            v.push(2.0);
+        }
+
+        vec.downcast_mut::<f32>()
+            .unwrap()
+            .into_iter()
+            .for_each(|f| *f += 1.0);
+
+        {
+            let v = vec.downcast_ref::<f32>().unwrap();
+            assert_eq!(
+                vec![1.0, 2.0, 3.0],
+                v.iter().map(|f| *f).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn archetype_add_remove_component() {
+        struct A(f32);
+        struct B(f32);
+
+        let mut all = AllArchetypes::default();
+        let archetype = ArchetypeBuilder::default()
+            .with_components((0..10000).map(|_| A(0.0)))
+            .with_entities((0..10000).map(|e| EntityInfo::new(e)))
+            .build();
+        all.insert_archetype(archetype);
+
+        for id in 0..10000 {
+            let _ = all.insert(id, B(0.0));
+        }
+
+        for id in 0..10000 {
+            let _ = all.remove_component::<B>(id);
         }
     }
 }

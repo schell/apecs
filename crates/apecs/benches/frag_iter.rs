@@ -51,7 +51,7 @@ pub fn arch() -> AllArchetypes {
 
 pub fn tick_arch(all: &mut AllArchetypes) {
     let mut query: Query::<(&mut Data,)> = Query::try_from(all).unwrap();
-    for (data,) in query.iter_mut() {
+    for (mut data,) in query.run() {
         data.0 *= 2.0;
     }
 }

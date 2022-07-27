@@ -580,6 +580,10 @@ impl World {
     pub fn tick_sync(&mut self) -> anyhow::Result<()> {
         log::trace!("tick sync");
         // run the scheduled sync systems
+        log::trace!(
+            "execution:\n{}",
+            self.sync_schedule.get_execution_order().join("\n")
+        );
         self.sync_schedule.run((), &mut self.resource_manager)?;
 
         self.resource_manager.unify_resources("tick sync")?;
@@ -699,7 +703,10 @@ impl World {
 mod test {
     use std::{ops::DerefMut, sync::Mutex};
 
-    use crate as apecs;
+    use crate::{
+        self as apecs,
+        storage::archetype::{AllArchetypes, Query},
+    };
     use apecs::{
         anyhow, spsc, storage::separated::*, system::*, world::*, Read, Write, WriteExpect,
     };
@@ -974,5 +981,59 @@ mod test {
         let (tx, rx) = mpsc::unbounded();
         tx.try_send(&f).unwrap();
         assert_eq!(&0.0, rx.try_recv().unwrap());
+    }
+
+    #[test]
+    fn can_query_empty_ref_archetypes_in_same_batch() {
+        let _ = env_logger::builder()
+            .is_test(true)
+            .filter_level(log::LevelFilter::Trace)
+            .try_init();
+
+        let mut world = World::default();
+        world
+            .with_resource(AllArchetypes::default())
+            .unwrap()
+            .with_system("one", |mut query: Query<(&f32, &bool)>| {
+                for (_f, _b) in query.run() {}
+                ok()
+            })
+            .unwrap()
+            .with_system("two", |mut query: Query<(&f32, &bool)>| {
+                for (_f, _b) in query.run() {}
+                ok()
+            })
+            .unwrap();
+        world.tick().unwrap();
+    }
+
+    #[test]
+    fn can_query_ref_archetypes_in_same_batch() {
+        let _ = env_logger::builder()
+            .is_test(true)
+            .filter_level(log::LevelFilter::Trace)
+            .try_init();
+
+        let mut all = AllArchetypes::default();
+        all.insert_bundle(0, (0.0f32, true));
+        all.insert_bundle(1, (1.0f32, false));
+
+        let mut world = World::default();
+        world
+            .with_resource(all)
+            .unwrap()
+            .with_system("one", |mut query: Query<(&f32, &bool)>| {
+                let q = query.run().map(|(f, b)| (f.id(), *f, *b)).collect::<Vec<_>>();
+                assert_eq!(vec![(0, 0.0, true), (1, 1.0, false)], q);
+                ok()
+            })
+            .unwrap()
+            .with_system("two", |mut query: Query<(&f32, &bool)>| {
+                let q = query.run().map(|(f, b)| (f.id(), *f, *b)).collect::<Vec<_>>();
+                assert_eq!(vec![(0, 0.0, true), (1, 1.0, false)], q);
+                ok()
+            })
+            .unwrap();
+        world.tick().unwrap();
     }
 }

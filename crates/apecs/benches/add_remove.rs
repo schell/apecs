@@ -1,5 +1,5 @@
 use apecs::{
-    storage::{archetype::*, separated::*},
+    storage::{archetype::*, separated::*, EntityInfo},
     world::*,
     Write,
 };
@@ -53,11 +53,11 @@ pub struct BenchmarkArchetype(AllArchetypes);
 impl BenchmarkArchetype {
     pub fn new() -> Self {
         let mut all = AllArchetypes::default();
-
-        for id in 0..10000 {
-            let _ = all.insert(id, A(0.0));
-        }
-
+        let archetype = ArchetypeBuilder::default()
+            .with_components((0..10000).map(|_| A(0.0)))
+            .with_entities((0..10000).map(|e| EntityInfo::new(e)))
+            .build();
+        all.insert_archetype(archetype);
         Self(all)
     }
 
