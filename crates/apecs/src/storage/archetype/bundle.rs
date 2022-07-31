@@ -106,24 +106,17 @@ impl AnyBundle {
     /// Merge the given bundle into `self`, returning any key+values in
     /// `self` that match `other`.
     pub fn union(&mut self, other: AnyBundle) -> Option<Self> {
-        let intersecting_types: FxHashSet<TypeId> = self
-            .type_info()
-            .intersection(&other.type_info())
-            .map(Clone::clone)
-            .collect();
-        let types_overlap = !intersecting_types.is_empty();
-        let prev = if types_overlap {
-            let mut intersection = AnyBundle::default();
-            for ty in intersecting_types.into_iter() {
-                let value = self.0.remove(&ty).unwrap();
-                intersection.0.insert(ty, value);
+        let mut prev = FxHashMap::default();
+        for (k, v) in other.0.into_iter() {
+            if let Some(pv) = self.0.insert(k, v) {
+                let _ = prev.insert(k, pv);
             }
-            Some(intersection)
-        } else {
+        }
+        if prev.is_empty() {
             None
-        };
-        self.0.extend(other.0.into_iter());
-        prev
+        } else {
+            Some(AnyBundle(prev))
+        }
     }
 
     /// Remove a type from the bundle and return it as an `AnyBundle`.

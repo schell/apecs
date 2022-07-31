@@ -88,12 +88,14 @@ impl ArchetypeBuilder {
     }
 
     pub fn build(mut self) -> Archetype {
-        for col in self.archetype.data.values_mut() {
+        let mut types = FxHashSet::default();
+        for (ty, col) in self.archetype.data.iter_mut() {
             col.1 = self.entities.clone();
+            types.insert(ty.clone());
         }
         self.archetype.entity_lookup =
             FxHashMap::from_iter(self.entities.into_iter().map(|e| e.key).zip(0..));
-
+        self.archetype.types = types;
         self.archetype
     }
 }
@@ -517,7 +519,7 @@ impl AllArchetypes {
         // first find if the entity already exists
         for arch in self.archetypes.iter_mut() {
             if arch.contains_entity(&entity_id) {
-                if arch.matches_bundle::<B>().unwrap() {
+                if bundle_types == arch.types {
                     // we found a perfect match, simply store the bundle,
                     // returning the previous components
                     let prev = arch.insert_any(entity_id, any_bundle).unwrap().unwrap();
@@ -1121,18 +1123,19 @@ mod test {
         struct A(f32);
         struct B(f32);
 
+        let n = 10_000;
         let mut all = AllArchetypes::default();
         let archetype = ArchetypeBuilder::default()
-            .with_components((0..10000).map(|_| A(0.0)))
-            .with_entities((0..10000).map(|e| EntityInfo::new(e)))
+            .with_components((0..n).map(|_| A(0.0)))
+            .with_entities((0..n).map(|e| EntityInfo::new(e)))
             .build();
         all.insert_archetype(archetype);
 
-        for id in 0..10000 {
+        for id in 0..n {
             let _ = all.insert(id, B(0.0));
         }
 
-        for id in 0..10000 {
+        for id in 0..n {
             let _ = all.remove_component::<B>(id);
         }
     }
