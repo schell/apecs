@@ -7,7 +7,7 @@ use std::cmp::Ordering;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use tuple_list::{Tuple, TupleList};
 
-use crate::storage::{Entry, HasEntityInfo, Maybe, HasId};
+use crate::storage::{Entry, Maybe, HasId};
 
 /// Converts a `TupleList` of `IntoIterator`s into a `TupleList` of `Iterator`s.
 pub trait TupleListIntoIter {

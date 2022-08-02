@@ -38,8 +38,11 @@ impl<T> HasId for (usize, T) {
 /// Information about an entity.
 #[derive(Clone, Debug, PartialEq)]
 pub struct EntityInfo {
+    /// The entity id.
     pub key: usize,
+    /// The last time this component was changed.
     pub changed: u64,
+    /// Whether this component was added the last time it was changed.
     pub added: bool,
 }
 

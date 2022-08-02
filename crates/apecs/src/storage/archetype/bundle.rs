@@ -3,7 +3,7 @@ use std::any::TypeId;
 
 use any_vec::AnyVec;
 use anyhow::Context;
-use rustc_hash::{FxHashMap, FxHashSet};
+use smallvec::{smallvec, SmallVec};
 use tuple_list::TupleList;
 
 pub use tuple_list::Tuple;
@@ -25,9 +25,11 @@ where
 {
     fn try_from_any(mut bundle: AnyBundle) -> anyhow::Result<Self> {
         let ty = TypeId::of::<Head>();
-        let mut any_head_vec = bundle.0.remove(&ty).with_context(|| {
+        let index = bundle.index_of(&ty).with_context(|| {
             format!("bundle is missing type: {}", std::any::type_name::<Head>())
         })?;
+        let _ = bundle.0.remove(index);
+        let mut any_head_vec = bundle.1.remove(index);
         let mut head_vec = any_head_vec
             .downcast_mut::<Head>()
             .context("could not downcast")?;
@@ -40,12 +42,12 @@ where
 }
 
 pub trait TupleListTypeVec {
-    fn tuple_list_type_vec() -> Vec<TypeId>;
+    fn tuple_list_type_vec() -> SmallVec<[TypeId; 4]>;
 }
 
 impl TupleListTypeVec for () {
-    fn tuple_list_type_vec() -> Vec<TypeId> {
-        vec![]
+    fn tuple_list_type_vec() -> SmallVec<[TypeId; 4]> {
+        smallvec![]
     }
 }
 
@@ -54,7 +56,7 @@ where
     Head: 'static,
     Tail: TupleListTypeVec + TupleList,
 {
-    fn tuple_list_type_vec() -> Vec<TypeId> {
+    fn tuple_list_type_vec() -> SmallVec<[TypeId; 4]> {
         let mut tys = Tail::tuple_list_type_vec();
         tys.push(TypeId::of::<Head>());
         tys
@@ -62,7 +64,7 @@ where
 }
 
 pub trait IsBundleTypeInfo: Tuple {
-    fn get_type_info() -> anyhow::Result<FxHashSet<TypeId>>;
+    fn get_type_info() -> SmallVec<[TypeId; 4]>;
 }
 
 impl<T> IsBundleTypeInfo for T
@@ -70,16 +72,17 @@ where
     T: Tuple,
     T::TupleList: TupleListTypeVec,
 {
-    fn get_type_info() -> anyhow::Result<FxHashSet<TypeId>> {
-        let mut types = T::TupleList::tuple_list_type_vec();
-        types.sort();
-        ensure_type_info(&types)?;
-        Ok(FxHashSet::from_iter(types.into_iter()))
+    fn get_type_info() -> SmallVec<[TypeId; 4]> {
+        let types = T::TupleList::tuple_list_type_vec();
+        types
     }
 }
 
-pub fn type_info<T: IsBundleTypeInfo>() -> anyhow::Result<FxHashSet<TypeId>> {
-    T::get_type_info()
+pub fn type_info<T: IsBundleTypeInfo>() -> anyhow::Result<SmallVec<[TypeId; 4]>> {
+    let mut types = T::get_type_info();
+    types.sort();
+    ensure_type_info(&types)?;
+    Ok(types)
 }
 
 pub fn ensure_type_info(types: &[TypeId]) -> anyhow::Result<()> {
@@ -98,38 +101,77 @@ pub fn ensure_type_info(types: &[TypeId]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A type erased bundle of components.
+/// A type erased bundle of components. It is assumed that the elements are
+/// ordered by typeid (ascending) at all times.
 #[derive(Default)]
-pub struct AnyBundle(pub FxHashMap<TypeId, AnyVec<dyn Send + Sync>>);
+pub struct AnyBundle(
+    pub SmallVec<[TypeId; 4]>,
+    pub SmallVec<[AnyVec<dyn Send + Sync>; 4]>,
+);
 
 impl AnyBundle {
+    /// Insert the component vec at the given type
+    pub fn insert(
+        &mut self,
+        ty: TypeId,
+        mut comp: AnyVec<dyn Send + Sync>,
+    ) -> Option<AnyVec<dyn Send + Sync>> {
+        for (i, t) in self.0.clone().into_iter().enumerate() {
+            if ty < t {
+                self.0.insert(i, ty);
+                self.1.insert(i, comp);
+                return None;
+            } else if ty == t {
+                std::mem::swap(&mut self.1[i], &mut comp);
+                return Some(comp);
+            }
+        }
+
+        self.0.push(ty);
+        self.1.push(comp);
+        None
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     /// Merge the given bundle into `self`, returning any key+values in
     /// `self` that match `other`.
     pub fn union(&mut self, other: AnyBundle) -> Option<Self> {
-        let mut prev = FxHashMap::default();
-        for (k, v) in other.0.into_iter() {
-            if let Some(pv) = self.0.insert(k, v) {
-                let _ = prev.insert(k, pv);
+        let mut to_caller = AnyBundle(smallvec![], smallvec![]);
+        for (ty, v) in other.0.into_iter().zip(other.1.into_iter()) {
+            if let Some(w) = self.insert(ty, v) {
+                to_caller.insert(ty, w);
             }
         }
-        if prev.is_empty() {
+        if to_caller.is_empty() {
             None
         } else {
-            Some(AnyBundle(prev))
+            Some(to_caller)
         }
+    }
+
+    fn index_of(&self, ty: &TypeId) -> Option<usize> {
+        for (i, t) in self.0.iter().enumerate() {
+            if ty == t {
+                return Some(i);
+            }
+        }
+        None
     }
 
     /// Remove a type from the bundle and return it as an `AnyBundle`.
-    pub fn remove(&mut self, ty: TypeId) -> Option<Self> {
-        let prev = self.0.remove(&ty)?;
-        let mut bundle = AnyBundle::default();
-        let _ = bundle.0.insert(ty, prev);
-        Some(bundle)
+    pub fn remove(&mut self, ty: &TypeId) -> Option<Self> {
+        let index = self.index_of(ty)?;
+        let ty = self.0.remove(index);
+        let elem = self.1.remove(index);
+        Some(AnyBundle(smallvec![ty], smallvec![elem]))
     }
 
     /// Get the type info of the bundle
-    pub fn type_info(&self) -> FxHashSet<TypeId> {
-        FxHashSet::from_iter(self.0.keys().map(Clone::clone))
+    pub fn type_info(&self) -> &[TypeId] {
+        &self.0
     }
 
     pub fn try_into_tuple<T>(self) -> anyhow::Result<T>
@@ -166,7 +208,7 @@ where
         let mut bundle = AnyBundle::from(tail);
         let mut store = AnyVec::new::<Head>();
         store.downcast_mut::<Head>().unwrap().push(head);
-        bundle.0.insert(store.element_typeid(), store);
+        bundle.insert(store.element_typeid(), store);
         bundle
     }
 }
@@ -182,17 +224,25 @@ impl EmptyBundle for () {
 }
 
 impl<Head, Tail> EmptyBundle for (Head, Tail)
-    where
+where
     Head: Send + Sync + 'static,
-    Tail: EmptyBundle + TupleList
+    Tail: EmptyBundle + TupleList,
 {
     fn empty_bundle() -> AnyBundle {
         let mut bundle = Tail::empty_bundle();
         let ty = TypeId::of::<Head>();
         let anyvec: AnyVec<dyn Send + Sync> = AnyVec::new::<Head>();
-        bundle.0.insert(ty, anyvec);
+        bundle.insert(ty, anyvec);
         bundle
     }
+}
+
+pub fn empty_bundle<B>() -> AnyBundle
+where
+    B: Tuple + 'static,
+    B::TupleList: EmptyBundle
+{
+    <B::TupleList as EmptyBundle>::empty_bundle()
 }
 
 #[cfg(test)]
@@ -228,16 +278,28 @@ mod test {
 
     #[test]
     fn type_info_for_tuple() {
-        let list_info = type_info::<<(f32, (String, (bool, (u32, ())))) as TupleList>::Tuple>().unwrap();
+        let list_info =
+            type_info::<<(f32, (String, (bool, (u32, ())))) as TupleList>::Tuple>().unwrap();
         let tupl_info = type_info::<(f32, String, bool, u32)>().unwrap();
-        assert_eq!(
-            list_info,
-            tupl_info,
-            "diff:\n{:#?}",
-            list_info.difference(&tupl_info)
-        );
-
+        assert_eq!(list_info, tupl_info,);
         assert!(type_info::<(f32, bool, f32)>().is_err());
+    }
+
+    #[test]
+    fn empty_bundle_type_info() {
+        let bundle = empty_bundle::<(f32, bool, String)>();
+        assert!(!bundle.0.is_empty());
+        let tys = type_info::<(f32, bool, String)>().unwrap();
+        assert_eq!(tys, bundle.0);
+    }
+
+    #[test]
+    fn basic_type_info() {
+        let tys_a = type_info::<(f32, bool, String)>().unwrap();
+        assert!(!tys_a.is_empty(), "types are empty");
+        let tys_b = type_info::<(bool, f32, String)>().unwrap();
+        assert_eq!(tys_a, tys_b);
+        assert!(tys_a == tys_b);
     }
 
     #[test]

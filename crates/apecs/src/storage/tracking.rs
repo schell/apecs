@@ -1,7 +1,6 @@
 //! Provides tracking of modifications to component stores.
 use std::marker::PhantomData;
 
-use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 use rustc_hash::FxHashSet;
 
 use crate::{
@@ -382,11 +381,11 @@ mod test {
 
     #[test]
     fn can_track_archetypes() {
+        let mut tracker = Tracker::<f32>::default();
         let mut store = AllArchetypes::default();
         store.insert(0, 0.0f32);
         store.insert(1, 1.0f32);
         store.insert(2, 2.0f32);
-        let mut tracker = Tracker::<f32>::default();
         {
             let mut query = Query::<(&f32,)>::try_from(&mut store).unwrap();
             assert_eq!(
@@ -401,8 +400,9 @@ mod test {
                     .collect::<Vec<_>>()
             );
         }
-        tracker.clear();
         increment_current_iteration();
+        tracker.clear();
+        store.unify_resources();
         *store.get_mut::<f32>(&1).unwrap() = 100.0;
         {
             let mut query = Query::<(&f32,)>::try_from(&mut store).unwrap();
@@ -418,8 +418,8 @@ mod test {
                     .collect::<Vec<_>>()
             );
         }
-        tracker.clear();
         increment_current_iteration();
+        tracker.clear();
         store.remove_any(0);
         store.remove_any(2);
         {
