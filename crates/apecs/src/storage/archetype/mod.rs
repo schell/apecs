@@ -439,7 +439,11 @@ impl Default for AllArchetypes {
 }
 
 impl AllArchetypes {
-    fn unify_resources(&mut self) {
+    /// Manually unify all archetypes' resources.
+    ///
+    /// This is necessary if you are using `AllArchetypes` alone, or outside of APECS in any
+    /// non-standard way.
+    pub fn unify_resources(&mut self) {
         log::trace!("AllArchetypes::unify_resources");
         // store the indices of any archetypes that have already had their resources unified
         let mut indices = FxHashSet::default();

@@ -420,12 +420,12 @@ mod test {
         }
         increment_current_iteration();
         tracker.clear();
+        store.unify_resources();
         store.remove_any(0);
         store.remove_any(2);
         {
             let mut query = Query::<(&f32,)>::try_from(&mut store).unwrap();
-            assert_eq!(
-                vec![(1, 100.0)],
+            assert!(
                 query
                     .run()
                     .filter_map(|(f,)| if f.has_changed_since(tracker.last_update()) {
@@ -434,6 +434,7 @@ mod test {
                         None
                     })
                     .collect::<Vec<_>>()
+                    .is_empty()
             );
         }
     }
