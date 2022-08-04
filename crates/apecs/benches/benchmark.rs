@@ -1,4 +1,4 @@
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, Criterion};
 
 mod add_remove;
 mod frag_iter;
@@ -30,74 +30,12 @@ impl std::fmt::Display for Syncronicity {
 }
 
 
-fn bench_range_vs_options(c: &mut Criterion) {
-    fn mk_range(ranges: &Vec<(usize, usize)>) -> Vec<(usize, usize, Vec<f32>)> {
-        ranges
-            .into_iter()
-            .map(|(min, max)| (*min, *max, vec![0.0f32; max + 1 - min]))
-            .collect()
-    }
-
-    fn mk_options(ranges: &Vec<(usize, usize)>) -> Vec<Option<f32>> {
-        let mut vs = vec![];
-        let mut index = 0;
-        let mut ranges = ranges.into_iter();
-        while let Some((rmin, rmax)) = ranges.next() {
-            while index < *rmin {
-                vs.push(None);
-                index += 1;
-            }
-            while index >= *rmin && index <= *rmax {
-                vs.push(Some(0.0));
-                index += 1;
-            }
-        }
-        vs
-    }
-
-    fn shift_by_one<'a>(iter: impl Iterator<Item = &'a mut f32>) {
-        for n in iter {
-            *n += 1.0;
-        }
-    }
-
-    let ranges = vec![(500, 4999), (6000, 9_999), (15_000, 19_999)];
-
-    let mut group = c.benchmark_group("iteration_range_vs_options");
-    group.throughput(Throughput::Elements(4500 + 4000 + 5000));
-    group.bench_function("options", |b| {
-        let mut opts = mk_options(&ranges);
-        assert_eq!(opts.len(), 20_000);
-
-        b.iter(|| {
-            let iter = opts.iter_mut().filter_map(|may| may.as_mut());
-            shift_by_one(iter);
-        })
-    });
-
-    group.throughput(Throughput::Elements(4500 + 4000 + 5000));
-    group.bench_function("stack", |b| {
-        let mut rngs = mk_range(&ranges);
-        assert_eq!(rngs.len(), 3);
-        assert_eq!(rngs[0].2.len(), 4500);
-        assert_eq!(rngs[1].2.len(), 4000);
-        assert_eq!(rngs[2].2.len(), 5000);
-
-        b.iter(|| {
-            let iter = rngs.iter_mut().flat_map(|r| r.2.iter_mut());
-            shift_by_one(iter);
-        })
-    });
-    group.finish();
-}
-
 fn bench_simple_insert(c: &mut Criterion) {
     let mut group = c.benchmark_group("simple_insert");
     // let plot_config =
     //    criterion::PlotConfiguration::default().
     // summary_scale(criterion::AxisScale::Logarithmic);
     // group.plot_config(plot_config);
-
     group.bench_function("apecs::separate", |b| {
         let mut bench = simple_insert::BenchmarkSeparate::new();
         b.iter(move || bench.run());
@@ -134,10 +72,10 @@ fn bench_simple_insert(c: &mut Criterion) {
 
 fn bench_add_remove(c: &mut Criterion) {
     let mut group = c.benchmark_group("add_remove_component");
-    // let plot_config =
-    //    criterion::PlotConfiguration::default().
-    // summary_scale(criterion::AxisScale::Logarithmic);
-    // group.plot_config(plot_config);
+    //let plot_config =
+    //   criterion::PlotConfiguration::default().
+    //summary_scale(criterion::AxisScale::Logarithmic);
+    //group.plot_config(plot_config);
 
     group.bench_function("apecs::separate", |b| {
         let mut bench = add_remove::BenchmarkSeparate::new();
@@ -318,7 +256,6 @@ fn bench_heavy_compute(c: &mut Criterion) {
 
 criterion_group!(
     benches,
-    bench_range_vs_options,
     bench_add_remove,
     bench_simple_iter,
     bench_simple_insert,

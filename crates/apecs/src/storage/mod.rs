@@ -116,7 +116,7 @@ impl HasEntityInfoMut for EntityInfo {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Entry<T> {
     pub(crate) value: T,
-    pub(crate) info: EntityInfo
+    pub(crate) info: EntityInfo,
 }
 
 impl<T> AsRef<T> for Entry<T> {
@@ -162,7 +162,7 @@ impl<T> Entry<T> {
     pub fn new(id: usize, value: T) -> Self {
         Entry {
             value,
-            info: EntityInfo::new(id)
+            info: EntityInfo::new(id),
         }
     }
 
@@ -425,7 +425,7 @@ where
                 key: self.id,
                 changed: 0,
                 added: false,
-            }
+            },
         };
         self.id += 1;
         Some(entry)
@@ -443,5 +443,46 @@ where
 
     fn into_iter(self) -> Self::IntoIter {
         WithoutIter::new(self.0.into_iter())
+    }
+}
+
+pub struct ComponentIter<T>(T);
+
+impl<A> Iterator for ComponentIter<(A,)>
+where
+    A: Iterator,
+{
+    type Item = A::Item;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0 .0.next()
+    }
+}
+
+impl<A, B> Iterator for ComponentIter<(A, B)>
+where
+    A: Iterator,
+    B: Iterator,
+{
+    type Item = (A::Item, B::Item);
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        Some((self.0 .0.next()?, self.0 .1.next()?))
+    }
+}
+
+impl<A, B, C> Iterator for ComponentIter<(A, B, C)>
+where
+    A: Iterator,
+    B: Iterator,
+    C: Iterator,
+{
+    type Item = (A::Item, B::Item, C::Item);
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        Some((self.0 .0.next()?, self.0 .1.next()?, self.0 .2.next()?))
     }
 }

@@ -1,4 +1,4 @@
-use apecs::storage::{archetype::{AllArchetypes, ArchetypeBuilder}, separated::*, EntityInfo};
+use apecs::storage::{archetype::{AllArchetypes, ArchetypeBuilder}, separated::*};
 use cgmath::*;
 
 pub struct Transform(Matrix4<f32>);
@@ -34,11 +34,11 @@ impl BenchmarkSeparate {
     }
 }
 
-pub struct BenchmarkArchetype(AllArchetypes);
+pub struct BenchmarkArchetype;
 
 impl BenchmarkArchetype {
     pub fn new() -> Self {
-        BenchmarkArchetype(AllArchetypes::default())
+        Self
     }
 
     pub fn run(&mut self) {
@@ -46,14 +46,13 @@ impl BenchmarkArchetype {
         let ps = (0..10000).map(|_| Position(Vector3::unit_x()));
         let rs = (0..10000).map(|_| Rotation(Vector3::unit_x()));
         let vs = (0..10000).map(|_| Velocity(Vector3::unit_x()));
-        let es = (0..10000).map(|id| EntityInfo::new(id));
         let archetype = ArchetypeBuilder::default()
-            .with_components(ts)
-            .with_components(ps)
-            .with_components(rs)
-            .with_components(vs)
-            .with_entities(es)
+            .with_components(0, ts)
+            .with_components(0, ps)
+            .with_components(0, rs)
+            .with_components(0, vs)
             .build();
-        self.0.insert_archetype(archetype);
+        let mut all = AllArchetypes::default();
+        all.insert_archetype(archetype);
     }
 }

@@ -1,9 +1,9 @@
 use std::ops::DerefMut;
 
-use apecs::{storage::{separated::*, archetype::*}, world::*};
+use apecs::storage::{separated::*, archetype::*};
 
 macro_rules! create_entities_sep {
-    ($store:expr; $datas:ident; $entities:ident; $( $variants:ident ),*) => {
+    ($store:expr; $datas:ident; $( $variants:ident ),*) => {
         $(
             struct $variants(f32);
             let mut rez = $store;
@@ -25,9 +25,8 @@ pub fn tick_sep(data_storage: &mut VecStorage<Data>) {
 }
 
 pub fn sep() -> VecStorage<Data> {
-    let mut entities = Entities::default();
     let mut datas: VecStorage<Data> = VecStorage::new_with_capacity(26 * 20);
-    create_entities_sep!(VecStorage::new_with_capacity(20); datas; entities; A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z);
+    create_entities_sep!(VecStorage::new_with_capacity(20); datas; A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z);
     datas
 }
 
@@ -51,7 +50,7 @@ pub fn arch() -> AllArchetypes {
 
 pub fn tick_arch(all: &mut AllArchetypes) {
     let mut query: Query::<(&mut Data,)> = Query::try_from(all).unwrap();
-    for (mut data,) in query.run() {
+    for mut data in query.run() {
         data.0 *= 2.0;
     }
 }

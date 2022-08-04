@@ -392,7 +392,7 @@ mod test {
                 vec![(0, 0.0), (1, 1.0), (2, 2.0)],
                 query
                     .run()
-                    .filter_map(|(f,)| if f.has_changed_since(tracker.last_update()) {
+                    .filter_map(|f| if f.has_changed_since(tracker.last_update()) {
                         Some((f.id(), *f))
                     } else {
                         None
@@ -410,7 +410,7 @@ mod test {
                 vec![(1, 100.0)],
                 query
                     .run()
-                    .filter_map(|(f,)| if f.has_changed_since(tracker.last_update()) {
+                    .filter_map(|f| if f.has_changed_since(tracker.last_update()) {
                         Some((f.id(), *f))
                     } else {
                         None
@@ -428,7 +428,7 @@ mod test {
             assert!(
                 query
                     .run()
-                    .filter_map(|(f,)| if f.has_changed_since(tracker.last_update()) {
+                    .filter_map(|f| if f.has_changed_since(tracker.last_update()) {
                         Some((f.id(), *f))
                     } else {
                         None

@@ -1,16 +1,19 @@
-use apecs::{anyhow, storage::{separated::*, archetype::*}};
+use apecs::{
+    anyhow,
+    storage::{archetype::*, separated::*},
+};
 use cgmath::*;
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub struct Transform(Matrix4<f32>);
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub struct Position(Vector3<f32>);
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub struct Rotation(Vector3<f32>);
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub struct Velocity(Vector3<f32>);
 
 pub struct BenchmarkSeparate {
@@ -38,22 +41,26 @@ impl BenchmarkSeparate {
     }
 }
 
-pub struct BenchmarkArchetype(AllArchetypes);
+pub struct BenchmarkArchetype(
+    AllArchetypes,
+    Query<(&'static Velocity, &'static mut Position)>,
+);
 
 impl BenchmarkArchetype {
     pub fn new() -> anyhow::Result<Self> {
         let mut archs = AllArchetypes::default();
+        let arch = ArchetypeBuilder::default()
+            .with_components(0, (0..10000).map(|_| Position(Vector3::unit_x())))
+            .with_components(0, (0..10000).map(|_| Velocity(Vector3::unit_x())))
+            .build();
+        archs.insert_archetype(arch);
 
-        (0..10000).for_each(|id| {
-            let _ = archs.insert_bundle(id, (Position(Vector3::unit_x()), Velocity(Vector3::unit_x())));
-        });
-
-        Ok(Self (archs))
+        let query: Query<(&Velocity, &mut Position)> = Query::try_from(&mut archs).unwrap();
+        Ok(Self(archs, query))
     }
 
     pub fn run(&mut self) {
-        let mut query: Query<(&Velocity, &mut Position)> = Query::try_from(&mut self.0).unwrap();
-        for (velocity, mut position) in query.run() {
+        for (velocity, mut position) in self.1.run() {
             position.0 += velocity.0;
         }
     }
