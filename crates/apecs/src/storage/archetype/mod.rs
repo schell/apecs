@@ -1,7 +1,16 @@
 //! Entity components stored together in contiguous arrays.
-use std::{any::TypeId, marker::PhantomData, ops::DerefMut, sync::Arc};
+use std::{
+    any::TypeId,
+    ops::DerefMut,
+    sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard}, marker::PhantomData,
+};
 
-use any_vec::{any_value::AnyValueMut, mem::Heap, traits::*, AnyVec, AnyVecMut, AnyVecRef};
+use any_vec::{
+    any_value::{AnyValue, AnyValueMut},
+    mem::Heap,
+    traits::*,
+    AnyVec, AnyVecMut, AnyVecRef,
+};
 use anyhow::Context;
 use rustc_hash::FxHashMap;
 
@@ -9,86 +18,31 @@ mod bundle;
 pub use bundle::*;
 use smallvec::SmallVec;
 
-use crate::{mpsc, resource_manager::LoanManager, schedule::Borrow, CanFetch, ResourceId};
+use crate::{resource_manager::LoanManager, schedule::Borrow, CanFetch, ResourceId};
 
 use super::{ComponentIter, EntityInfo, HasEntityInfoMut, Mut, Ref};
 
+pub struct ColumnRead<'a>(
+    RwLockReadGuard<'a, AnyVec<dyn Sync + Send + 'static>>,
+    RwLockReadGuard<'a, Vec<EntityInfo>>,
+);
+
+// pub struct ColumnIter<'a, T>(std::slice::Iter<'a, AnyVecRef<'a, T>>,
+// std::slice::Iter<'a, >)
+
 #[derive(Debug)]
-pub struct InnerColumn(AnyVec<dyn Sync + Send + 'static>, Vec<EntityInfo>);
-
-impl InnerColumn {
-    #[inline]
-    pub fn iter<'a, T: 'static>(&'a self) -> InnerColumnIter<'a, T> {
-        InnerColumnIter {
-            data: self.0.downcast_ref::<T>().unwrap().into_iter(),
-            info: self.1.iter(),
-        }
-    }
-
-    #[inline]
-    pub fn iter_mut<'a, T: 'static>(&'a mut self) -> InnerColumnIterMut<'a, T> {
-        InnerColumnIterMut {
-            data: self.0.downcast_mut::<T>().unwrap().into_iter(),
-            info: self.1.iter_mut(),
-        }
-    }
-}
-
-pub struct InnerColumnIter<'a, T> {
-    data: std::slice::Iter<'a, T>,
-    info: std::slice::Iter<'a, EntityInfo>,
-}
-
-impl<'a, T: 'static> Iterator for InnerColumnIter<'a, T> {
-    type Item = Ref<'a, T>;
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        Some(Ref(self.info.next()?, self.data.next()?))
-    }
-}
-
-impl<T: 'static> Default for InnerColumnIter<'static, T> {
-    #[inline]
-    fn default() -> Self {
-        Self {
-            data: (&[]).into_iter(),
-            info: (&[]).into_iter(),
-        }
-    }
-}
-
-pub struct InnerColumnIterMut<'a, T> {
-    data: std::slice::IterMut<'a, T>,
-    info: std::slice::IterMut<'a, EntityInfo>,
-}
-
-impl<'a, T: 'static> Iterator for InnerColumnIterMut<'a, T> {
-    type Item = Mut<'a, T>;
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        Some(Mut(self.info.next()?, self.data.next()?))
-    }
-}
-
-impl<T: 'static> Default for InnerColumnIterMut<'static, T> {
-    #[inline]
-    fn default() -> Self {
-        Self {
-            data: (&mut []).into_iter(),
-            info: (&mut []).into_iter(),
-        }
-    }
-}
+pub struct InnerColumn(
+    Arc<RwLock<AnyVec<dyn Sync + Send + 'static>>>,
+    Arc<RwLock<Vec<EntityInfo>>>,
+);
 
 /// A collection of entities having the same component types
 #[derive(Debug, Default)]
 pub struct Archetype {
     pub(crate) types: SmallVec<[TypeId; 4]>,
-    pub(crate) data: SmallVec<[Option<AnyVec<dyn Send + Sync + 'static>>; 4]>,
-    pub(crate) entity_info: SmallVec<[Option<Vec<EntityInfo>>; 4]>,
-    pub(crate) loaned_data: SmallVec<[Option<Arc<InnerColumn>>; 4]>,
+    pub(crate) data: SmallVec<[Arc<RwLock<AnyVec<dyn Send + Sync + 'static>>>; 4]>,
+    pub(crate) entity_info: SmallVec<[Arc<RwLock<Vec<EntityInfo>>>; 4]>,
+    // pub(crate) loaned_data: SmallVec<[Option<Arc<InnerColumn>>; 4]>,
     // map of entity_id to storage index
     pub(crate) entity_lookup: FxHashMap<usize, usize>,
 }
@@ -118,22 +72,23 @@ impl ArchetypeBuilder {
         for (i, t) in self.archetype.types.iter().enumerate() {
             if &ty < t {
                 self.archetype.types.insert(i, ty);
-                self.archetype.data.insert(i, Some(anyvec));
-                self.archetype.loaned_data.insert(i, None);
-                self.archetype.entity_info.insert(i, Some(entities));
+                self.archetype.data.insert(i, Arc::new(RwLock::new(anyvec)));
+                self.archetype
+                    .entity_info
+                    .insert(i, Arc::new(RwLock::new(entities)));
                 return self;
             } else if &ty == t {
-                self.archetype.data[i] = Some(anyvec);
-                self.archetype.entity_info[i] = Some(entities);
-                self.archetype.loaned_data[i] = None;
+                self.archetype.data[i] = Arc::new(RwLock::new(anyvec));
+                self.archetype.entity_info[i] = Arc::new(RwLock::new(entities));
                 return self;
             }
         }
 
         self.archetype.types.push(ty);
-        self.archetype.data.push(Some(anyvec));
-        self.archetype.loaned_data.push(None);
-        self.archetype.entity_info.push(Some(entities));
+        self.archetype.data.push(Arc::new(RwLock::new(anyvec)));
+        self.archetype
+            .entity_info
+            .push(Arc::new(RwLock::new(entities)));
 
         self
     }
@@ -165,9 +120,15 @@ impl Archetype {
             (vec![], FxHashMap::default())
         };
         Ok(Archetype {
-            data: bundle.1.into_iter().map(Option::Some).collect(),
-            entity_info: types.iter().map(|_| Some(entities.clone())).collect(),
-            loaned_data: types.iter().map(|_| None).collect(),
+            data: bundle
+                .1
+                .into_iter()
+                .map(|v| Arc::new(RwLock::new(v)))
+                .collect(),
+            entity_info: types
+                .iter()
+                .map(|_| Arc::new(RwLock::new(entities.clone())))
+                .collect(),
             entity_lookup,
             types,
         })
@@ -190,13 +151,12 @@ impl Archetype {
         self.entity_lookup.is_empty()
     }
 
+    #[inline]
     fn index_of(&self, ty: &TypeId) -> Option<usize> {
-        for (i, t) in self.types.iter().enumerate() {
-            if ty == t {
-                return Some(i);
-            }
-        }
-        None
+        self.types
+            .iter()
+            .enumerate()
+            .find_map(|(i, t)| if ty == t { Some(i) } else { None })
     }
 
     /// Whether this archetype contains the entity
@@ -236,69 +196,41 @@ impl Archetype {
         true
     }
 
-    fn get_column<T: 'static>(&self) -> anyhow::Result<AnyVecRef<'_, T, Heap>> {
-        let ty = TypeId::of::<T>();
-        let i = self.index_of(&ty).context("missing column")?;
-        let column = self.data[i]
-            .as_ref()
-            .or_else(|| self.loaned_data[i].as_ref().map(|innercol| &innercol.0))
-            .with_context(|| format!("missing column '{}' data", std::any::type_name::<T>()))?;
-        column
-            .downcast_ref::<T>()
-            .with_context(|| format!("could not downcast to {}", std::any::type_name::<T>()))
-    }
+    //fn get_column<T: 'static>(&self) -> anyhow::Result<AnyVecRef<'_, T, Heap>> {
+    //    let ty = TypeId::of::<T>();
+    //    let i = self.index_of(&ty).context("missing column")?;
+    //    let column = self.data[i].read().ok().context("can't read")?;
+    //    column
+    //        .downcast_ref::<T>()
+    //        .with_context(|| format!("could not downcast to {}", std::any::type_name::<T>()))
+    //}
 
-    fn get_column_mut<T: 'static>(
-        &mut self,
-    ) -> anyhow::Result<(AnyVecMut<'_, T, Heap>, &mut [EntityInfo])> {
-        self.unify_resources();
-        let ty = TypeId::of::<T>();
-        let index = self
-            .index_of(&ty)
-            .with_context(|| format!("no such column {}", std::any::type_name::<T>()))?;
-        let column = self.data[index]
-            .as_mut()
-            .with_context(|| format!("column '{}' is borrowed", std::any::type_name::<T>()))?;
-        let ents = self.entity_info[index]
-            .as_mut()
-            .with_context(|| format!("column '{}' info is borrowed", std::any::type_name::<T>()))?
-            .as_mut_slice();
-        Ok((
-            column
-                .downcast_mut::<T>()
-                .with_context(|| format!("could not downcast to {}", std::any::type_name::<T>()))?,
-            ents,
-        ))
-    }
+    //fn get_column_mut<T: 'static>(
+    //    &mut self,
+    //) -> anyhow::Result<(AnyVecMut<'_, T, Heap>, &mut [EntityInfo])> {
+    //    let ty = TypeId::of::<T>();
+    //    let index = self
+    //        .index_of(&ty)
+    //        .with_context(|| format!("no such column {}", std::any::type_name::<T>()))?;
+    //    let column = self.data[index].write().ok().context("can't write")?;
+    //    let ents = self.entity_info[index]
+    //        .write()
+    //        .ok()
+    //        .context("can't write info")?;
+    //    Ok((
+    //        column
+    //            .downcast_mut::<T>()
+    //            .with_context(|| format!("could not downcast to {}", std::any::type_name::<T>()))?,
+    //        &mut ents,
+    //    ))
+    //}
 
-    fn borrow_column(&mut self, ty: &TypeId) -> Option<Arc<InnerColumn>> {
+    fn borrow_column(&self, ty: &TypeId) -> Option<InnerColumn> {
         let i = self.index_of(ty)?;
-
-        let col = || -> Option<_> {
-            let data = self.data[i].take()?;
-            let info = self.entity_info[i].take()?;
-            let col = Arc::new(InnerColumn(data, info));
-            self.loaned_data[i] = Some(col.clone());
-            Some(col)
-        }()
-        .or_else(|| self.loaned_data[i].clone());
-        col
-    }
-
-    fn unify_resources(&mut self) {
-        for (i, may_col) in self.loaned_data.iter_mut().enumerate() {
-            if let Some(arc) = may_col.take() {
-                match Arc::try_unwrap(arc) {
-                    Ok(col) => {
-                        self.data[i] = Some(col.0);
-                        self.entity_info[i] = Some(col.1);
-                    }
-                    Err(arc) => {
-                        *may_col = Some(arc);
-                    }
-                }
-            }
-        }
+        let data = self.data[i].clone();
+        let info = self.entity_info[i].clone();
+        let col = InnerColumn(data, info);
+        Some(col)
     }
 
     pub fn insert<B>(&mut self, entity_id: usize, bundle: B) -> anyhow::Result<Option<B>>
@@ -331,11 +263,12 @@ impl Archetype {
             if let Some(entity_index) = self.entity_lookup.get(&entity_id) {
                 for (ty, component_vec) in bundle.0.iter().zip(bundle.1.iter_mut()) {
                     let ty_index = self.index_of(ty).context("missing column")?;
-                    let info = self.entity_info[ty_index]
-                        .as_mut()
-                        .context("column is borrowed")?;
+                    let mut info = self.entity_info[ty_index]
+                        .write()
+                        .ok()
+                        .context("can't write")?;
                     info[*entity_index].mark_changed();
-                    let data = self.data[ty_index].as_mut().context("column is borrowed")?;
+                    let mut data = self.data[ty_index].write().ok().context("can't write")?;
                     let mut element_a = data.at_mut(*entity_index);
                     let mut element_b = component_vec.at_mut(0);
                     element_a.swap(element_b.deref_mut());
@@ -346,10 +279,11 @@ impl Archetype {
                 assert!(self.entity_lookup.insert(entity_id, last_index).is_none());
                 for (ty, mut component_vec) in bundle.0.into_iter().zip(bundle.1.into_iter()) {
                     let ty_index = self.index_of(&ty).context("missing column")?;
-                    let data = self.data[ty_index].as_mut().context("column is borrowed")?;
-                    let info = self.entity_info[ty_index]
-                        .as_mut()
-                        .context("column is borrowed")?;
+                    let mut data = self.data[ty_index].write().ok().context("can't write")?;
+                    let mut info = self.entity_info[ty_index]
+                        .write()
+                        .ok()
+                        .context("can't write")?;
                     data.push(component_vec.pop().unwrap());
                     debug_assert!(data.len() == last_index + 1);
                     info.push(EntityInfo::new(entity_id));
@@ -384,8 +318,8 @@ impl Archetype {
             let mut anybundle = AnyBundle::default();
             anybundle.0 = self.types.clone();
             for (column, info) in self.data.iter_mut().zip(self.entity_info.iter_mut()) {
-                let data = column.as_mut().context("column is borrowed")?;
-                let info = info.as_mut().context("column is borrowed")?;
+                let mut data = column.write().ok().context("can't write")?;
+                let mut info = info.write().ok().context("can't write")?;
                 assert_eq!(info.swap_remove(index).key, entity_id);
                 if should_reset_index {
                     // the index of the last entity was swapped for that of the removed
@@ -411,127 +345,55 @@ impl Archetype {
         }
     }
 
-    /// Get a single component reference.
-    pub fn get<T: 'static>(&self, entity_id: usize) -> anyhow::Result<Option<&T>> {
-        if let Some(index) = self.entity_lookup.get(&entity_id) {
-            let storage = self.get_column::<T>()?;
-            Ok(storage.get(*index))
-        } else {
-            Ok(None)
-        }
-    }
+    ///// Get a single component reference.
+    //pub fn get<T: 'static>(&self, entity_id: usize) -> anyhow::Result<Option<&T>> {
+    //    if let Some(index) = self.entity_lookup.get(&entity_id) {
+    //        let storage = self.get_column::<T>()?;
+    //        Ok(storage.get(*index))
+    //    } else {
+    //        Ok(None)
+    //    }
+    //}
 
-    /// Get a mutable component reference.
-    ///
-    /// ## Note
-    /// This will mark the component changed.
-    pub fn get_mut<T: 'static>(&mut self, entity_id: usize) -> anyhow::Result<Option<&mut T>> {
-        if let Some(index) = self.entity_lookup.get(&entity_id).copied() {
-            let mut column = self.get_column_mut::<T>()?;
-            if let Some(e) = column.1.get_mut(index) {
-                e.mark_changed();
-                Ok(column.0.get_mut(index))
-            } else {
-                Ok(None)
-            }
-        } else {
-            Ok(None)
-        }
-    }
+    ///// Get a mutable component reference.
+    /////
+    ///// ## Note
+    ///// This will mark the component changed.
+    //pub fn get_mut<T: 'static>(&mut self, entity_id: usize) -> anyhow::Result<Option<&mut T>> {
+    //    if let Some(index) = self.entity_lookup.get(&entity_id).copied() {
+    //        let mut column = self.get_column_mut::<T>()?;
+    //        if let Some(e) = column.1.get_mut(index) {
+    //            e.mark_changed();
+    //            Ok(column.0.get_mut(index))
+    //        } else {
+    //            Ok(None)
+    //        }
+    //    } else {
+    //        Ok(None)
+    //    }
+    //}
 }
-
-struct QueryReturn(TypeId, Vec<ArchetypeIndex>, Vec<InnerColumn>);
 
 #[derive(Debug)]
 pub struct AllArchetypes {
     archetypes: Vec<Archetype>,
-    query_return_chan: (mpsc::Sender<QueryReturn>, mpsc::Receiver<QueryReturn>),
 }
 
 impl Default for AllArchetypes {
     fn default() -> Self {
         Self {
             archetypes: Default::default(),
-            query_return_chan: mpsc::unbounded(),
         }
     }
 }
 
 impl AllArchetypes {
-    /// Manually unify all archetypes' resources.
-    ///
-    /// This is necessary if you are using `AllArchetypes` alone, or outside of
-    /// APECS in any non-standard way.
-    pub fn unify_resources(&mut self) {
-        log::trace!("AllArchetypes::unify_resources");
-        // store the archetypes that need their resources unified, then remove them when
-        // they have been unified
-        let mut archetypes = self
-            .archetypes
-            .iter_mut()
-            .map(|a| Some(a))
-            .collect::<Vec<_>>();
-        while let Some(QueryReturn(ty, infos, data)) = self.query_return_chan.1.try_recv().ok() {
-            for (ArchetypeIndex(archetype_i), col) in infos.into_iter().zip(data.into_iter()) {
-                let archetype = archetypes[archetype_i]
-                    .as_mut()
-                    .expect("previous archetype");
-                let i = archetype.index_of(&ty).unwrap();
-                debug_assert!(
-                    archetype.data[i].is_none(),
-                    "inserted query return data into archetype that already had data"
-                );
-                archetype.data[i] = Some(col.0);
-                archetype.entity_info[i] = Some(col.1);
-                archetype.unify_resources();
-                archetypes[archetype_i] = None;
-            }
-        }
-        for arch in archetypes.into_iter().flatten() {
-            arch.unify_resources();
-        }
-    }
-
-    pub fn get_column<T: 'static>(&mut self) -> Option<QueryColumn<T>> {
-        self.unify_resources();
+    pub fn get_column<T: 'static>(&self) -> Vec<InnerColumn> {
         let ty = TypeId::of::<T>();
-        let mut column = QueryColumn::<T>::default();
-        for arch in self.archetypes.iter_mut() {
-            if let Some(col) = arch.borrow_column(&ty) {
-                column.data.push(col);
-            }
-        }
-        if column.data.is_empty() {
-            None
-        } else {
-            Some(column)
-        }
-    }
-
-    /// Attempt to obtain a query column of the given type.
-    ///
-    /// ## PANICS
-    /// Panics if the requested column exists, but is already borrowed.
-    pub fn get_column_mut<T: 'static>(&mut self) -> Option<QueryColumnMut<T>> {
-        self.unify_resources();
-        let ty = TypeId::of::<T>();
-        let mut column = QueryColumnMut::<T>::new(self.query_return_chan.0.clone());
-        for (i, arch) in self.archetypes.iter_mut().enumerate() {
-            if let Some(index) = arch.index_of(&ty) {
-                let data = arch.data[index].take().expect("column is borrowed");
-                let info = arch.entity_info[index]
-                    .take()
-                    .expect("column info is borrowed");
-                let col = InnerColumn(data, info);
-                column.indices.push(ArchetypeIndex(i));
-                column.column.push(col);
-            }
-        }
-        if column.column.is_empty() {
-            None
-        } else {
-            Some(column)
-        }
+        self.archetypes
+            .iter()
+            .filter_map(|arch| arch.borrow_column(&ty))
+            .collect()
     }
 
     /// Attempts to obtain a mutable reference to an archetype that exactly
@@ -624,24 +486,23 @@ impl AllArchetypes {
         self.insert_bundle(entity_id, (component,)).map(|(t,)| t)
     }
 
-    pub fn get<T: 'static>(&self, entity_id: &usize) -> Option<&T> {
-        for arch in self.archetypes.iter() {
-            if arch.has::<T>() && arch.contains_entity(entity_id) {
-                return arch.get::<T>(*entity_id).unwrap();
-            }
-        }
-        None
-    }
+    //pub fn get<T: 'static>(&self, entity_id: &usize) -> Option<&T> {
+    //    for arch in self.archetypes.iter() {
+    //        if arch.has::<T>() && arch.contains_entity(entity_id) {
+    //            return arch.get::<T>(*entity_id).unwrap();
+    //        }
+    //    }
+    //    None
+    //}
 
-    pub fn get_mut<T: 'static>(&mut self, entity_id: &usize) -> Option<&mut T> {
-        self.unify_resources();
-        for arch in self.archetypes.iter_mut() {
-            if arch.has::<T>() && arch.contains_entity(entity_id) {
-                return arch.get_mut::<T>(*entity_id).unwrap();
-            }
-        }
-        None
-    }
+    //pub fn get_mut<T: 'static>(&mut self, entity_id: &usize) -> Option<&mut T> {
+    //    for arch in self.archetypes.iter_mut() {
+    //        if arch.has::<T>() && arch.contains_entity(entity_id) {
+    //            return arch.get_mut::<T>(*entity_id).unwrap();
+    //        }
+    //    }
+    //    None
+    //}
 
     /// Remove all components of the given entity and return them in an untyped
     /// bundle.
@@ -719,305 +580,220 @@ impl AllArchetypes {
     }
 }
 
-// This column's archetype index in the AllArchetypes struct
-struct ArchetypeIndex(usize);
-
-pub struct QueryColumn<T: 'static> {
-    data: Vec<Arc<InnerColumn>>,
-    _phantom: PhantomData<T>,
-}
-
-impl<T: 'static> Default for QueryColumn<T> {
-    fn default() -> Self {
-        Self {
-            data: Default::default(),
-            _phantom: Default::default(),
-        }
-    }
-}
-
-pub struct QueryColumnIter<'a, T> {
-    columns: std::slice::Iter<'a, Arc<InnerColumn>>,
-    col: InnerColumnIter<'a, T>,
-}
-
-impl<'a, T: 'static> Iterator for QueryColumnIter<'a, T> {
-    type Item = Ref<'a, T>;
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        self.col.next().or_else(|| {
-            self.col = self.columns.next()?.iter();
-            self.col.next()
-        })
-    }
-}
-
-pub struct QueryColumnMut<T: 'static> {
-    indices: Vec<ArchetypeIndex>,
-    column: Vec<InnerColumn>,
-    query_return_tx: mpsc::Sender<QueryReturn>,
-    _phantom: PhantomData<T>,
-}
-
-impl<T: 'static> Default for QueryColumnMut<T> {
-    fn default() -> Self {
-        Self {
-            indices: Default::default(),
-            column: Default::default(),
-            query_return_tx: mpsc::bounded(1).0,
-            _phantom: Default::default(),
-        }
-    }
-}
-
-impl<T: 'static> QueryColumnMut<T> {
-    fn new(query_return_tx: mpsc::Sender<QueryReturn>) -> Self {
-        Self {
-            indices: Default::default(),
-            column: Default::default(),
-            query_return_tx,
-            _phantom: Default::default(),
-        }
-    }
-}
-
-impl<T: 'static> Drop for QueryColumnMut<T> {
-    fn drop(&mut self) {
-        if self.query_return_tx.is_closed() {
-            log::warn!(
-                "a query was dropped after the AllArchetypes struct it was made from dropped, \
-                 this will result in a loss of component data"
-            );
-        } else {
-            log::trace!("sending column of {} back", std::any::type_name::<T>());
-            let ty = TypeId::of::<T>();
-            let info = std::mem::take(&mut self.indices);
-            let data = std::mem::take(&mut self.column);
-            self.query_return_tx
-                .try_send(QueryReturn(ty, info, data))
-                .unwrap();
-        }
-    }
-}
-
-pub struct QueryColumnIterMut<'a, T> {
-    columns: std::slice::IterMut<'a, InnerColumn>,
-    col: InnerColumnIterMut<'a, T>,
-}
-
-impl<'a, T: 'static> Iterator for QueryColumnIterMut<'a, T> {
-    type Item = Mut<'a, T>;
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        self.col.next().or_else(|| {
-            self.col = self.columns.next()?.iter_mut();
-            self.col.next()
-        })
-    }
-}
+/// A placeholder type for borrowing an entire column of components from
+/// the world.
+pub struct ComponentColumn<T>(PhantomData<T>);
 
 pub trait IsQuery {
-    type Columns: Default;
-    type Item<'t>;
-    type ColumnsIter<'t>: Iterator<Item = Self::Item<'t>>;
+    type Columns<'a>;
+    type QueryResult<'a>;
+    type QueryRow<'a>;
+    type Iter<'a>: Iterator<Item = Self::QueryRow<'a>>;
 
-    fn pop_columns(archetypes: &mut AllArchetypes) -> Self::Columns;
-    fn columns_iter(columns: &mut Self::Columns) -> Self::ColumnsIter<'_>;
-    fn column_borrows() -> Vec<Borrow>;
+    fn build_query<'t>(archetypes: &'t AllArchetypes) -> Self::Columns<'t>;
+    fn prepare_query<'t>(columns: &'t Self::Columns<'t>) -> Self::QueryResult<'t>;
+    fn run_query<'t>(query_result: Self::QueryResult<'t>) -> Self::Iter<'t>;
+    fn borrows() -> Vec<Borrow>;
 }
 
-impl IsQuery for () {
-    type Columns = ();
-    type Item<'t> = ();
-    type ColumnsIter<'t> = std::iter::Cycle<std::iter::Once<()>>;
+impl<'q, T: Send + Sync + 'static> IsQuery for &'q T {
+    type Columns<'a> = Vec<(
+        RwLockReadGuard<'a, AnyVec<dyn Send + Sync + 'static>>,
+        RwLockReadGuard<'a, Vec<EntityInfo>>,
+    )>;
+    type QueryResult<'a> = Vec<(
+        AnyVecRef<'a, T, Heap>,
+        std::slice::Iter<'a, EntityInfo>
+    )>;
+    type QueryRow<'a> = Ref<'a, T>;
+    type Iter<'a> = Box<dyn Iterator<Item = Ref<'a, T>>>;
 
-    fn pop_columns(_: &mut AllArchetypes) -> Self::Columns {
-        ()
-    }
-
-    fn columns_iter(_: &mut Self::Columns) -> Self::ColumnsIter<'_> {
-        std::iter::once(()).cycle()
-    }
-
-    fn column_borrows() -> Vec<Borrow> {
-        vec![]
-    }
-}
-
-impl<'a, T: Send + Sync + 'static> IsQuery for &'a T {
-    type Columns = QueryColumn<T>;
-    type Item<'t> = Ref<'t, T>;
-    type ColumnsIter<'t> = QueryColumnIter<'t, T>;
-
-    fn pop_columns(archetypes: &mut AllArchetypes) -> Self::Columns {
-        archetypes.get_column::<T>().unwrap_or_default()
-    }
-
-    fn columns_iter<'t>(cols: &'t mut QueryColumn<T>) -> Self::ColumnsIter<'t> {
-        let mut columns = cols.data.iter();
-        let col: InnerColumnIter<'t, T> = columns
-            .next()
-            .map(|c| c.iter())
-            .unwrap_or_else(|| InnerColumnIter::default() as InnerColumnIter<'t, T>);
-        QueryColumnIter { columns, col }
-    }
-
-    fn column_borrows() -> Vec<Borrow> {
+    fn borrows() -> Vec<Borrow> {
         vec![Borrow {
-            id: ResourceId::new::<QueryColumn<T>>(),
+            id: ResourceId::new::<ComponentColumn<T>>(),
             is_exclusive: false,
         }]
     }
-}
 
-impl<'a, T: Send + Sync + 'static> IsQuery for &'a mut T {
-    type Columns = QueryColumnMut<T>;
-    type Item<'t> = Mut<'t, T>;
-    type ColumnsIter<'t> = QueryColumnIterMut<'t, T>;
-
-    fn pop_columns(archetypes: &mut AllArchetypes) -> Self::Columns {
-        archetypes.get_column_mut::<T>().unwrap_or_default()
+    fn build_query<'t>(archetypes: &'t AllArchetypes) -> Self::Columns<'t> {
+        let ty = TypeId::of::<T>();
+        archetypes.archetypes.iter().filter_map(|a| {
+            let i = a.index_of(&ty)?;
+            Some((a.data[i].read().expect("can't read"), a.entity_info[i].read().expect("can't read")))
+        })
+        .collect()
     }
 
-    fn columns_iter<'t>(cols: &'t mut QueryColumnMut<T>) -> Self::ColumnsIter<'t> {
-        let mut columns = cols.column.iter_mut();
-        let col = columns
-            .next()
-            .map(|c| c.iter_mut())
-            .unwrap_or_else(|| InnerColumnIterMut::default() as InnerColumnIterMut<'t, T>);
-        QueryColumnIterMut { columns, col }
+    fn prepare_query<'t>(columns: &'t Self::Columns<'t>) -> Self::QueryResult<'t> {
+        columns
+            .iter()
+            .map(|col| {
+                (
+                    col.0.downcast_mut::<T>().expect("can't downcast"),
+                    col.1.iter()
+                )
+            })
+            .collect::<Vec<_>>()
     }
 
-    fn column_borrows() -> Vec<Borrow> {
-        vec![Borrow {
-            id: ResourceId::new::<QueryColumnMut<T>>(),
-            is_exclusive: true,
-        }]
-    }
-}
-
-impl<A> IsQuery for (A,)
-where
-    A: IsQuery,
-{
-    type Columns = A::Columns;
-    type Item<'a> = A::Item<'a>;
-    type ColumnsIter<'a> = A::ColumnsIter<'a>;
-
-    #[inline]
-    fn pop_columns(archetypes: &mut AllArchetypes) -> Self::Columns {
-        A::pop_columns(archetypes)
-    }
-
-    #[inline]
-    fn columns_iter(cols: &mut Self::Columns) -> Self::ColumnsIter<'_> {
-        A::columns_iter(cols)
-    }
-
-    #[inline]
-    fn column_borrows() -> Vec<Borrow> {
-        A::column_borrows()
+    fn run_query<'t>(chunks: Self::QueryResult<'t>) -> Self::Iter<'t> {
+        Box::new(chunks.iter().flat_map(|(comps, infos)| {
+            comps
+                .downcast_ref::<T>()
+                .unwrap()
+                .into_iter()
+                .zip(infos.iter())
+                .map(|(c, i)| Ref(i, c))
+        }))
     }
 }
 
-impl<A, B> IsQuery for (A, B)
-where
-    A: IsQuery,
-    B: IsQuery,
-{
-    type Columns = (A::Columns, B::Columns);
-    type Item<'a> = (A::Item<'a>, B::Item<'a>);
-    type ColumnsIter<'a> = super::ComponentIter<(A::ColumnsIter<'a>, B::ColumnsIter<'a>)>;
+impl<'q, T: Send + Sync + 'static> IsQuery for &'q mut T {
+    type Columns = Vec<InnerColumn>;
+    type QueryResult<'a> = Vec<(
+        RwLockWriteGuard<'a, AnyVec<dyn Send + Sync + 'static>>,
+        RwLockWriteGuard<'a, Vec<EntityInfo>>,
+    )>;
+    type QueryRow<'a> = Mut<'a, T>;
+    type Iter<'a> = Box<dyn Iterator<Item = Mut<'a, T>>>;
 
-    fn pop_columns(archetypes: &mut AllArchetypes) -> Self::Columns {
-        let head = A::pop_columns(archetypes);
-        let tail = B::pop_columns(archetypes);
-        (head, tail)
+    fn build_query(archetypes: &AllArchetypes) -> Self::Columns<'_> {
+        todo!()
     }
 
-    fn columns_iter(cols: &mut Self::Columns) -> Self::ColumnsIter<'_> {
-        ComponentIter((A::columns_iter(&mut cols.0), B::columns_iter(&mut cols.1)))
+    fn prepare_query<'t>(columns: &'t Self::Columns<'t>) -> Self::QueryResult<'t> {
+        todo!()
     }
 
-    fn column_borrows() -> Vec<Borrow> {
-        let mut borrows = B::column_borrows();
-        borrows.extend(A::column_borrows());
-        borrows
-    }
-}
-
-impl<A, B, C> IsQuery for (A, B, C)
-where
-    A: IsQuery,
-    B: IsQuery,
-    C: IsQuery,
-{
-    type Columns = (A::Columns, B::Columns, C::Columns);
-    type Item<'a> = (A::Item<'a>, B::Item<'a>, C::Item<'a>);
-    type ColumnsIter<'a> =
-        super::ComponentIter<(A::ColumnsIter<'a>, B::ColumnsIter<'a>, C::ColumnsIter<'a>)>;
-
-    fn pop_columns(archetypes: &mut AllArchetypes) -> Self::Columns {
-        let a = A::pop_columns(archetypes);
-        let b = B::pop_columns(archetypes);
-        let c = C::pop_columns(archetypes);
-        (a, b, c)
+    fn run_query<'t>(query_result: Self::QueryResult<'t>) -> Self::Iter<'t> {
+        todo!()
     }
 
-    fn columns_iter(cols: &mut Self::Columns) -> Self::ColumnsIter<'_> {
-        ComponentIter((
-            A::columns_iter(&mut cols.0),
-            B::columns_iter(&mut cols.1),
-            C::columns_iter(&mut cols.2),
-        ))
-    }
-
-    fn column_borrows() -> Vec<Borrow> {
-        let mut borrows = B::column_borrows();
-        borrows.extend(A::column_borrows());
-        borrows
-    }
-}
-
-pub struct Query<T>(T::Columns)
-where
-    T: IsQuery + ?Sized;
-
-impl<T> CanFetch for Query<T>
-where
-    T: IsQuery + Send + Sync + ?Sized,
-    <T as IsQuery>::Columns: Send + Sync + 'static,
-{
     fn borrows() -> Vec<Borrow> {
-        T::column_borrows()
-    }
-
-    fn construct(loan_mngr: &mut LoanManager) -> anyhow::Result<Self> {
-        let all = loan_mngr.get_mut::<AllArchetypes>()?;
-        Ok(Query::<T>::from(all))
+        todo!()
     }
 }
 
-impl<'a, T> From<&'a mut AllArchetypes> for Query<T>
-where
-    T: IsQuery + Send + Sync + ?Sized,
-{
-    fn from(store: &'a mut AllArchetypes) -> Self {
-        let columns = T::pop_columns(store);
-        Query(columns)
-    }
-}
+//impl<A> IsQuery for (A,)
+//where
+//    A: IsQuery,
+//{
+//    type Columns = A::Columns;
+//    type Item<'a> = A::Item<'a>;
+//    type ColumnsIter<'a> = A::ColumnsIter<'a>;
+//
+//    #[inline]
+//    fn pop_columns(archetypes: &mut AllArchetypes) -> Self::Columns {
+//        A::pop_columns(archetypes)
+//    }
+//
+//    #[inline]
+//    fn columns_iter(cols: &mut Self::Columns) -> Self::ColumnsIter<'_> {
+//        A::columns_iter(cols)
+//    }
+//
+//    #[inline]
+//    fn column_borrows() -> Vec<Borrow> {
+//        A::column_borrows()
+//    }
+//}
+//
+//impl<A, B> IsQuery for (A, B)
+//where
+//    A: IsQuery,
+//    B: IsQuery,
+//{
+//    type Columns = (A::Columns, B::Columns);
+//    type Item<'a> = (A::Item<'a>, B::Item<'a>);
+//    type ColumnsIter<'a> = super::ComponentIter<(A::ColumnsIter<'a>, B::ColumnsIter<'a>)>;
+//
+//    fn pop_columns(archetypes: &mut AllArchetypes) -> Self::Columns {
+//        let head = A::pop_columns(archetypes);
+//        let tail = B::pop_columns(archetypes);
+//        (head, tail)
+//    }
+//
+//    fn columns_iter(cols: &mut Self::Columns) -> Self::ColumnsIter<'_> {
+//        ComponentIter((A::columns_iter(&mut cols.0), B::columns_iter(&mut cols.1)))
+//    }
+//
+//    fn column_borrows() -> Vec<Borrow> {
+//        let mut borrows = B::column_borrows();
+//        borrows.extend(A::column_borrows());
+//        borrows
+//    }
+//}
+//
+//impl<A, B, C> IsQuery for (A, B, C)
+//where
+//    A: IsQuery,
+//    B: IsQuery,
+//    C: IsQuery,
+//{
+//    type Columns = (A::Columns, B::Columns, C::Columns);
+//    type Item<'a> = (A::Item<'a>, B::Item<'a>, C::Item<'a>);
+//    type ColumnsIter<'a> =
+//        super::ComponentIter<(A::ColumnsIter<'a>, B::ColumnsIter<'a>, C::ColumnsIter<'a>)>;
+//
+//    fn pop_columns(archetypes: &mut AllArchetypes) -> Self::Columns {
+//        let a = A::pop_columns(archetypes);
+//        let b = B::pop_columns(archetypes);
+//        let c = C::pop_columns(archetypes);
+//        (a, b, c)
+//    }
+//
+//    fn columns_iter(cols: &mut Self::Columns) -> Self::ColumnsIter<'_> {
+//        ComponentIter((
+//            A::columns_iter(&mut cols.0),
+//            B::columns_iter(&mut cols.1),
+//            C::columns_iter(&mut cols.2),
+//        ))
+//    }
+//
+//    fn column_borrows() -> Vec<Borrow> {
+//        let mut borrows = B::column_borrows();
+//        borrows.extend(A::column_borrows());
+//        borrows
+//    }
+//}
 
-impl<T> Query<T>
-where
-    T: IsQuery + ?Sized,
-{
-    pub fn run(&mut self) -> T::ColumnsIter<'_> {
-        T::columns_iter(&mut self.0)
-    }
-}
+//pub struct Query<T>(T::Columns)
+//where
+//    T: IsQuery + ?Sized;
+//
+//impl<T> CanFetch for Query<T>
+//where
+//    T: IsQuery + Send + Sync + ?Sized,
+//    <T as IsQuery>::Columns: Send + Sync + 'static,
+//{
+//    fn borrows() -> Vec<Borrow> {
+//        T::column_borrows()
+//    }
+//
+//    fn construct(loan_mngr: &mut LoanManager) -> anyhow::Result<Self> {
+//        let all = loan_mngr.get_mut::<AllArchetypes>()?;
+//        Ok(Query::<T>::from(all))
+//    }
+//}
+//
+//impl<'a, T> From<&'a mut AllArchetypes> for Query<T>
+//where
+//    T: IsQuery + Send + Sync + ?Sized,
+//{
+//    fn from(store: &'a mut AllArchetypes) -> Self {
+//        let columns = T::pop_columns(store);
+//        Query(columns)
+//    }
+//}
+//
+//impl<T> Query<T>
+//where
+//    T: IsQuery + ?Sized,
+//{
+//    pub fn run(&mut self) -> T::ColumnsIter<'_> {
+//        T::columns_iter(&mut self.0)
+//    }
+//}
 
 #[cfg(test)]
 mod test {
