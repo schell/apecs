@@ -448,18 +448,6 @@ where
 
 pub struct ComponentIter<T>(T);
 
-impl<A> Iterator for ComponentIter<(A,)>
-where
-    A: Iterator,
-{
-    type Item = A::Item;
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        self.0 .0.next()
-    }
-}
-
 impl<A, B> Iterator for ComponentIter<(A, B)>
 where
     A: Iterator,

@@ -277,6 +277,13 @@ mod test {
     }
 
     #[test]
+    fn bundle_type_info() {
+        let bundle = (0.0f32,);
+        let any = AnyBundle::from_tuple(bundle);
+        assert_eq!(&[TypeId::of::<f32>()], any.0.as_slice());
+    }
+
+    #[test]
     fn type_info_for_tuple() {
         let list_info =
             type_info::<<(f32, (String, (bool, (u32, ())))) as TupleList>::Tuple>().unwrap();
@@ -295,8 +302,12 @@ mod test {
 
     #[test]
     fn basic_type_info() {
+        let tys = type_info::<(f32,)>().unwrap();
+        assert_eq!(&[TypeId::of::<f32>()], tys.as_slice());
+
         let tys_a = type_info::<(f32, bool, String)>().unwrap();
         assert!(!tys_a.is_empty(), "types are empty");
+
         let tys_b = type_info::<(bool, f32, String)>().unwrap();
         assert_eq!(tys_a, tys_b);
         assert!(tys_a == tys_b);

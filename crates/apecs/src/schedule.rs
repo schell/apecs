@@ -340,7 +340,7 @@ mod test {
         assert_eq!(batches[0].systems()[1].name(), "two");
         assert_eq!(batches[0].systems()[2].name(), "three");
 
-        let mut manager = ResourceManager::new();
+        let mut manager = ResourceManager::default();
         schedule.run((), &mut manager).unwrap();
 
         let batches = schedule.batches();

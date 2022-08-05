@@ -1,8 +1,9 @@
 //! Entity components stored together in contiguous arrays.
 use std::{
     any::TypeId,
+    marker::PhantomData,
     ops::DerefMut,
-    sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard}, marker::PhantomData,
+    sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 
 use any_vec::{
@@ -13,22 +14,18 @@ use any_vec::{
 };
 use anyhow::Context;
 use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
+
+use crate::{
+    resource_manager::LoanManager,
+    schedule::Borrow,
+    storage::{EntityInfo, HasEntityInfoMut, Mut, Ref},
+    CanFetch, Read, ResourceId,
+};
 
 mod bundle;
 pub use bundle::*;
-use smallvec::SmallVec;
-
-use crate::{resource_manager::LoanManager, schedule::Borrow, CanFetch, ResourceId};
-
-use super::{ComponentIter, EntityInfo, HasEntityInfoMut, Mut, Ref};
-
-pub struct ColumnRead<'a>(
-    RwLockReadGuard<'a, AnyVec<dyn Sync + Send + 'static>>,
-    RwLockReadGuard<'a, Vec<EntityInfo>>,
-);
-
-// pub struct ColumnIter<'a, T>(std::slice::Iter<'a, AnyVecRef<'a, T>>,
-// std::slice::Iter<'a, >)
+pub mod query;
 
 #[derive(Debug)]
 pub struct InnerColumn(
@@ -196,35 +193,6 @@ impl Archetype {
         true
     }
 
-    //fn get_column<T: 'static>(&self) -> anyhow::Result<AnyVecRef<'_, T, Heap>> {
-    //    let ty = TypeId::of::<T>();
-    //    let i = self.index_of(&ty).context("missing column")?;
-    //    let column = self.data[i].read().ok().context("can't read")?;
-    //    column
-    //        .downcast_ref::<T>()
-    //        .with_context(|| format!("could not downcast to {}", std::any::type_name::<T>()))
-    //}
-
-    //fn get_column_mut<T: 'static>(
-    //    &mut self,
-    //) -> anyhow::Result<(AnyVecMut<'_, T, Heap>, &mut [EntityInfo])> {
-    //    let ty = TypeId::of::<T>();
-    //    let index = self
-    //        .index_of(&ty)
-    //        .with_context(|| format!("no such column {}", std::any::type_name::<T>()))?;
-    //    let column = self.data[index].write().ok().context("can't write")?;
-    //    let ents = self.entity_info[index]
-    //        .write()
-    //        .ok()
-    //        .context("can't write info")?;
-    //    Ok((
-    //        column
-    //            .downcast_mut::<T>()
-    //            .with_context(|| format!("could not downcast to {}", std::any::type_name::<T>()))?,
-    //        &mut ents,
-    //    ))
-    //}
-
     fn borrow_column(&self, ty: &TypeId) -> Option<InnerColumn> {
         let i = self.index_of(ty)?;
         let data = self.data[i].clone();
@@ -233,6 +201,31 @@ impl Archetype {
         Some(col)
     }
 
+    /// Insert a component bundle with the given entity id.
+    ///
+    /// ## WARNING
+    /// Be certain of the types you are inserting. Because of Rust's coercion
+    /// of types (or lack theirof), this function may fail unexpectedly when a type is not
+    /// coerced as expected. A good example is with f32:
+    ///
+    /// ```rust,ignore
+    /// let mut arch = Archetype::new::<(f32,)>().unwrap();
+    /// arch.insert(0, (0.0,)).unwrap(); // panic!
+    /// ```
+    ///
+    /// The above example panics because `0.0` by default is `f64`. The following works as
+    /// expected:
+    ///
+    /// ```rust,ignore
+    /// let mut arch = Archetype::new::<(f32,)>().unwrap();
+    /// arch.insert(0, (0.0f32,)).unwrap();
+    /// ```
+    ///
+    /// Or this way:
+    /// ```rust,ignore
+    /// let mut arch = Archetype::new::<(f32,)>().unwrap();
+    /// arch.insert::<(f32,)>(0, (0.0,)).unwrap();
+    /// ```
     pub fn insert<B>(&mut self, entity_id: usize, bundle: B) -> anyhow::Result<Option<B>>
     where
         B: Tuple + 'static,
@@ -278,7 +271,7 @@ impl Archetype {
                 let last_index = self.entity_lookup.len();
                 assert!(self.entity_lookup.insert(entity_id, last_index).is_none());
                 for (ty, mut component_vec) in bundle.0.into_iter().zip(bundle.1.into_iter()) {
-                    let ty_index = self.index_of(&ty).context("missing column")?;
+                    let ty_index = self.index_of(&ty).with_context(|| format!("missing column: {:?}", ty))?;
                     let mut data = self.data[ty_index].write().ok().context("can't write")?;
                     let mut info = self.entity_info[ty_index]
                         .write()
@@ -345,33 +338,67 @@ impl Archetype {
         }
     }
 
-    ///// Get a single component reference.
-    //pub fn get<T: 'static>(&self, entity_id: usize) -> anyhow::Result<Option<&T>> {
-    //    if let Some(index) = self.entity_lookup.get(&entity_id) {
-    //        let storage = self.get_column::<T>()?;
-    //        Ok(storage.get(*index))
-    //    } else {
-    //        Ok(None)
-    //    }
-    //}
+    // Visit a specific component with a closure.
+    pub fn visit<T: 'static, A>(
+        &self,
+        entity_id: usize,
+        f: impl FnOnce(Ref<'_, T>) -> A,
+    ) -> anyhow::Result<Option<A>> {
+        if let Some(entity_index) = self.entity_lookup.get(&entity_id) {
+            let ty = TypeId::of::<T>();
+            if let Some(ty_index) = self.index_of(&ty) {
+                let data = self.data[ty_index].read().ok().context("can't read")?;
+                let infos = self.entity_info[ty_index]
+                    .read()
+                    .ok()
+                    .context("can't read")?;
+                let comps = data.downcast_ref().context("can't downcast")?;
+                Ok(comps.get(*entity_index).map(|c| {
+                    let info = &infos[*entity_index];
+                    let a = f(Ref(info, c));
+                    a
+                }))
+            } else {
+                Ok(None)
+            }
+        } else {
+            Ok(None)
+        }
+    }
 
-    ///// Get a mutable component reference.
-    /////
-    ///// ## Note
-    ///// This will mark the component changed.
-    //pub fn get_mut<T: 'static>(&mut self, entity_id: usize) -> anyhow::Result<Option<&mut T>> {
-    //    if let Some(index) = self.entity_lookup.get(&entity_id).copied() {
-    //        let mut column = self.get_column_mut::<T>()?;
-    //        if let Some(e) = column.1.get_mut(index) {
-    //            e.mark_changed();
-    //            Ok(column.0.get_mut(index))
-    //        } else {
-    //            Ok(None)
-    //        }
-    //    } else {
-    //        Ok(None)
-    //    }
-    //}
+    // Visit a specific mutable component with a closure.
+    pub fn visit_mut<T: 'static, A>(
+        &self,
+        entity_id: usize,
+        f: impl FnOnce(Mut<'_, T>) -> A,
+    ) -> anyhow::Result<Option<A>> {
+        if let Some(entity_index) = self.entity_lookup.get(&entity_id) {
+            let ty = TypeId::of::<T>();
+            if let Some(ty_index) = self.index_of(&ty) {
+                let mut data = self.data[ty_index].write().ok().context("can't write")?;
+                let mut infos = self.entity_info[ty_index]
+                    .write()
+                    .ok()
+                    .context("can't write")?;
+                let mut comps = data.downcast_mut().context("can't downcast")?;
+                Ok(comps.get_mut(*entity_index).map(|c| {
+                    let info = &mut infos[*entity_index];
+                    let a = f(Mut(info, c));
+                    a
+                }))
+            } else {
+                Ok(None)
+            }
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn query<Q: query::IsQuery, F: FnMut(Q::QueryRow<'_>)>(&self, f: F) {
+        let mut columns = Q::lock_columns(self);
+        let iter = Q::iter_mut(&mut columns);
+        iter.for_each(f);
+    }
 }
 
 #[derive(Debug)]
@@ -486,23 +513,33 @@ impl AllArchetypes {
         self.insert_bundle(entity_id, (component,)).map(|(t,)| t)
     }
 
-    //pub fn get<T: 'static>(&self, entity_id: &usize) -> Option<&T> {
-    //    for arch in self.archetypes.iter() {
-    //        if arch.has::<T>() && arch.contains_entity(entity_id) {
-    //            return arch.get::<T>(*entity_id).unwrap();
-    //        }
-    //    }
-    //    None
-    //}
+    // Visit a specific component with a closure.
+    pub fn visit<T: 'static, A>(
+        &self,
+        entity_id: usize,
+        f: impl FnOnce(Ref<'_, T>) -> A,
+    ) -> Option<A> {
+        for arch in self.archetypes.iter() {
+            if arch.has::<T>() && arch.contains_entity(&entity_id) {
+                return arch.visit::<T, A>(entity_id, f).unwrap();
+            }
+        }
+        None
+    }
 
-    //pub fn get_mut<T: 'static>(&mut self, entity_id: &usize) -> Option<&mut T> {
-    //    for arch in self.archetypes.iter_mut() {
-    //        if arch.has::<T>() && arch.contains_entity(entity_id) {
-    //            return arch.get_mut::<T>(*entity_id).unwrap();
-    //        }
-    //    }
-    //    None
-    //}
+    // Visit a specific mutable component with a closure.
+    pub fn visit_mut<T: 'static, A>(
+        &self,
+        entity_id: usize,
+        f: impl FnOnce(Mut<'_, T>) -> A,
+    ) -> Option<A> {
+        for arch in self.archetypes.iter() {
+            if arch.has::<T>() && arch.contains_entity(&entity_id) {
+                return arch.visit_mut::<T, A>(entity_id, f).unwrap();
+            }
+        }
+        None
+    }
 
     /// Remove all components of the given entity and return them in an untyped
     /// bundle.
@@ -580,221 +617,6 @@ impl AllArchetypes {
     }
 }
 
-/// A placeholder type for borrowing an entire column of components from
-/// the world.
-pub struct ComponentColumn<T>(PhantomData<T>);
-
-pub trait IsQuery {
-    type Columns<'a>;
-    type QueryResult<'a>;
-    type QueryRow<'a>;
-    type Iter<'a>: Iterator<Item = Self::QueryRow<'a>>;
-
-    fn build_query<'t>(archetypes: &'t AllArchetypes) -> Self::Columns<'t>;
-    fn prepare_query<'t>(columns: &'t Self::Columns<'t>) -> Self::QueryResult<'t>;
-    fn run_query<'t>(query_result: Self::QueryResult<'t>) -> Self::Iter<'t>;
-    fn borrows() -> Vec<Borrow>;
-}
-
-impl<'q, T: Send + Sync + 'static> IsQuery for &'q T {
-    type Columns<'a> = Vec<(
-        RwLockReadGuard<'a, AnyVec<dyn Send + Sync + 'static>>,
-        RwLockReadGuard<'a, Vec<EntityInfo>>,
-    )>;
-    type QueryResult<'a> = Vec<(
-        AnyVecRef<'a, T, Heap>,
-        std::slice::Iter<'a, EntityInfo>
-    )>;
-    type QueryRow<'a> = Ref<'a, T>;
-    type Iter<'a> = Box<dyn Iterator<Item = Ref<'a, T>>>;
-
-    fn borrows() -> Vec<Borrow> {
-        vec![Borrow {
-            id: ResourceId::new::<ComponentColumn<T>>(),
-            is_exclusive: false,
-        }]
-    }
-
-    fn build_query<'t>(archetypes: &'t AllArchetypes) -> Self::Columns<'t> {
-        let ty = TypeId::of::<T>();
-        archetypes.archetypes.iter().filter_map(|a| {
-            let i = a.index_of(&ty)?;
-            Some((a.data[i].read().expect("can't read"), a.entity_info[i].read().expect("can't read")))
-        })
-        .collect()
-    }
-
-    fn prepare_query<'t>(columns: &'t Self::Columns<'t>) -> Self::QueryResult<'t> {
-        columns
-            .iter()
-            .map(|col| {
-                (
-                    col.0.downcast_mut::<T>().expect("can't downcast"),
-                    col.1.iter()
-                )
-            })
-            .collect::<Vec<_>>()
-    }
-
-    fn run_query<'t>(chunks: Self::QueryResult<'t>) -> Self::Iter<'t> {
-        Box::new(chunks.iter().flat_map(|(comps, infos)| {
-            comps
-                .downcast_ref::<T>()
-                .unwrap()
-                .into_iter()
-                .zip(infos.iter())
-                .map(|(c, i)| Ref(i, c))
-        }))
-    }
-}
-
-impl<'q, T: Send + Sync + 'static> IsQuery for &'q mut T {
-    type Columns = Vec<InnerColumn>;
-    type QueryResult<'a> = Vec<(
-        RwLockWriteGuard<'a, AnyVec<dyn Send + Sync + 'static>>,
-        RwLockWriteGuard<'a, Vec<EntityInfo>>,
-    )>;
-    type QueryRow<'a> = Mut<'a, T>;
-    type Iter<'a> = Box<dyn Iterator<Item = Mut<'a, T>>>;
-
-    fn build_query(archetypes: &AllArchetypes) -> Self::Columns<'_> {
-        todo!()
-    }
-
-    fn prepare_query<'t>(columns: &'t Self::Columns<'t>) -> Self::QueryResult<'t> {
-        todo!()
-    }
-
-    fn run_query<'t>(query_result: Self::QueryResult<'t>) -> Self::Iter<'t> {
-        todo!()
-    }
-
-    fn borrows() -> Vec<Borrow> {
-        todo!()
-    }
-}
-
-//impl<A> IsQuery for (A,)
-//where
-//    A: IsQuery,
-//{
-//    type Columns = A::Columns;
-//    type Item<'a> = A::Item<'a>;
-//    type ColumnsIter<'a> = A::ColumnsIter<'a>;
-//
-//    #[inline]
-//    fn pop_columns(archetypes: &mut AllArchetypes) -> Self::Columns {
-//        A::pop_columns(archetypes)
-//    }
-//
-//    #[inline]
-//    fn columns_iter(cols: &mut Self::Columns) -> Self::ColumnsIter<'_> {
-//        A::columns_iter(cols)
-//    }
-//
-//    #[inline]
-//    fn column_borrows() -> Vec<Borrow> {
-//        A::column_borrows()
-//    }
-//}
-//
-//impl<A, B> IsQuery for (A, B)
-//where
-//    A: IsQuery,
-//    B: IsQuery,
-//{
-//    type Columns = (A::Columns, B::Columns);
-//    type Item<'a> = (A::Item<'a>, B::Item<'a>);
-//    type ColumnsIter<'a> = super::ComponentIter<(A::ColumnsIter<'a>, B::ColumnsIter<'a>)>;
-//
-//    fn pop_columns(archetypes: &mut AllArchetypes) -> Self::Columns {
-//        let head = A::pop_columns(archetypes);
-//        let tail = B::pop_columns(archetypes);
-//        (head, tail)
-//    }
-//
-//    fn columns_iter(cols: &mut Self::Columns) -> Self::ColumnsIter<'_> {
-//        ComponentIter((A::columns_iter(&mut cols.0), B::columns_iter(&mut cols.1)))
-//    }
-//
-//    fn column_borrows() -> Vec<Borrow> {
-//        let mut borrows = B::column_borrows();
-//        borrows.extend(A::column_borrows());
-//        borrows
-//    }
-//}
-//
-//impl<A, B, C> IsQuery for (A, B, C)
-//where
-//    A: IsQuery,
-//    B: IsQuery,
-//    C: IsQuery,
-//{
-//    type Columns = (A::Columns, B::Columns, C::Columns);
-//    type Item<'a> = (A::Item<'a>, B::Item<'a>, C::Item<'a>);
-//    type ColumnsIter<'a> =
-//        super::ComponentIter<(A::ColumnsIter<'a>, B::ColumnsIter<'a>, C::ColumnsIter<'a>)>;
-//
-//    fn pop_columns(archetypes: &mut AllArchetypes) -> Self::Columns {
-//        let a = A::pop_columns(archetypes);
-//        let b = B::pop_columns(archetypes);
-//        let c = C::pop_columns(archetypes);
-//        (a, b, c)
-//    }
-//
-//    fn columns_iter(cols: &mut Self::Columns) -> Self::ColumnsIter<'_> {
-//        ComponentIter((
-//            A::columns_iter(&mut cols.0),
-//            B::columns_iter(&mut cols.1),
-//            C::columns_iter(&mut cols.2),
-//        ))
-//    }
-//
-//    fn column_borrows() -> Vec<Borrow> {
-//        let mut borrows = B::column_borrows();
-//        borrows.extend(A::column_borrows());
-//        borrows
-//    }
-//}
-
-//pub struct Query<T>(T::Columns)
-//where
-//    T: IsQuery + ?Sized;
-//
-//impl<T> CanFetch for Query<T>
-//where
-//    T: IsQuery + Send + Sync + ?Sized,
-//    <T as IsQuery>::Columns: Send + Sync + 'static,
-//{
-//    fn borrows() -> Vec<Borrow> {
-//        T::column_borrows()
-//    }
-//
-//    fn construct(loan_mngr: &mut LoanManager) -> anyhow::Result<Self> {
-//        let all = loan_mngr.get_mut::<AllArchetypes>()?;
-//        Ok(Query::<T>::from(all))
-//    }
-//}
-//
-//impl<'a, T> From<&'a mut AllArchetypes> for Query<T>
-//where
-//    T: IsQuery + Send + Sync + ?Sized,
-//{
-//    fn from(store: &'a mut AllArchetypes) -> Self {
-//        let columns = T::pop_columns(store);
-//        Query(columns)
-//    }
-//}
-//
-//impl<T> Query<T>
-//where
-//    T: IsQuery + ?Sized,
-//{
-//    pub fn run(&mut self) -> T::ColumnsIter<'_> {
-//        T::columns_iter(&mut self.0)
-//    }
-//}
-
 #[cfg(test)]
 mod test {
     use std::any::Any;
@@ -802,6 +624,12 @@ mod test {
     use crate::{storage::*, world::World};
 
     use super::*;
+
+    #[test]
+    fn new_archetype_has_ty() {
+        let arch = Archetype::new::<(f32,)>().unwrap();
+        assert_eq!(Some(0), arch.index_of(&TypeId::of::<f32>()));
+    }
 
     #[test]
     fn archetype_can_create_add_remove_get_mut() {
@@ -813,17 +641,15 @@ mod test {
         assert_eq!(Some((1.0f32,)), arch.insert(1, (111.0f32,)).unwrap());
         assert_eq!((111.0f32, "one", 1u32), arch.remove(1).unwrap().unwrap());
         assert_eq!(
-            Some(&3.0f32),
-            arch.get(3).unwrap(),
+            Some(3.0f32),
+            arch.visit(3, |c| *c).unwrap(),
             "{:#?}",
             arch.entity_lookup
         );
-        let zero_str: &mut &'static str = arch.get_mut(0).unwrap().unwrap();
-        *zero_str = "000";
-        drop(zero_str);
+        arch.visit_mut(0, |mut c| *c = "000").unwrap();
         assert_eq!(
-            Some(&"000"),
-            arch.get::<&'static str>(0).unwrap(),
+            Some("000"),
+            arch.visit(0, |c| *c).unwrap(),
             "{:#?}",
             arch.entity_lookup
         );
@@ -888,51 +714,52 @@ mod test {
         }
     }
 
-    #[test]
-    fn archetype_iter_types() {
-        println!("insert");
-        let mut store = AllArchetypes::default();
-        store.insert_bundle(0, (0.0f32, "zero".to_string(), false));
-        store.insert_bundle(1, (1.0f32, "one".to_string(), false));
-        store.insert_bundle(2, (2.0f32, "two".to_string(), false));
-        {
-            println!("query 1");
-            let mut query: Query<(&f32,)> = Query::try_from(&mut store).unwrap();
-            let f32s = query.run().map(|f| *f).collect::<Vec<_>>();
-            let f32s_again = query.run().map(|f| *f).collect::<Vec<_>>();
-            assert_eq!(vec![0.0f32, 1.0, 2.0f32], f32s);
-            assert_eq!(vec![0.0f32, 1.0, 2.0f32], f32s_again);
-        }
-        {
-            println!("query 2");
-            let mut query: Query<(&mut bool, &f32)> = Query::try_from(&mut store).unwrap();
+    //#[test]
+    // fn archetype_iter_types() {
+    //    println!("insert");
+    //    let mut store = AllArchetypes::default();
+    //    store.insert_bundle(0, (0.0f32, "zero".to_string(), false));
+    //    store.insert_bundle(1, (1.0f32, "one".to_string(), false));
+    //    store.insert_bundle(2, (2.0f32, "two".to_string(), false));
+    //    {
+    //        println!("query 1");
+    //        let mut query: Query<(&f32,)> = Query::try_from(&mut store).unwrap();
+    //        let f32s = query.run().map(|f| *f).collect::<Vec<_>>();
+    //        let f32s_again = query.run().map(|f| *f).collect::<Vec<_>>();
+    //        assert_eq!(vec![0.0f32, 1.0, 2.0f32], f32s);
+    //        assert_eq!(vec![0.0f32, 1.0, 2.0f32], f32s_again);
+    //    }
+    //    {
+    //        println!("query 2");
+    //        let mut query: Query<(&mut bool, &f32)> = Query::try_from(&mut
+    // store).unwrap();
 
-            for (i, (mut is_on, f)) in query.run().enumerate() {
-                *is_on = !*is_on;
-                assert!(*is_on);
-                assert!(*f as usize == i);
-            }
-        }
+    //        for (i, (mut is_on, f)) in query.run().enumerate() {
+    //            *is_on = !*is_on;
+    //            assert!(*is_on);
+    //            assert!(*f as usize == i);
+    //        }
+    //    }
 
-        {
-            println!("query 3");
-            let mut query: Query<(&String, &mut bool, &mut f32)> =
-                Query::try_from(&mut store).unwrap();
-            for (s, mut is_on, mut f) in query.run() {
-                *is_on = true;
-                *f = s.len() as f32;
-            }
-        }
+    //    {
+    //        println!("query 3");
+    //        let mut query: Query<(&String, &mut bool, &mut f32)> =
+    //            Query::try_from(&mut store).unwrap();
+    //        for (s, mut is_on, mut f) in query.run() {
+    //            *is_on = true;
+    //            *f = s.len() as f32;
+    //        }
+    //    }
 
-        {
-            println!("query 4");
-            let mut query: Query<(&bool, &f32, &String)> = Query::try_from(&mut store).unwrap();
-            for (is_on, f, s) in query.run() {
-                assert!(*is_on);
-                assert_eq!(*f, s.len() as f32, "{}.len() != {}", *s, *f);
-            }
-        }
-    }
+    //    {
+    //        println!("query 4");
+    //        let mut query: Query<(&bool, &f32, &String)> = Query::try_from(&mut
+    // store).unwrap();        for (is_on, f, s) in query.run() {
+    //            assert!(*is_on);
+    //            assert_eq!(*f, s.len() as f32, "{}.len() != {}", *s, *f);
+    //        }
+    //    }
+    //}
 
     #[test]
     fn archetype_send_sync() {
@@ -955,59 +782,59 @@ mod test {
         assert!(all.is_empty());
     }
 
-    #[test]
-    fn canfetch_query() {
-        let _ = env_logger::builder()
-            .is_test(true)
-            .filter_level(log::LevelFilter::Trace)
-            .try_init();
+    //#[test]
+    // fn canfetch_query() {
+    //    let _ = env_logger::builder()
+    //        .is_test(true)
+    //        .filter_level(log::LevelFilter::Trace)
+    //        .try_init();
 
-        let mut all = AllArchetypes::default();
-        let _ = all.insert_bundle(0, (0.0f32, true));
-        let _ = all.insert_bundle(1, (1.0f32, false));
-        let _ = all.insert_bundle(2, (2.0f32, true));
-        let mut world = World::default();
-        world.with_resource(all).unwrap();
+    //    let mut all = AllArchetypes::default();
+    //    let _ = all.insert_bundle(0, (0.0f32, true));
+    //    let _ = all.insert_bundle(1, (1.0f32, false));
+    //    let _ = all.insert_bundle(2, (2.0f32, true));
+    //    let mut world = World::default();
+    //    world.with_resource(all).unwrap();
 
-        {
-            log::debug!("fetching query 1");
-            let mut query = world.fetch::<Query<(&f32, &bool)>>().unwrap();
-            log::debug!("using query 1.1");
-            let (f32s, bools): (Vec<_>, Vec<_>) = query.run().map(|(f, b)| (*f, *b)).unzip();
-            assert_eq!(vec![0.0, 1.0, 2.0], f32s);
-            assert_eq!(vec![true, false, true], bools);
-            // do it again
-            log::debug!("using query 1.2");
-            let (f32s, bools): (Vec<_>, Vec<_>) = query.run().map(|(f, b)| (*f, *b)).unzip();
-            assert_eq!(vec![0.0, 1.0, 2.0], f32s);
-            assert_eq!(vec![true, false, true], bools);
-        }
-        {
-            log::debug!("fetching query 2");
-            let mut query = world.fetch::<Query<(&mut f32, &mut bool)>>().unwrap();
-            log::debug!("using query 2.1");
-            for (mut f, mut b) in query.run() {
-                *f *= 3.0;
-                *b = *f < 5.0;
-            }
-            log::debug!("using query 2.2");
-            let (f32s, bools): (Vec<_>, Vec<_>) = query.run().map(|(f, b)| (*f, *b)).unzip();
-            assert_eq!(
-                (vec![0.0, 3.0, 6.0], vec![true, true, false]),
-                (f32s, bools)
-            );
-        }
-        {
-            log::debug!("fetching query 3");
-            let mut query = world.fetch::<Query<(&f32, &bool)>>().unwrap();
-            log::debug!("using query 3.1");
-            let (f32s, bools): (Vec<_>, Vec<_>) = query.run().map(|(f, b)| (*f, *b)).unzip();
-            assert_eq!(
-                (vec![0.0, 3.0, 6.0], vec![true, true, false]),
-                (f32s, bools)
-            );
-        }
-    }
+    //    {
+    //        log::debug!("fetching query 1");
+    //        let mut query = world.fetch::<Query<(&f32, &bool)>>().unwrap();
+    //        log::debug!("using query 1.1");
+    //        let (f32s, bools): (Vec<_>, Vec<_>) = query.run().map(|(f, b)| (*f,
+    // *b)).unzip();        assert_eq!(vec![0.0, 1.0, 2.0], f32s);
+    //        assert_eq!(vec![true, false, true], bools);
+    //        // do it again
+    //        log::debug!("using query 1.2");
+    //        let (f32s, bools): (Vec<_>, Vec<_>) = query.run().map(|(f, b)| (*f,
+    // *b)).unzip();        assert_eq!(vec![0.0, 1.0, 2.0], f32s);
+    //        assert_eq!(vec![true, false, true], bools);
+    //    }
+    //    {
+    //        log::debug!("fetching query 2");
+    //        let mut query = world.fetch::<Query<(&mut f32, &mut
+    // bool)>>().unwrap();        log::debug!("using query 2.1");
+    //        for (mut f, mut b) in query.run() {
+    //            *f *= 3.0;
+    //            *b = *f < 5.0;
+    //        }
+    //        log::debug!("using query 2.2");
+    //        let (f32s, bools): (Vec<_>, Vec<_>) = query.run().map(|(f, b)| (*f,
+    // *b)).unzip();        assert_eq!(
+    //            (vec![0.0, 3.0, 6.0], vec![true, true, false]),
+    //            (f32s, bools)
+    //        );
+    //    }
+    //    {
+    //        log::debug!("fetching query 3");
+    //        let mut query = world.fetch::<Query<(&f32, &bool)>>().unwrap();
+    //        log::debug!("using query 3.1");
+    //        let (f32s, bools): (Vec<_>, Vec<_>) = query.run().map(|(f, b)| (*f,
+    // *b)).unzip();        assert_eq!(
+    //            (vec![0.0, 3.0, 6.0], vec![true, true, false]),
+    //            (f32s, bools)
+    //        );
+    //    }
+    //}
 
     #[test]
     fn mut_sanity() {

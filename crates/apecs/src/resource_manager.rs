@@ -30,8 +30,8 @@ pub struct ResourceManager {
     pub exclusive_return_chan: ExclusiveResourceReturnChan,
 }
 
-impl ResourceManager {
-    pub fn new() -> Self {
+impl Default for ResourceManager {
+    fn default() -> Self {
         let (tx, rx) = mpsc::unbounded();
         Self {
             world_resources: Default::default(),
@@ -40,7 +40,9 @@ impl ResourceManager {
             exclusive_return_chan: ExclusiveResourceReturnChan(tx, rx),
         }
     }
+}
 
+impl ResourceManager {
     /// Get a sender that can be used to return resources.
     pub fn exclusive_resource_return_sender(&self) -> mpsc::Sender<(ResourceId, Resource)> {
         self.exclusive_return_chan.0.clone()
@@ -233,6 +235,10 @@ impl ResourceManager {
             .collect::<Vec<_>>()
             .join("\n")
     }
+
+    pub fn loan_manager(&mut self) -> LoanManager<'_> {
+        LoanManager(self)
+    }
 }
 
 pub struct LoanManager<'a>(pub(crate) &'a mut ResourceManager);
@@ -266,7 +272,7 @@ mod test {
 
     #[test]
     fn can_get_mut() {
-        let mut mngr = ResourceManager::new();
+        let mut mngr = ResourceManager::default();
         assert!(mngr.add(vec!["one", "two"]).is_none());
         {
             let vs: &mut Vec<&str> = mngr.get_mut::<Vec<&str>>().unwrap();
@@ -276,7 +282,7 @@ mod test {
 
     #[test]
     fn can_fetch_roundtrip() {
-        let mut mngr = ResourceManager::new();
+        let mut mngr = ResourceManager::default();
         mngr.add(vec!["one"]);
         {
             let mut vs = Write::<Vec<&str>>::construct(&mut LoanManager(&mut mngr)).unwrap();

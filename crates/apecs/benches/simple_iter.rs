@@ -41,10 +41,7 @@ impl BenchmarkSeparate {
     }
 }
 
-pub struct BenchmarkArchetype(
-    AllArchetypes,
-    Query<(&'static Velocity, &'static mut Position)>,
-);
+pub struct BenchmarkArchetype(AllArchetypes);
 
 impl BenchmarkArchetype {
     pub fn new() -> anyhow::Result<Self> {
@@ -55,13 +52,12 @@ impl BenchmarkArchetype {
             .build();
         archs.insert_archetype(arch);
 
-        let query: Query<(&Velocity, &mut Position)> = Query::try_from(&mut archs).unwrap();
-        Ok(Self(archs, query))
+        Ok(Self(archs))
     }
 
     pub fn run(&mut self) {
-        for (velocity, mut position) in self.1.run() {
+        self.0.for_each::<(&Velocity, &mut Position)>(|(velocity, mut position)| {
             position.0 += velocity.0;
-        }
+        });
     }
 }
