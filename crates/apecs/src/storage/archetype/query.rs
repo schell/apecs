@@ -235,6 +235,7 @@ where
     T: IsQuery + ?Sized;
 
 impl<'a, T: IsQuery> QueryGuard<'a, T> {
+    #[inline]
     pub fn for_each(&mut self, mut f: impl FnMut(T::QueryRow<'_>)) {
         for mut cols in self.0.iter_mut() {
             for row in T::iter_mut(&mut cols) {

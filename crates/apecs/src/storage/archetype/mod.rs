@@ -1,27 +1,20 @@
 //! Entity components stored together in contiguous arrays.
 use std::{
     any::TypeId,
-    marker::PhantomData,
     ops::DerefMut,
-    sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard},
+    sync::{Arc, RwLock},
 };
 
 use any_vec::{
     any_value::{AnyValue, AnyValueMut},
-    mem::Heap,
     traits::*,
-    AnyVec, AnyVecMut, AnyVecRef,
+    AnyVec,
 };
 use anyhow::Context;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
-use crate::{
-    resource_manager::LoanManager,
-    schedule::Borrow,
-    storage::{EntityInfo, HasEntityInfoMut, Mut, Ref},
-    CanFetch, Read, ResourceId,
-};
+use crate::storage::{EntityInfo, HasEntityInfoMut, Mut, Ref};
 
 mod bundle;
 pub use bundle::*;
@@ -39,7 +32,6 @@ pub struct Archetype {
     pub(crate) types: SmallVec<[TypeId; 4]>,
     pub(crate) data: SmallVec<[Arc<RwLock<AnyVec<dyn Send + Sync + 'static>>>; 4]>,
     pub(crate) entity_info: SmallVec<[Arc<RwLock<Vec<EntityInfo>>>; 4]>,
-    // pub(crate) loaned_data: SmallVec<[Option<Arc<InnerColumn>>; 4]>,
     // map of entity_id to storage index
     pub(crate) entity_lookup: FxHashMap<usize, usize>,
 }
