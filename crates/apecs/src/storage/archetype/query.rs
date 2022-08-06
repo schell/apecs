@@ -12,52 +12,10 @@ use crate::{
     schedule::Borrow,
     storage::{
         archetype::{AllArchetypes, Archetype},
-        EntityInfo, Mut, Ref,
+        EntityInfo, Entry, Mut, Ref,
     },
     CanFetch, Read, ResourceId,
 };
-
-/// An iterator over one archetype column.
-pub struct ColumnIter<'a, T>(std::slice::Iter<'a, T>, std::slice::Iter<'a, EntityInfo>);
-
-impl<'a, T: 'static> Iterator for ColumnIter<'a, T> {
-    type Item = Ref<'a, T>;
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        let d = self.0.next()?;
-        let i = self.1.next()?;
-        Some(Ref(i, d))
-    }
-}
-
-impl<T: 'static> Default for ColumnIter<'static, T> {
-    fn default() -> Self {
-        Self((&[]).into_iter(), (&[]).into_iter())
-    }
-}
-
-pub struct ColumnIterMut<'a, T>(
-    std::slice::IterMut<'a, T>,
-    std::slice::IterMut<'a, EntityInfo>,
-);
-
-impl<'a, T: 'static> Iterator for ColumnIterMut<'a, T> {
-    type Item = Mut<'a, T>;
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        let d = self.0.next()?;
-        let i = self.1.next()?;
-        Some(Mut(i, d))
-    }
-}
-
-impl<T: 'static> Default for ColumnIterMut<'static, T> {
-    fn default() -> Self {
-        Self((&mut []).into_iter(), (&mut []).into_iter())
-    }
-}
 
 /// A placeholder type for borrowing an entire column of components from
 /// the world.
@@ -77,12 +35,9 @@ pub trait IsQuery {
 }
 
 impl<'s, T: Send + Sync + 'static> IsQuery for &'s T {
-    type LockedColumns<'a> = Option<(
-        RwLockReadGuard<'a, AnyVec<dyn Send + Sync + 'static>>,
-        RwLockReadGuard<'a, Vec<EntityInfo>>,
-    )>;
-    type QueryResult<'a> = ColumnIter<'a, T>;
-    type QueryRow<'a> = Ref<'a, T>;
+    type LockedColumns<'a> = Option<RwLockReadGuard<'a, AnyVec<dyn Send + Sync + 'static>>>;
+    type QueryResult<'a> = std::slice::Iter<'a, Entry<T>>;
+    type QueryRow<'a> = &'a Entry<T>;
 
     fn borrows() -> Vec<Borrow> {
         vec![Borrow {
@@ -92,42 +47,35 @@ impl<'s, T: Send + Sync + 'static> IsQuery for &'s T {
     }
 
     fn lock_columns<'t>(arch: &'t Archetype) -> Self::LockedColumns<'t> {
-        log::trace!("reading {}", std::any::type_name::<T>());
-        let ty = TypeId::of::<T>();
+        log::trace!("reading &{}", std::any::type_name::<T>());
+        let ty = TypeId::of::<Entry<T>>();
         let i = arch.index_of(&ty)?;
         let data = arch.data[i].read().expect("can't read");
-        let info = arch.entity_info[i].read().expect("can't read");
         log::trace!("  got read lock on {}", std::any::type_name::<T>());
-        Some((data, info))
+        Some(data)
     }
 
     fn iter_mut<'a, 'b>(locked: &'b mut Self::LockedColumns<'a>) -> Self::QueryResult<'b> {
         log::trace!("creating iter &{}", std::any::type_name::<T>());
         locked
             .as_ref()
-            .map(|(data, infos)| {
+            .map(|data| {
                 log::trace!("got column");
-                ColumnIter(
-                    data.downcast_ref::<T>()
-                        .expect("can't downcast")
-                        .into_iter(),
-                    infos.iter(),
-                )
+                data.downcast_ref::<Entry<T>>()
+                    .expect("can't downcast")
+                    .into_iter()
             })
             .unwrap_or_else(|| {
                 log::trace!("empty column");
-                ColumnIter::default()
+                (&[]).into_iter()
             })
     }
 }
 
 impl<'s, T: Send + Sync + 'static> IsQuery for &'s mut T {
-    type LockedColumns<'a> = Option<(
-        RwLockWriteGuard<'a, AnyVec<dyn Send + Sync + 'static>>,
-        RwLockWriteGuard<'a, Vec<EntityInfo>>,
-    )>;
-    type QueryResult<'a> = ColumnIterMut<'a, T>;
-    type QueryRow<'a> = Mut<'a, T>;
+    type LockedColumns<'a> = Option<RwLockWriteGuard<'a, AnyVec<dyn Send + Sync + 'static>>>;
+    type QueryResult<'a> = std::slice::IterMut<'a, Entry<T>>;
+    type QueryRow<'a> = &'a mut Entry<T>;
 
     fn borrows() -> Vec<Borrow> {
         vec![Borrow {
@@ -137,28 +85,24 @@ impl<'s, T: Send + Sync + 'static> IsQuery for &'s mut T {
     }
 
     fn lock_columns<'t>(arch: &'t Archetype) -> Self::LockedColumns<'t> {
-        log::trace!("locked &mut {}", std::any::type_name::<T>());
-        let ty = TypeId::of::<T>();
+        log::trace!("writing &mut {}", std::any::type_name::<T>());
+        let ty = TypeId::of::<Entry<T>>();
         let i = arch.index_of(&ty)?;
-        let data = arch.data[i].write().expect("can't read");
-        let info = arch.entity_info[i].write().expect("can't read");
-        Some((data, info))
+        let data = arch.data[i].write().expect("can't acquire write lock");
+        Some(data)
     }
 
     fn iter_mut<'a, 'b>(locked: &'b mut Self::LockedColumns<'a>) -> Self::QueryResult<'b> {
         log::trace!("creating iter &{}", std::any::type_name::<T>());
         locked
             .as_mut()
-            .map(|(data, infos)| {
+            .map(|data| {
                 log::trace!("got column");
-                ColumnIterMut(
-                    data.downcast_mut::<T>()
-                        .expect("can't downcast")
-                        .into_iter(),
-                    infos.iter_mut(),
-                )
+                data.downcast_mut::<Entry<T>>()
+                    .expect("can't downcast")
+                    .into_iter()
             })
-            .unwrap_or_else(|| ColumnIterMut::default())
+            .unwrap_or_else(|| (&mut []).into_iter())
     }
 }
 
@@ -267,28 +211,26 @@ where
     }
 }
 
-impl<T: IsQuery> Query<T> {
-    pub fn prepare(&self) -> QueryGuard<'_, T> {
-        let locks = self
-            .0
-            .archetypes
-            .iter()
-            .map(|a| T::lock_columns(a))
-            .collect();
-        QueryGuard(locks)
-    }
-}
-
 impl Archetype {
     #[inline]
-    pub fn for_each<Q>(&self, mut f: impl FnMut(Q::QueryRow<'_>))
-    where
-        Q: IsQuery,
-    {
+    pub fn for_each<Q: IsQuery>(&self, mut f: impl FnMut(Q::QueryRow<'_>)) {
         let mut cols = Q::lock_columns(self);
         for row in Q::iter_mut(&mut cols) {
             f(row);
         }
+    }
+
+    #[inline]
+    pub fn fold<Q: IsQuery, T>(
+        &self,
+        mut init: T,
+        mut f: impl FnMut(T, Q::QueryRow<'_>) -> T,
+    ) -> T {
+        let mut cols = Q::lock_columns(self);
+        for row in Q::iter_mut(&mut cols) {
+            init = f(init, row);
+        }
+        init
     }
 }
 
@@ -302,7 +244,20 @@ impl AllArchetypes {
             arch.for_each::<Q>(&mut f);
         }
     }
+
+    #[inline]
+    pub fn fold<Q: IsQuery, T>(
+        &self,
+        mut init: T,
+        mut f: impl FnMut(T, Q::QueryRow<'_>) -> T,
+    ) -> T {
+        for arch in self.archetypes.iter() {
+            init = arch.fold::<Q, T>(init, &mut f);
+        }
+        init
+    }
 }
+
 // impl<'a, T> From<&'a mut AllArchetypes> for Query<T>
 // where
 //    T: IsQuery + Send + Sync + ?Sized,
@@ -324,6 +279,7 @@ impl AllArchetypes {
 #[cfg(test)]
 mod test {
     use super::*;
+    use std::ops::{Deref, DerefMut};
 
     #[test]
     fn can_query_archetype() {
@@ -340,7 +296,7 @@ mod test {
 
         let mut lock = <&f32>::lock_columns(&arch);
         let iter = <&f32>::iter_mut(&mut lock);
-        let result: f32 = iter.map(|f| *f).sum();
+        let result: f32 = iter.map(|f| *f.value()).sum();
         assert_eq!(6.0, result);
     }
 
@@ -359,8 +315,51 @@ mod test {
 
         let mut sum = 0.0;
         all.for_each::<&f32>(|f| {
-            sum += *f;
+            sum += f.value();
         });
         assert_eq!(6.0, sum);
+    }
+
+    #[test]
+    fn archetype_iter_types() {
+        println!("insert");
+        let mut store = AllArchetypes::default();
+        store.insert_bundle(0, (0.0f32, "zero".to_string(), false));
+        store.insert_bundle(1, (1.0f32, "one".to_string(), false));
+        store.insert_bundle(2, (2.0f32, "two".to_string(), false));
+
+        println!("query 1");
+        let f32s = store.fold::<&f32, _>(vec![], |mut v, f| {
+            v.push(**f);
+            v
+        });
+        let f32s_again = store.fold::<&f32, _>(vec![], |mut v, f| {
+            v.push(**f);
+            v
+        });
+        assert_eq!(vec![0.0f32, 1.0, 2.0f32], f32s);
+        assert_eq!(vec![0.0f32, 1.0, 2.0f32], f32s_again);
+
+        println!("query 2");
+        let mut i = 0;
+        store.for_each::<(&mut bool, &f32)>(|(is_on, f)| {
+            **is_on = !**is_on;
+            assert!(**is_on);
+            assert!(**f as usize == i);
+            i += 1;
+        });
+        assert_eq!(3, i);
+
+        println!("query 3");
+        store.for_each::<(&String, &mut bool, &mut f32)>(|(s, is_on, f)| {
+            **is_on = true;
+            **f = s.len() as f32;
+        });
+
+        println!("query 4");
+        store.for_each::<(&bool, &f32, &String)>(|(is_on, f, s)| {
+            assert!(**is_on);
+            assert_eq!(**f, s.len() as f32, "{}.len() != {}", **s, **f);
+        })
     }
 }

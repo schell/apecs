@@ -5,8 +5,14 @@ use any_vec::AnyVec;
 use anyhow::Context;
 use smallvec::{smallvec, SmallVec};
 
+use crate::storage::Entry;
+
 pub(crate) trait AnyVecExt: Sized {
-    fn anyvec_from_iter<C: Send + Sync + 'static, I: IntoIterator<Item = C>>(iter: I) -> Self;
+    fn anyvec_from_iter<C, I>(iter: I) -> Self
+    where
+        C: Send + Sync + 'static,
+        I: IntoIterator<Item = C>,
+        I::IntoIter: ExactSizeIterator;
 
     fn wrap(c: impl Send + Sync + Sized + 'static) -> Self {
         Self::anyvec_from_iter(Some(c))
@@ -14,8 +20,14 @@ pub(crate) trait AnyVecExt: Sized {
 }
 
 impl AnyVecExt for AnyVec<dyn Send + Sync + 'static> {
-    fn anyvec_from_iter<C: Send + Sync + 'static, I: IntoIterator<Item = C>>(iter: I) -> Self {
-        let mut anyvec: Self = AnyVec::new::<C>();
+    fn anyvec_from_iter<C, I>(iter: I) -> Self
+    where
+        C: Send + Sync + 'static,
+        I: IntoIterator<Item = C>,
+        I::IntoIter: ExactSizeIterator,
+    {
+        let iter = iter.into_iter();
+        let mut anyvec: Self = AnyVec::with_capacity::<C>(iter.len());
         {
             let mut vs = anyvec.downcast_mut().unwrap();
             for c in iter {
@@ -28,6 +40,9 @@ impl AnyVecExt for AnyVec<dyn Send + Sync + 'static> {
 
 /// Provides runtime type info about bundles and more.
 pub trait IsBundle: Sized {
+    /// A bundle where each of this bundle's types are wrapped in `Entry`.
+    type EntryBundle: IsBundle;
+
     /// Produces a list of types of a bundle, ordered by their
     /// position in the tuple.
     fn unordered_types() -> SmallVec<[TypeId; 4]>;
@@ -70,9 +85,15 @@ pub trait IsBundle: Sized {
     }
 
     fn try_from_any_bundle(bundle: AnyBundle) -> anyhow::Result<Self>;
+
+    fn into_entry_bundle(self, entity_id: usize) -> Self::EntryBundle;
+
+    fn from_entry_bundle(entry_bundle: Self::EntryBundle) -> Self;
 }
 
 impl<A: Send + Sync + 'static> IsBundle for (A,) {
+    type EntryBundle = (Entry<A>,);
+
     fn unordered_types() -> SmallVec<[TypeId; 4]> {
         smallvec![TypeId::of::<A>()]
     }
@@ -81,16 +102,26 @@ impl<A: Send + Sync + 'static> IsBundle for (A,) {
         smallvec![AnyVec::new::<A>()]
     }
 
+    fn into_vecs(self) -> SmallVec<[AnyVec<dyn Send + Sync + 'static>; 4]> {
+        smallvec![AnyVec::wrap(self.0)]
+    }
+
     fn try_from_any_bundle(mut bundle: AnyBundle) -> anyhow::Result<Self> {
         Ok((bundle.remove::<A>(&TypeId::of::<A>())?,))
     }
 
-    fn into_vecs(self) -> SmallVec<[AnyVec<dyn Send + Sync + 'static>; 4]> {
-        smallvec![AnyVec::wrap(self.0)]
+    fn into_entry_bundle(self, entity_id: usize) -> Self::EntryBundle {
+        (Entry::new(entity_id, self.0),)
+    }
+
+    fn from_entry_bundle(entry_bundle: Self::EntryBundle) -> Self {
+        (entry_bundle.0.into_inner(),)
     }
 }
 
 impl<A: Send + Sync + 'static, B: Send + Sync + 'static> IsBundle for (A, B) {
+    type EntryBundle = (Entry<A>, Entry<B>);
+
     fn unordered_types() -> SmallVec<[TypeId; 4]> {
         smallvec![TypeId::of::<A>(), TypeId::of::<B>()]
     }
@@ -109,11 +140,21 @@ impl<A: Send + Sync + 'static, B: Send + Sync + 'static> IsBundle for (A, B) {
     fn into_vecs(self) -> SmallVec<[AnyVec<dyn Send + Sync + 'static>; 4]> {
         smallvec![AnyVec::wrap(self.0), AnyVec::wrap(self.1),]
     }
+
+    fn into_entry_bundle(self, entity_id: usize) -> Self::EntryBundle {
+        (Entry::new(entity_id, self.0), Entry::new(entity_id, self.1))
+    }
+
+    fn from_entry_bundle(entry_bundle: Self::EntryBundle) -> Self {
+        (entry_bundle.0.into_inner(), entry_bundle.1.into_inner())
+    }
 }
 
 impl<A: Send + Sync + 'static, B: Send + Sync + 'static, C: Send + Sync + 'static> IsBundle
     for (A, B, C)
 {
+    type EntryBundle = (Entry<A>, Entry<B>, Entry<C>);
+
     fn unordered_types() -> SmallVec<[TypeId; 4]> {
         smallvec![TypeId::of::<A>(), TypeId::of::<B>(), TypeId::of::<C>()]
     }
@@ -136,6 +177,22 @@ impl<A: Send + Sync + 'static, B: Send + Sync + 'static, C: Send + Sync + 'stati
             AnyVec::wrap(self.2),
         ]
     }
+
+    fn into_entry_bundle(self, entity_id: usize) -> Self::EntryBundle {
+        (
+            Entry::new(entity_id, self.0),
+            Entry::new(entity_id, self.1),
+            Entry::new(entity_id, self.2),
+        )
+    }
+
+    fn from_entry_bundle(entry_bundle: Self::EntryBundle) -> Self {
+        (
+            entry_bundle.0.into_inner(),
+            entry_bundle.1.into_inner(),
+            entry_bundle.2.into_inner(),
+        )
+    }
 }
 
 impl<
@@ -145,6 +202,8 @@ impl<
         D: Send + Sync + 'static,
     > IsBundle for (A, B, C, D)
 {
+    type EntryBundle = (Entry<A>, Entry<B>, Entry<C>, Entry<D>);
+
     fn unordered_types() -> SmallVec<[TypeId; 4]> {
         smallvec![
             TypeId::of::<A>(),
@@ -179,6 +238,24 @@ impl<
             AnyVec::wrap(self.2),
             AnyVec::wrap(self.3),
         ]
+    }
+
+    fn into_entry_bundle(self, entity_id: usize) -> Self::EntryBundle {
+        (
+            Entry::new(entity_id, self.0),
+            Entry::new(entity_id, self.1),
+            Entry::new(entity_id, self.2),
+            Entry::new(entity_id, self.3),
+        )
+    }
+
+    fn from_entry_bundle(entry_bundle: Self::EntryBundle) -> Self {
+        (
+            entry_bundle.0.into_inner(),
+            entry_bundle.1.into_inner(),
+            entry_bundle.2.into_inner(),
+            entry_bundle.3.into_inner(),
+        )
     }
 }
 
