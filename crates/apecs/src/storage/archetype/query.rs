@@ -5,6 +5,8 @@ use std::{
     sync::{RwLockReadGuard, RwLockWriteGuard},
 };
 
+use any_vec::{traits::*, AnyVec};
+
 use crate::{
     resource_manager::LoanManager,
     schedule::Borrow,
@@ -14,7 +16,6 @@ use crate::{
     },
     CanFetch, Read, ResourceId,
 };
-use any_vec::{traits::*, AnyVec};
 
 /// An iterator over one archetype column.
 pub struct ColumnIter<'a, T>(std::slice::Iter<'a, T>, std::slice::Iter<'a, EntityInfo>);
@@ -332,10 +333,10 @@ mod test {
             .try_init();
 
         let mut arch = Archetype::new::<(f32,)>().unwrap();
-        arch.insert(0, (0.0f32,)).unwrap();
-        arch.insert(1, (1.0f32,)).unwrap();
-        arch.insert(2, (2.0f32,)).unwrap();
-        arch.insert(3, (3.0f32,)).unwrap();
+        arch.insert_bundle(0, (0.0f32,)).unwrap();
+        arch.insert_bundle(1, (1.0f32,)).unwrap();
+        arch.insert_bundle(2, (2.0f32,)).unwrap();
+        arch.insert_bundle(3, (3.0f32,)).unwrap();
 
         let mut lock = <&f32>::lock_columns(&arch);
         let iter = <&f32>::iter_mut(&mut lock);

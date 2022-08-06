@@ -62,7 +62,7 @@ impl BenchmarkArchetype {
 
     pub fn run(&mut self) {
         for id in 0..10000 {
-            let _ = self.0.insert(id, B(0.0));
+            let _ = self.0.insert_component(id, B(0.0));
         }
 
         for id in 0..10000 {

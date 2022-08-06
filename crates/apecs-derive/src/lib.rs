@@ -223,7 +223,7 @@ pub fn impl_join_tuple(input: proc_macro::TokenStream) -> proc_macro::TokenStrea
         impl <#(#tys),*> Iterator for JoinedIter<#tuple>
         where
             #(#tys: Iterator,)*
-            #(#tys::Item: IsEntry,)*
+            #(#tys::Item: HasId,)*
         {
             type Item = (
                 #(#tys::Item),*
@@ -240,7 +240,7 @@ pub fn impl_join_tuple(input: proc_macro::TokenStream) -> proc_macro::TokenStrea
         impl <#(#tys),* > Join for #tuple
         where
             #(#tys: Join,)*
-            #(<#tys::Iter as Iterator>::Item: IsEntry,)*
+            #(<#tys::Iter as Iterator>::Item: HasId,)*
         {
             type Iter = JoinedIter<( #(#tys::Iter),* )>;
 
@@ -280,7 +280,7 @@ pub fn impl_parjoin_tuple(input: proc_macro::TokenStream) -> proc_macro::TokenSt
         .zip(iters.iter())
         .map(|(ty, iter)| {
             quote! {
-                #ty: IntoParallelIterator<Iter = #iter>
+                #ty: rayon::iter::IntoParallelIterator<Iter = #iter>
             }
         })
         .collect::<Vec<_>>();
@@ -304,7 +304,7 @@ pub fn impl_parjoin_tuple(input: proc_macro::TokenStream) -> proc_macro::TokenSt
         .collect();
 
     let join_for_tuple = quote! {
-        impl <#(#tys,)* #(#iters,)* #(#comps,)*> apecs::join::ParJoin for #tuple
+        impl <#(#tys,)* #(#iters,)* #(#comps,)*> apecs::storage::separated::join::ParJoin for #tuple
         where
             #(#store_constraints,)*
             #(#iter_constraints,)*

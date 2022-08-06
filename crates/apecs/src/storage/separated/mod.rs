@@ -8,11 +8,6 @@ pub use join::*;
 
 use crate::{world::World, Read, Write};
 
-pub mod bitset {
-    // TODO: Remove hibitset
-    pub use hibitset::*;
-}
-
 pub type ReadStore<T> = Read<VecStorage<T>>;
 pub type WriteStore<T> = Write<VecStorage<T>>;
 

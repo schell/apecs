@@ -1,268 +1,352 @@
-//! Joining tuples of storages.
-//!
-//! Joining is to separate storages as querying is to archetypal storage.
+use std::iter::Map;
 
-use std::cmp::Ordering;
+use hibitset::{BitIter, BitSet};
+pub use rayon::iter::{
+    FilterMap, IndexedParallelIterator, IntoParallelIterator, MultiZip, ParallelIterator, Zip,
+};
 
-use rayon::iter::{IntoParallelIterator, ParallelIterator};
-use tuple_list::{Tuple, TupleList};
+use crate::{self as apecs, Write, Read};
+use crate::storage::{HasId, Without, WithoutIter, MaybeIter, separated::VecStorage};
+use crate::world::Entities;
 
-use crate::storage::{Entry, Maybe, HasId};
+use super::{VecStorageIter, VecStorageIterMut};
 
-/// Converts a `TupleList` of `IntoIterator`s into a `TupleList` of `Iterator`s.
-pub trait TupleListIntoIter {
-    type Output;
+pub trait ParJoin {
+    type Iter: ParallelIterator;
 
-    fn tuple_list_into_iter(self) -> Self::Output;
+    fn par_join(self) -> Self::Iter;
 }
 
-impl TupleListIntoIter for () {
-    type Output = ();
-
-    fn tuple_list_into_iter(self) -> Self::Output {
-        ()
-    }
-}
-
-impl<Head, Tail> TupleListIntoIter for (Head, Tail)
+impl<StoreA, IterA, A> ParJoin for (StoreA,)
 where
-    Head: IntoIterator,
-    Tail: TupleListIntoIter + TupleList,
+    StoreA: IntoParallelIterator<Iter = IterA>,
+    IterA: IndexedParallelIterator<Item = Option<A>>,
+    A: Send,
 {
-    type Output = (Head::IntoIter, Tail::Output);
+    type Iter = rayon::iter::Flatten<StoreA::Iter>;
 
-    fn tuple_list_into_iter(self) -> Self::Output {
-        (self.0.into_iter(), self.1.tuple_list_into_iter())
+    fn par_join(self) -> Self::Iter {
+        self.0.into_par_iter().flatten()
     }
 }
 
-pub trait CompareId {
-    fn cmp_id(&self, id: &usize) -> Ordering;
-}
-
-impl CompareId for () {
-    fn cmp_id(&self, _: &usize) -> Ordering {
-        Ordering::Equal
-    }
-}
-
-impl CompareId for usize {
-    fn cmp_id(&self, id: &usize) -> Ordering {
-        self.cmp(id)
-    }
-}
-
-impl<T> CompareId for Entry<T> {
-    fn cmp_id(&self, id: &usize) -> Ordering {
-        self.info.key.cmp(id)
-    }
-}
-
-impl<T> CompareId for &Entry<T> {
-    fn cmp_id(&self, id: &usize) -> Ordering {
-        self.info.key.cmp(id)
-    }
-}
-
-impl<T> CompareId for &mut Entry<T> {
-    fn cmp_id(&self, id: &usize) -> Ordering {
-        self.info.key.cmp(id)
-    }
-}
-
-impl<T> CompareId for Maybe<T> {
-    fn cmp_id(&self, id: &usize) -> Ordering {
-        self.key.cmp(id)
-    }
-}
-
-impl<A: CompareId, B> CompareId for (A, B) {
-    fn cmp_id(&self, id: &usize) -> Ordering {
-        self.0.cmp_id(id)
-    }
-}
-
-pub trait TupleListSyncIter {
-    type Item;
-
-    fn next_item(&mut self) -> Option<Self::Item>;
-}
-
-impl TupleListSyncIter for () {
-    type Item = ();
-
-    #[inline]
-    fn next_item(&mut self) -> Option<Self::Item> {
-        Some(())
-    }
-}
-
-impl<Head, Tail> TupleListSyncIter for (Head, Tail)
+impl<StoreA, StoreB, IterA, IterB, A, B> ParJoin for (StoreA, StoreB)
 where
-    Head: Iterator,
-    Head::Item: HasId,
-    Tail: TupleListSyncIter + TupleList,
-    <Tail as TupleListSyncIter>::Item: CompareId,
+    StoreA: IntoParallelIterator<Iter = IterA>,
+    StoreB: IntoParallelIterator<Iter = IterB>,
+    IterA: IndexedParallelIterator<Item = Option<A>>,
+    IterB: IndexedParallelIterator<Item = Option<B>>,
+    A: Send,
+    B: Send,
 {
-    type Item = (<Head as Iterator>::Item, <Tail as TupleListSyncIter>::Item);
+    type Iter = FilterMap<MultiZip<(IterA, IterB)>, fn((Option<A>, Option<B>)) -> Option<(A, B)>>;
 
-    #[inline]
-    fn next_item(&mut self) -> Option<Self::Item> {
-        let mut head = self.0.next()?;
-        let mut tail = self.1.next_item()?;
-        while tail.cmp_id(&head.id()) != Ordering::Equal {
-            while tail.cmp_id(&head.id()) == Ordering::Greater {
-                head = self.0.next()?;
-            }
-            while tail.cmp_id(&head.id()) == Ordering::Less {
-                tail = self.1.next_item()?;
-            }
-        }
-        Some((head, tail))
-    }
-}
-
-pub struct JoinIter<T>(T);
-
-impl<T> Iterator for JoinIter<T>
-where
-    T: TupleListSyncIter,
-{
-    type Item = <T as TupleListSyncIter>::Item;
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        self.0.next_item()
-    }
-}
-
-pub type JoinIterList<T> = <<T as Tuple>::TupleList as TupleListIntoIter>::Output;
-pub type JoinIterItem<T> = <JoinIter<JoinIterList<T>> as Iterator>::Item;
-pub type JoinIterItemTuple<T> = <<JoinIter<<<T as Tuple>::TupleList as TupleListIntoIter>::Output> as Iterator>::Item as TupleList>::Tuple;
-
-pub trait Join: Tuple
-where
-    Self::TupleList: TupleListIntoIter,
-    JoinIterList<Self>: TupleListSyncIter,
-    JoinIterItem<Self>: TupleList,
-{
-    fn join(
-        self,
-    ) -> std::iter::Map<
-        JoinIter<JoinIterList<Self>>,
-        fn(JoinIterItem<Self>) -> JoinIterItemTuple<Self>,
-    > {
-        let tlist_of_into_iters: Self::TupleList = self.into_tuple_list();
-        let tlist_of_iters: JoinIterList<Self> = tlist_of_into_iters.tuple_list_into_iter();
-        let tlist_sync_iter: JoinIter<JoinIterList<Self>> = JoinIter(tlist_of_iters);
-        tlist_sync_iter.map(|tlist| tlist.into_tuple())
-    }
-}
-
-impl<T> Join for T
-where
-    T: Tuple,
-    T::TupleList: TupleListIntoIter,
-    JoinIterList<T>: TupleListSyncIter,
-    JoinIterItem<T>: TupleList,
-{
-}
-
-pub trait TupleOfOptions {
-    type Output: TupleList;
-
-    fn into_option_of_tuple(self) -> Option<Self::Output>;
-}
-
-impl TupleOfOptions for () {
-    type Output = ();
-
-    fn into_option_of_tuple(self) -> Option<Self::Output> {
-        Some(())
-    }
-}
-
-impl<Head, Tail> TupleOfOptions for (Option<Head>, Tail)
-where
-    (Head, Tail::Output): TupleList,
-    Tail: TupleOfOptions + TupleList,
-{
-    type Output = (Head, Tail::Output);
-
-    #[inline]
-    fn into_option_of_tuple(self) -> Option<Self::Output> {
-        let head = self.0?;
-        let tail = self.1.into_option_of_tuple()?;
-        Some((head, tail))
-    }
-}
-
-pub trait ParJoin: Sized + IntoParallelIterator
-where
-    <Self as IntoParallelIterator>::Item: Tuple,
-    <<Self as IntoParallelIterator>::Item as Tuple>::TupleList: TupleOfOptions,
-    <<<<Self as IntoParallelIterator>::Item as Tuple>::TupleList as TupleOfOptions>::Output as TupleList>::Tuple: Send,
-{
-    fn par_join(
-        self,
-    ) -> rayon::iter::FilterMap<
-        <Self as IntoParallelIterator>::Iter,
-        fn(
-            <Self as IntoParallelIterator>::Item,
-        ) -> Option<
-            <<<<Self as IntoParallelIterator>::Item as Tuple>::TupleList as TupleOfOptions>::Output as TupleList>::Tuple,
-        >,
-    > {
-        let multizip: <Self as IntoParallelIterator>::Iter = self.into_par_iter();
-        multizip.filter_map(|tuple_of_options| {
-            Some(tuple_of_options.into_tuple_list().into_option_of_tuple()?.into_tuple())
+    fn par_join(self) -> Self::Iter {
+        self.into_par_iter().filter_map(|(ma, mb)| {
+            let a = ma?;
+            let b = mb?;
+            Some((a, b))
         })
     }
 }
 
-impl<T> ParJoin for T
+apecs_derive::impl_parjoin_tuple!((A, B, C));
+apecs_derive::impl_parjoin_tuple!((A, B, C, D));
+apecs_derive::impl_parjoin_tuple!((A, B, C, D, E));
+apecs_derive::impl_parjoin_tuple!((A, B, C, D, E, F));
+apecs_derive::impl_parjoin_tuple!((A, B, C, D, E, F, G));
+apecs_derive::impl_parjoin_tuple!((A, B, C, D, E, F, G, H));
+apecs_derive::impl_parjoin_tuple!((A, B, C, D, E, F, G, H, I));
+apecs_derive::impl_parjoin_tuple!((A, B, C, D, E, F, G, H, I, J));
+apecs_derive::impl_parjoin_tuple!((A, B, C, D, E, F, G, H, I, J, K));
+apecs_derive::impl_parjoin_tuple!((A, B, C, D, E, F, G, H, I, J, K, L));
+
+#[inline]
+pub fn sync<A, B>(a: &mut A, next_a: &mut A::Item, b: &mut B, next_b: &mut B::Item) -> Option<()>
 where
-    Self: Sized + IntoParallelIterator,
-<Self as IntoParallelIterator>::Item: Tuple,
-<<Self as IntoParallelIterator>::Item as Tuple>::TupleList: TupleOfOptions,
-<<<<Self as IntoParallelIterator>::Item as Tuple>::TupleList as TupleOfOptions>::Output as TupleList>::Tuple: Send,
+    A: Iterator,
+    A::Item: HasId,
+    B: Iterator,
+    B::Item: HasId,
 {
+    while next_a.id() != next_b.id() {
+        while next_a.id() < next_b.id() {
+            *next_a = a.next()?;
+        }
+        while next_b.id() < next_a.id() {
+            *next_b = b.next()?;
+        }
+    }
+
+    Some(())
 }
+
+pub struct JoinedIter<T>(T);
+
+pub trait Join {
+    type Iter: Iterator;
+
+    fn join(self) -> Self::Iter;
+}
+
+impl<'a, T: Send + Sync + 'static> Join for &'a mut VecStorage<T> {
+    type Iter = VecStorageIterMut<'a, T>;
+
+    fn join(self) -> Self::Iter {
+        self.iter_mut()
+    }
+}
+
+impl<'a, T: Send + Sync + 'static> Join for &'a mut Write<VecStorage<T>> {
+    type Iter = VecStorageIterMut<'a, T>;
+
+    fn join(self) -> Self::Iter {
+        self.iter_mut()
+    }
+}
+
+impl<'a, T: Send + Sync + 'static> Join for &'a Write<VecStorage<T>> {
+    type Iter = VecStorageIter<'a, T>;
+
+    fn join(self) -> Self::Iter {
+        self.iter()
+    }
+}
+
+impl<'a, T: Send + Sync + 'static> Join for &'a VecStorage<T> {
+    type Iter = VecStorageIter<'a, T>;
+
+    fn join(self) -> Self::Iter {
+        self.iter()
+    }
+}
+
+impl<'a, T: Send + Sync + 'static> Join for &'a Read<VecStorage<T>> {
+    type Iter = VecStorageIter<'a, T>;
+
+    fn join(self) -> Self::Iter {
+        self.iter()
+    }
+}
+
+impl<'a, T> Join for std::slice::Iter<'a, T>
+where
+    T: HasId,
+{
+    type Iter = Self;
+
+    fn join(self) -> Self::Iter {
+        self
+    }
+}
+
+impl<'a, T> Join for std::slice::IterMut<'a, T>
+where
+    T: HasId,
+{
+    type Iter = Self;
+
+    fn join(self) -> Self::Iter {
+        self
+    }
+}
+
+impl<T> Join for Vec<T>
+where
+    T: HasId,
+{
+    type Iter = std::vec::IntoIter<T>;
+
+    fn join(self) -> Self::Iter {
+        self.into_iter()
+    }
+}
+
+impl<C, T> Join for Without<T>
+where
+    C: HasId,
+    T: Join,
+    T::Iter: Iterator<Item = C>,
+{
+    type Iter = WithoutIter<T::Iter>;
+
+    fn join(self) -> Self::Iter {
+        WithoutIter::new(self.0.join())
+    }
+}
+
+impl<T, C> Join for MaybeIter<C, T>
+where
+    C: HasId,
+    T: Iterator<Item = C>,
+{
+    type Iter = Self;
+
+    fn join(self) -> Self::Iter {
+        self
+    }
+}
+
+impl<A> Join for (A,)
+where
+    A: Join,
+    <A::Iter as Iterator>::Item: HasId,
+{
+    type Iter = JoinedIter<(A::Iter,)>;
+    fn join(self) -> Self::Iter {
+        JoinedIter((self.0.join(),))
+    }
+}
+
+impl<A, B> Join for (A, B)
+where
+    A: Join,
+    B: Join,
+    <A::Iter as Iterator>::Item: HasId,
+    <B::Iter as Iterator>::Item: HasId,
+{
+    type Iter = JoinedIter<(A::Iter, B::Iter)>;
+    fn join(self) -> Self::Iter {
+        JoinedIter((self.0.join(), self.1.join()))
+    }
+}
+
+impl<A> Iterator for JoinedIter<(A,)>
+where
+    A: Iterator,
+    A::Item: HasId,
+{
+    type Item = A::Item;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0 .0.next()
+    }
+}
+
+impl<A, B> Iterator for JoinedIter<(A, B)>
+where
+    A: Iterator,
+    A::Item: HasId,
+    B: Iterator,
+    B::Item: HasId,
+{
+    type Item = (A::Item, B::Item);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut next_0 = self.0 .0.next()?;
+        let mut next_1 = self.0 .1.next()?;
+        sync(&mut self.0 .0, &mut next_0, &mut self.0 .1, &mut next_1)?;
+        Some((next_0, next_1))
+    }
+}
+
+apecs_derive::impl_join_tuple!((A, B, C));
+apecs_derive::impl_join_tuple!((A, B, C, D));
+apecs_derive::impl_join_tuple!((A, B, C, D, E));
+apecs_derive::impl_join_tuple!((A, B, C, D, E, F));
+apecs_derive::impl_join_tuple!((A, B, C, D, E, F, G));
+apecs_derive::impl_join_tuple!((A, B, C, D, E, F, G, H));
+apecs_derive::impl_join_tuple!((A, B, C, D, E, F, G, H, I));
+apecs_derive::impl_join_tuple!((A, B, C, D, E, F, G, H, I, J));
+apecs_derive::impl_join_tuple!((A, B, C, D, E, F, G, H, I, J, K));
+apecs_derive::impl_join_tuple!((A, B, C, D, E, F, G, H, I, J, K, L));
+apecs_derive::impl_join_tuple!((A, B, C, D, E, F, G, H, I, J, K, L, M));
+apecs_derive::impl_join_tuple!((A, B, C, D, E, F, G, H, I, J, K, L, M, N));
 
 #[cfg(test)]
 mod test {
-    use crate::storage::separated::*;
-    use rayon::prelude::*;
+    use std::ops::Deref;
+
+    use crate::storage::Maybe;
+
+    use super::*;
 
     #[test]
-    fn join_tuple_list_iters() {
-        let u32s = vec![(0usize, 0u32), (1, 1), (2, 2), (3, 3), (6, 6)];
-        let strs = vec![(0usize, "zero"), (2, "two"), (3, "three"), (6, "six")];
-        let evns = vec![(0usize, true), (1, false), (3, false), (4, true), (6, true)];
-        let f32s = vec![(1, 1.0f32), (3, 3.0), (4, 4.0), (6, 6.0)];
-        let (joined, ids): (Vec<_>, Vec<_>) = (u32s, strs, evns, f32s)
-            .join()
-            .map(|(u, s, b, f)| ((u.1, s.1, b.1, f.1), (u.0, s.0, b.0, f.0)))
-            .unzip();
-        let mut join_iter = joined.into_iter();
-        assert_eq!((3u32, "three", false, 3.0), join_iter.next().unwrap());
-        assert_eq!((6u32, "six", true, 6.0), join_iter.next().unwrap());
-        assert!(join_iter.next().is_none());
-        assert_eq!(vec![(3, 3, 3, 3), (6, 6, 6, 6)], ids);
+    fn can_par_join() {
+        let mut store_a = VecStorage::new_with_capacity(1000);
+        let mut store_b = VecStorage::new_with_capacity(1000);
+        let mut store_c = VecStorage::new_with_capacity(1000);
+        let mut check = vec![];
+
+        for i in 0..1000 {
+            if i % 2 == 0 {
+                store_a.insert(i, i);
+            }
+            if i % 3 == 0 {
+                store_b.insert(i, i);
+            }
+            if i % 4 == 0 {
+                store_c.insert(i, i);
+            }
+            if i % 2 == 0 && i % 3 == 0 && i % 4 == 0 {
+                check.push((i, i, i));
+            }
+        }
+
+        let result = (&store_a, &store_b, &store_c)
+            .par_join()
+            .map(|(a, b, c)| (*a.deref(), *b.deref(), *c.deref()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(check, result);
+
+        let _ = (&store_a, &store_b).par_join().collect::<Vec<_>>();
     }
 
     #[test]
-    fn par_join_vec_sanity() {
-        let mut u32s = VecStorage::<u32>::default();
-        u32s.insert(0, 1);
-        u32s.insert(0, 2);
-        u32s.insert(0, 3);
-        let mut f32s = VecStorage::<f32>::default();
-        f32s.insert(0, 1.0);
-        f32s.insert(0, 2.0);
-        f32s.insert(0, 3.0);
-        (&u32s, &f32s)
-            .par_join()
-            .for_each(|(u, f)| assert_eq!(*u.value() as f32, *f.value()));
+    fn can_join_without() {
+        let vs_abc = crate::storage::separated::test::make_abc_vecstorage();
+        let vs_246 = crate::storage::separated::test::make_2468_vecstorage();
+
+        let mut joined = (&vs_abc, !&vs_246).join();
+        let (s, _) = joined.next().unwrap();
+        assert_eq!(s.id(), 1);
+        assert_eq!(s.as_str(), "def");
+
+        assert_eq!(joined.next(), None);
+
+        let mut vs_a: VecStorage<&str> = VecStorage::default();
+        vs_a.insert(0, "a0");
+        vs_a.insert(1, "a1");
+        vs_a.insert(3, "a3");
+        vs_a.insert(4, "a4");
+        vs_a.insert(8, "a8");
+
+        let withouts = (!&vs_a,).join().take(5).map(|e| e.id()).collect::<Vec<_>>();
+        assert_eq!(&withouts, &[2, 5, 6, 7, 9]);
+    }
+
+    #[test]
+    fn can_join_maybe() {
+        let mut vs: VecStorage<&str> = VecStorage::default();
+        vs.insert(1, "1");
+        vs.insert(2, "2");
+        vs.insert(3, "3");
+        vs.insert(6, "6");
+
+        let maybes = (vs.maybe(),)
+            .join()
+            .take(7)
+            .map(|Maybe { key, inner }| (key, inner.map(|e| e.value())))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            &maybes,
+            &[
+                (0usize, None),
+                (1, Some(&"1")),
+                (2, Some(&"2")),
+                (3, Some(&"3")),
+                (4, None),
+                (5, None),
+                (6, Some(&"6"))
+            ]
+        );
+    }
+
+    #[test]
+    fn decide_bool_or_option_unit_by_size() {
+        let o = std::mem::size_of::<Option<()>>();
+        let b = std::mem::size_of::<bool>();
+        assert!(o == b, "{} bytes", o);
     }
 }

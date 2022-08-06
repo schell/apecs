@@ -2,7 +2,6 @@
 members = [
     "crates/apecs",
     "crates/apecs-derive",
-    "crates/example",
     "crates/xtask",
 ]
 
