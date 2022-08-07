@@ -34,88 +34,16 @@ impl<T> HasId for (usize, T) {
     }
 }
 
-/// Information about an entity.
-#[derive(Clone, Debug, PartialEq)]
-pub struct EntityInfo {
-    /// The entity id.
-    pub key: usize,
-    /// The last time this component was changed.
-    pub changed: u64,
-    /// Whether this component was added the last time it was changed.
-    pub added: bool,
-}
-
-impl EntityInfo {
-    pub fn new(id: usize) -> EntityInfo {
-        EntityInfo {
-            key: id,
-            changed: crate::system::current_iteration(),
-            added: true,
-        }
-    }
-}
-
-impl HasId for EntityInfo {
-    fn id(&self) -> usize {
-        self.key
-    }
-}
-
-pub trait HasEntityInfo {
-    fn info(&self) -> &EntityInfo;
-
-    fn has_changed_since(&self, iteration: u64) -> bool {
-        self.info().changed >= iteration
-    }
-
-    fn was_added_since(&self, iteration: u64) -> bool {
-        self.info().changed >= iteration && self.info().added
-    }
-
-    fn was_modified_since(&self, iteration: u64) -> bool {
-        self.info().changed >= iteration && !self.info().added
-    }
-
-    fn last_changed(&self) -> u64 {
-        self.info().changed
-    }
-}
-
-impl<T: HasEntityInfo> HasEntityInfo for &T {
-    fn info(&self) -> &EntityInfo {
-        T::info(self)
-    }
-}
-
-impl HasEntityInfo for EntityInfo {
-    fn info(&self) -> &EntityInfo {
-        self
-    }
-}
-
-pub trait HasEntityInfoMut {
-    fn info_mut(&mut self) -> &mut EntityInfo;
-
-    fn mark_changed(&mut self) {
-        let info = self.info_mut();
-        info.changed = crate::system::current_iteration();
-        info.added = false;
-    }
-}
-
-impl HasEntityInfoMut for EntityInfo {
-    fn info_mut(&mut self) -> &mut EntityInfo {
-        self
-    }
-}
-
-/// Owned component entries.
-///
-/// "Owned" here means that this is not a reference.
+/// Component entries.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Entry<T> {
     pub(crate) value: T,
-    pub(crate) info: EntityInfo,
+    /// The entity id.
+    pub(crate) key: usize,
+    /// The last time this component was changed.
+    pub(crate) changed: u64,
+    /// Whether this component was added the last time it was changed.
+    pub(crate) added: bool,
 }
 
 impl<T> AsRef<T> for Entry<T> {
@@ -126,33 +54,23 @@ impl<T> AsRef<T> for Entry<T> {
 
 impl<T> HasId for Entry<T> {
     fn id(&self) -> usize {
-        self.info.key
-    }
-}
-
-impl<T> HasEntityInfo for Entry<T> {
-    fn info(&self) -> &EntityInfo {
-        &self.info
-    }
-}
-
-impl<T> HasEntityInfoMut for Entry<T> {
-    fn info_mut(&mut self) -> &mut EntityInfo {
-        &mut self.info
+        self.key
     }
 }
 
 impl<T> Deref for Entry<T> {
     type Target = T;
 
+    #[inline]
     fn deref(&self) -> &Self::Target {
         &self.value
     }
 }
 
 impl<T> DerefMut for Entry<T> {
+    #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.info.mark_changed();
+        self.mark_changed();
         &mut self.value
     }
 }
@@ -161,12 +79,14 @@ impl<T> Entry<T> {
     pub fn new(id: usize, value: T) -> Self {
         Entry {
             value,
-            info: EntityInfo::new(id),
+            changed: crate::system::current_iteration(),
+            added: true,
+            key: id,
         }
     }
 
     pub fn id(&self) -> usize {
-        self.info.key
+        self.key
     }
 
     pub fn value(&self) -> &T {
@@ -174,12 +94,12 @@ impl<T> Entry<T> {
     }
 
     pub fn set_value(&mut self, t: T) {
-        self.info.mark_changed();
+        self.mark_changed();
         self.value = t;
     }
 
     pub fn replace_value(&mut self, t: T) -> T {
-        self.info.mark_changed();
+        self.mark_changed();
         std::mem::replace(&mut self.value, t)
     }
 
@@ -188,96 +108,29 @@ impl<T> Entry<T> {
     }
 
     pub fn split(self) -> (usize, T) {
-        (self.info.key, self.value)
+        (self.key, self.value)
     }
-}
 
-/// A reference to a component stored in an archetype.
-pub struct Ref<'a, T: 'static>(&'a EntityInfo, &'a T);
-
-impl<'a, T> HasId for Ref<'a, T> {
-    fn id(&self) -> usize {
-        self.0.key
+    #[inline]
+    fn mark_changed(&mut self) {
+        self.changed = crate::system::current_iteration();
+        self.added = false;
     }
-}
 
-impl<'a, T> HasEntityInfo for Ref<'a, T> {
-    fn info(&self) -> &EntityInfo {
-        &self.0
+    pub fn has_changed_since(&self, iteration: u64) -> bool {
+        self.changed >= iteration
     }
-}
 
-impl<'a, T> Deref for Ref<'a, T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        self.1
+    pub fn was_added_since(&self, iteration: u64) -> bool {
+        self.changed >= iteration && self.added
     }
-}
 
-impl<'a, T> AsRef<T> for Ref<'a, T> {
-    fn as_ref(&self) -> &T {
-        self.1
+    pub fn was_modified_since(&self, iteration: u64) -> bool {
+        self.changed >= iteration && !self.added
     }
-}
 
-impl<'a, T: 'static> Ref<'a, T> {
-    pub fn id(&self) -> usize {
-        self.0.key
-    }
-}
-
-/// A mutable reference to a component stored in an archetype.
-pub struct Mut<'a, T: 'static>(&'a mut EntityInfo, &'a mut T);
-
-impl<'a, T> HasId for Mut<'a, T> {
-    fn id(&self) -> usize {
-        self.0.key
-    }
-}
-
-impl<'a, T> HasEntityInfo for Mut<'a, T> {
-    fn info(&self) -> &EntityInfo {
-        &self.0
-    }
-}
-
-impl<'a, T> HasEntityInfoMut for Mut<'a, T> {
-    fn info_mut(&mut self) -> &mut EntityInfo {
-        &mut self.0
-    }
-}
-
-impl<'a, T> Deref for Mut<'a, T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        self.1
-    }
-}
-
-impl<'a, T> DerefMut for Mut<'a, T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.0.mark_changed();
-        self.1
-    }
-}
-
-impl<'a, T> AsRef<T> for Mut<'a, T> {
-    fn as_ref(&self) -> &T {
-        self.1
-    }
-}
-
-impl<'a, T> AsMut<T> for Mut<'a, T> {
-    fn as_mut(&mut self) -> &mut T {
-        self.1
-    }
-}
-
-impl<'a, T: 'static> Mut<'a, T> {
-    pub fn id(&self) -> usize {
-        self.0.key
+    pub fn last_changed(&self) -> u64 {
+        self.changed
     }
 }
 
@@ -420,11 +273,9 @@ where
 
         let entry = Entry {
             value: (),
-            info: EntityInfo {
-                key: self.id,
-                changed: 0,
-                added: false,
-            },
+            key: self.id,
+            changed: 0,
+            added: false,
         };
         self.id += 1;
         Some(entry)

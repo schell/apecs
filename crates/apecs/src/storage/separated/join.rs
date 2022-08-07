@@ -1,13 +1,9 @@
-use std::iter::Map;
-
-use hibitset::{BitIter, BitSet};
 pub use rayon::iter::{
     FilterMap, IndexedParallelIterator, IntoParallelIterator, MultiZip, ParallelIterator, Zip,
 };
 
-use crate::{self as apecs, Write, Read};
-use crate::storage::{HasId, Without, WithoutIter, MaybeIter, separated::VecStorage};
-use crate::world::Entities;
+use crate::storage::{separated::VecStorage, HasId, MaybeIter, Without, WithoutIter};
+use crate::{self as apecs, Read, Write};
 
 use super::{VecStorageIter, VecStorageIterMut};
 
@@ -232,6 +228,7 @@ where
 {
     type Item = (A::Item, B::Item);
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         let mut next_0 = self.0 .0.next()?;
         let mut next_1 = self.0 .1.next()?;

@@ -2,15 +2,16 @@
 use std::{
     any::TypeId,
     ops::DerefMut,
-    sync::{Arc, RwLock},
+    sync::Arc,
 };
 
 use any_vec::{any_value::AnyValueMut, traits::*, AnyVec};
 use anyhow::Context;
+use parking_lot::RwLock;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
-use crate::storage::{EntityInfo, Entry, HasEntityInfoMut, Mut, Ref};
+use crate::storage::Entry;
 
 use super::bundle::*;
 
@@ -31,7 +32,7 @@ pub struct Archetype {
 
 #[derive(Default)]
 pub struct ArchetypeBuilder {
-    entities: Vec<EntityInfo>,
+    min_and_len: Option<(usize, usize)>,
     archetype: Archetype,
 }
 
@@ -41,37 +42,44 @@ impl ArchetypeBuilder {
         starting_entity: usize,
         comps: impl ExactSizeIterator<Item = T>,
     ) -> Self {
-        let range = starting_entity..starting_entity + comps.len();
-        let anyvec = AnyVec::anyvec_from_iter(comps.zip(range).map(|(c, id)| Entry::new(id, c)));
-        let ty = anyvec.element_typeid();
-        for (i, t) in self.archetype.entry_types.iter().enumerate() {
-            if &ty < t {
-                self.archetype.entry_types.insert(i, ty);
-                self.archetype.data.insert(i, Arc::new(RwLock::new(anyvec)));
-                return self;
-            } else if &ty == t {
-                self.archetype.data[i] = Arc::new(RwLock::new(anyvec));
-                return self;
-            }
-        }
+        let ty = TypeId::of::<Entry<T>>();
+        assert!(
+            self.archetype
+                .entry_types
+                .iter()
+                .find(|t| *t == &ty)
+                .is_none(),
+            "{} is already contained in the archetype",
+            std::any::type_name::<T>()
+        );
 
+        let end = starting_entity + comps.len();
+        let range = starting_entity..end;
+        if let Some((min, len)) = self.min_and_len {
+            assert_eq!(
+                min, starting_entity,
+                "starting entity id is not the same as the previous starting id"
+            );
+            assert_eq!(len, comps.len(), "length is not the same as previous");
+        } else {
+            self.min_and_len = Some((starting_entity, comps.len()));
+            self.archetype.index_lookup = range.clone().collect();
+            self.archetype.entity_lookup = range.clone().zip(0..).collect();
+        }
+        let anyvec = AnyVec::anyvec_from_iter(comps.zip(range).map(|(c, id)| Entry::new(id, c)));
         self.archetype.entry_types.push(ty);
         self.archetype.data.push(Arc::new(RwLock::new(anyvec)));
         self
     }
 
     pub fn build(mut self) -> Archetype {
-        self.archetype.entity_lookup =
-            FxHashMap::from_iter(self.entities.into_iter().map(|e| e.key).zip(0..));
+        self.archetype.entry_types.sort();
+        self.archetype.data.sort_by(|a, b| {
+            a.read()
+                .element_typeid()
+                .cmp(&b.read().element_typeid())
+        });
         self.archetype
-    }
-}
-
-impl TryFrom<()> for Archetype {
-    type Error = anyhow::Error;
-
-    fn try_from(_: ()) -> anyhow::Result<Self> {
-        Ok(Archetype::default())
     }
 }
 
@@ -237,7 +245,7 @@ impl Archetype {
                 for (ty, component_vec) in bundle.0.iter().zip(bundle.1.iter_mut()) {
                     debug_assert_eq!(ty, &component_vec.element_typeid());
                     let ty_index = self.index_of(ty).context("missing column")?;
-                    let mut data = self.data[ty_index].write().ok().context("can't write")?;
+                    let mut data = self.data[ty_index].write();
                     let mut element_a = data.at_mut(*entity_index);
                     let mut element_b = component_vec.at_mut(0);
                     element_a.swap(element_b.deref_mut());
@@ -252,7 +260,7 @@ impl Archetype {
                     let ty_index = self
                         .index_of(&ty)
                         .with_context(|| format!("missing column: {:?}", ty))?;
-                    let mut data = self.data[ty_index].write().ok().context("can't write")?;
+                    let mut data = self.data[ty_index].write();
                     debug_assert_eq!(component_vec.element_typeid(), data.element_typeid());
                     data.push(component_vec.pop().unwrap());
                     debug_assert!(data.len() == last_index + 1);
@@ -289,7 +297,7 @@ impl Archetype {
             anybundle.0 = self.entry_types.clone();
             assert_eq!(self.index_lookup.swap_remove(index), entity_id);
             for column in self.data.iter_mut() {
-                let mut data = column.write().ok().context("can't write")?;
+                let mut data = column.write();
                 if should_reset_index {
                     // the index of the last entity was swapped for that of the removed
                     // index, so we need to update the lookup
@@ -323,7 +331,7 @@ impl Archetype {
         if let Some(entity_index) = self.entity_lookup.get(&entity_id) {
             let ty = TypeId::of::<Entry<T>>();
             if let Some(ty_index) = self.index_of(&ty) {
-                let data = self.data[ty_index].read().ok().context("can't read")?;
+                let data = self.data[ty_index].read();
                 let entries = data.downcast_ref::<Entry<T>>().context("can't downcast")?;
                 Ok(entries.get(*entity_index).map(f))
             } else {
@@ -343,7 +351,7 @@ impl Archetype {
         if let Some(entity_index) = self.entity_lookup.get(&entity_id) {
             let ty = TypeId::of::<Entry<T>>();
             if let Some(ty_index) = self.index_of(&ty) {
-                let mut data = self.data[ty_index].write().ok().context("can't write")?;
+                let mut data = self.data[ty_index].write();
                 let mut entries = data.downcast_mut::<Entry<T>>().context("can't downcast")?;
                 Ok(entries.get_mut(*entity_index).map(f))
             } else {
@@ -353,13 +361,8 @@ impl Archetype {
             Ok(None)
         }
     }
-
-    pub fn query<Q: super::query::IsQuery, F: FnMut(Q::QueryRow<'_>)>(&self, f: F) {
-        let mut columns = Q::lock_columns(self);
-        let iter = Q::iter_mut(&mut columns);
-        iter.for_each(f);
-    }
 }
+
 #[cfg(test)]
 mod test {
     use any_vec::{mem::Heap, AnyVecMut, AnyVecRef};
@@ -399,7 +402,10 @@ mod test {
             .insert_bundle(3, (3.0f32, "three", 3u32))
             .unwrap()
             .is_none());
-        assert_eq!(Some((1.0f32, "one", 1u32)), arch.insert_bundle(1, (111.0f32, "one", 1u32)).unwrap());
+        assert_eq!(
+            Some((1.0f32, "one", 1u32)),
+            arch.insert_bundle(1, (111.0f32, "one", 1u32)).unwrap()
+        );
         assert_eq!(
             (111.0f32, "one", 1u32),
             arch.remove_bundle(1).unwrap().unwrap()
@@ -414,15 +420,8 @@ mod test {
             c.set_value("000");
         })
         .unwrap();
-        let actual: Option<String> = arch
-            .visit::<&str, _>(0, |c| c.to_string())
-            .unwrap();
-        assert_eq!(
-            Some("000".to_string()),
-            actual,
-            "{:#?}",
-            arch.entity_lookup
-        );
+        let actual: Option<String> = arch.visit::<&str, _>(0, |c| c.to_string()).unwrap();
+        assert_eq!(Some("000".to_string()), actual, "{:#?}", arch.entity_lookup);
     }
 
     #[test]
@@ -436,7 +435,12 @@ mod test {
         );
         fn assert_matches<B: IsBundle>(a: &Archetype) {
             match a.matches_bundle::<B>() {
-                Ok(does) => assert!(does, "{:?} != {:?}", B::ordered_types().unwrap(), a.entry_types),
+                Ok(does) => assert!(
+                    does,
+                    "{:?} != {:?}",
+                    B::ordered_types().unwrap(),
+                    a.entry_types
+                ),
                 Err(e) => panic!("{}", e),
             }
         }

@@ -1,8 +1,10 @@
 //! Entity components stored together in contiguous arrays.
-mod archetype;
-pub use archetype::*;
-mod bundle;
-pub use bundle::*;
 mod all;
-pub mod query;
+mod archetype;
+mod bundle;
+mod query;
+
 pub use all::*;
+pub use archetype::*;
+pub use bundle::*;
+pub use query::*;

@@ -31,12 +31,13 @@ pub fn sep() -> VecStorage<Data> {
 }
 
 macro_rules! create_entities_arch {
-    ($all:ident; $( $variants:ident ),*) => {
+    ($all:ident; $ent:ident; $( $variants:ident ),*) => {
         $(
             struct $variants(f32);
             (0..20)
-                .for_each(|id| {
-                    let _ = $all.insert_bundle(id, ($variants(0.0), Data(1.0)));
+                .for_each(|n| {
+                    let _ = $all.insert_bundle($ent, ($variants(0.0), Data(1.0)));
+                    $ent += n;
                 });
         )*
     };
@@ -44,10 +45,11 @@ macro_rules! create_entities_arch {
 
 pub fn arch() -> AllArchetypes {
     let mut all: AllArchetypes = AllArchetypes::default();
-    create_entities_arch!(all; A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z);
+    let mut id = 0;
+    create_entities_arch!(all; id; A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z);
     all
 }
 
 pub fn tick_arch(all: &mut AllArchetypes) {
-    all.for_each::<&mut Data>(|mut data| data.0 *= 2.0);
+    all.for_each::<&mut Data>(|data| data.0 *= 2.0);
 }

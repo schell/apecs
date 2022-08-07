@@ -3,7 +3,7 @@ use std::any::TypeId;
 
 use smallvec::SmallVec;
 
-use crate::storage::{Mut, Ref, Entry};
+use crate::storage::Entry;
 
 use super::{bundle::*, Archetype, InnerColumn};
 
