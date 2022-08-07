@@ -191,9 +191,6 @@ impl ResourceManager {
             // put the exclusively borrowed resources back, there should be nothing stored
             // there currently
             let prev = self.world_resources.insert(rez_id.clone(), resource);
-            if cfg!(feature = "debug-async") && prev.is_some() {
-                anyhow::bail!("'{}' sent back duplicate resources", label);
-            }
             anyhow::ensure!(
                 self.loaned_muts.remove(&rez_id),
                 "{} was not removed from loaned_muts",

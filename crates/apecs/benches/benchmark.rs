@@ -3,7 +3,8 @@ use criterion::{criterion_group, criterion_main, Criterion};
 mod add_remove;
 mod frag_iter;
 mod heavy_compute;
-mod schedule;
+mod schedule_separate;
+mod schedule_archetype;
 mod simple_insert;
 mod simple_iter;
 
@@ -76,7 +77,7 @@ fn bench_add_remove(c: &mut Criterion) {
     //   criterion::PlotConfiguration::default().
     //summary_scale(criterion::AxisScale::Logarithmic);
     //group.plot_config(plot_config);
-
+    group.throughput(criterion::Throughput::Elements(10_000));
     group.bench_function("apecs::separate", |b| {
         let mut bench = add_remove::BenchmarkSeparate::new();
         b.iter(move || bench.run());
@@ -196,8 +197,12 @@ fn bench_frag_iter(c: &mut Criterion) {
 fn bench_schedule(c: &mut Criterion) {
     let mut group = c.benchmark_group("schedule");
 
-    group.bench_function("apecs", |b| {
-        let mut bench = schedule::Benchmark::new();
+    group.bench_function("apecs::separate", |b| {
+        let mut bench = schedule_separate::Benchmark::new();
+        b.iter(move || bench.run())
+    });
+    group.bench_function("apecs::archetype", |b| {
+        let mut bench = schedule_archetype::Benchmark::new();
         b.iter(move || bench.run())
     });
     group.bench_function("legion", |b| {
@@ -227,8 +232,13 @@ fn bench_schedule(c: &mut Criterion) {
 fn bench_heavy_compute(c: &mut Criterion) {
     let mut group = c.benchmark_group("heavy_compute");
 
-    group.bench_function("apecs::storage::VecStorage", |b| {
-        let mut bench = heavy_compute::Benchmark::new()
+    group.bench_function("apecs::storage::archetype", |b| {
+        let mut bench = heavy_compute::BenchmarkArchetype::new()
+            .unwrap();
+        b.iter(move || bench.run());
+    });
+    group.bench_function("apecs::storage::separate", |b| {
+        let mut bench = heavy_compute::BenchmarkSeparate::new()
         .unwrap();
         b.iter(move || bench.run());
     });

@@ -1,6 +1,7 @@
 //! Operate on all archetypes.
-use std::any::TypeId;
+use std::{any::TypeId, ops::DerefMut};
 
+use any_vec::AnyVec;
 use smallvec::SmallVec;
 
 use crate::storage::Entry;
@@ -132,9 +133,63 @@ impl AllArchetypes {
     pub fn insert_component<T: Send + Sync + 'static>(
         &mut self,
         entity_id: usize,
-        component: T,
+        mut component: T,
     ) -> Option<T> {
-        self.insert_bundle(entity_id, (component,)).map(|(t,)| t)
+        let ty = TypeId::of::<Entry<T>>();
+        let mut new_entry_bundle: Option<AnyBundle> = None;
+
+        for arch in self.archetypes.iter_mut() {
+            match (arch.index_of(&ty), arch.entity_lookup.get(&entity_id)) {
+                (None, Some(_)) => {
+                    // we have to remove, repack w/ new comp and then store in a new archetype
+                    new_entry_bundle =
+                        Some(arch.remove_any_entry_bundle(entity_id).unwrap().unwrap());
+                    break;
+                }
+                (Some(ty_ndx), Some(ent_ndx)) => {
+                    let mut data = arch.data[ty_ndx].write();
+                    let mut entries = data.downcast_mut::<Entry<T>>().expect("can't downcast");
+                    std::mem::swap(
+                        entries.get_mut(*ent_ndx).unwrap().deref_mut(),
+                        &mut component,
+                    );
+                    return Some(component);
+                }
+                _ => {}
+            }
+        }
+
+        let entry_bundle = if let Some(mut bundle) = new_entry_bundle {
+            bundle.insert(ty, AnyVec::wrap(Entry::new(entity_id, component)));
+            bundle
+        } else {
+            (component,)
+                .into_entry_bundle(entity_id)
+                .try_into_any_bundle()
+                .unwrap()
+        };
+        let entry_bundle_types = entry_bundle.type_info();
+        // now search for an archetype to store the bundle
+        for arch in self.archetypes.iter_mut() {
+            if arch.entry_types.as_slice() == entry_bundle_types {
+                // we found the archetype that can store our bundle, so store it
+                let no_previous_bundle = arch
+                    .insert_any_entry_bundle(entity_id, entry_bundle)
+                    .unwrap()
+                    .is_none();
+                assert!(
+                    no_previous_bundle,
+                    "the archetype had a bundle at the entity"
+                );
+                return None;
+            }
+        }
+
+        // we couldn't find any existing archetypes that can hold the bundle, so make a
+        // new one
+        let new_arch = Archetype::try_from_any_entry_bundle(Some(entity_id), entry_bundle).unwrap();
+        self.archetypes.push(new_arch);
+        None
     }
 
     // Visit a specific component with a closure.
@@ -165,7 +220,8 @@ impl AllArchetypes {
         None
     }
 
-    /// Remove all component entries of the given entity and return them in an untyped bundle.
+    /// Remove all component entries of the given entity and return them in an
+    /// untyped bundle.
     pub fn remove_any_entry_bundle(&mut self, entity_id: usize) -> Option<AnyBundle> {
         for arch in self.archetypes.iter_mut() {
             if let Some(bundle) = arch.remove_any_entry_bundle(entity_id).unwrap() {
@@ -185,13 +241,15 @@ impl AllArchetypes {
     /// Panics if the component types are not unique.
     pub fn remove_bundle<B: IsBundle>(&mut self, entity_id: usize) -> Option<B> {
         let any_entry_bundle = self.remove_any_entry_bundle(entity_id)?;
-        let entry_bundle = <B::EntryBundle as IsBundle>::try_from_any_bundle(any_entry_bundle).unwrap();
+        let entry_bundle =
+            <B::EntryBundle as IsBundle>::try_from_any_bundle(any_entry_bundle).unwrap();
         let bundle = B::from_entry_bundle(entry_bundle);
         Some(bundle)
     }
 
     /// Remove a single component from the given entity.
     pub fn remove_component<T: Send + Sync + 'static>(&mut self, entity_id: usize) -> Option<T> {
+        #[inline]
         fn only_remove<S: Send + Sync + 'static>(
             id: usize,
             all: &mut AllArchetypes,
@@ -214,8 +272,10 @@ impl AllArchetypes {
             for arch in self.archetypes.iter_mut() {
                 if arch.entry_types.as_slice() == entry_bundle_types {
                     // we found the archetype that can store our bundle, so store it
-                    let no_previous_bundle =
-                        arch.insert_any_entry_bundle(entity_id, entry_bundle).unwrap().is_none();
+                    let no_previous_bundle = arch
+                        .insert_any_entry_bundle(entity_id, entry_bundle)
+                        .unwrap()
+                        .is_none();
                     assert!(
                         no_previous_bundle,
                         "the archetype had a bundle at the entity"
@@ -226,7 +286,8 @@ impl AllArchetypes {
 
             // we couldn't find any existing archetypes that can hold the bundle, so make a
             // new one
-            let new_arch = Archetype::try_from_any_entry_bundle(Some(entity_id), entry_bundle).unwrap();
+            let new_arch =
+                Archetype::try_from_any_entry_bundle(Some(entity_id), entry_bundle).unwrap();
             self.archetypes.push(new_arch);
         }
         prev

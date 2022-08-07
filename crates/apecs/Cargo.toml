@@ -13,8 +13,10 @@ description = "An asyncronous and parallel entity-component system"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
-default = []
+default = ["storage-archetype", "storage-separated"]
 debug-async = []
+storage-archetype = []
+storage-separated = []
 
 [lib]
 name = "apecs"

@@ -1,4 +1,4 @@
-use apecs::{anyhow, storage::separated::*, system::*, world::*, CanFetch};
+use apecs::{anyhow, storage::{archetype::*, separated::*}, system::*, world::*, CanFetch};
 use cgmath::*;
 use rayon::prelude::*;
 
@@ -33,9 +33,9 @@ fn system(mut data: HeavyComputeData) -> anyhow::Result<ShouldContinue> {
     ok()
 }
 
-pub struct Benchmark(World);
+pub struct BenchmarkSeparate(World);
 
-impl Benchmark {
+impl BenchmarkSeparate {
     pub fn new() -> anyhow::Result<Self> {
         let mut entities = Entities::default();
         let mut transforms = VecStorage::<Transform>::new_with_capacity(1000);
@@ -63,5 +63,33 @@ impl Benchmark {
 
     pub fn run(&mut self) {
         self.0.tick_sync().unwrap();
+    }
+}
+
+pub struct BenchmarkArchetype(AllArchetypes);
+
+impl BenchmarkArchetype {
+    pub fn new() -> anyhow::Result<Self> {
+        let mut archs = AllArchetypes::default();
+        archs.insert_archetype(
+            ArchetypeBuilder::default()
+                .with_components(0, (0..1000).map(|_| Transform(Matrix4::<f32>::from_angle_x(Rad(1.2)))))
+                .with_components(0, (0..1000).map(|_| Position(Vector3::unit_x())))
+                .with_components(0, (0..1000).map(|_| Rotation(Vector3::unit_x())))
+                .with_components(0, (0..1000).map(|_| Velocity(Vector3::unit_x())))
+                .build()
+        );
+
+        Ok(Self(archs))
+    }
+
+    pub fn run(&mut self) {
+        self.0.par_for_each::<(&mut Position, &mut Transform)>(|(pos, mat)| {
+            use cgmath::Transform;
+            for _ in 0..100 {
+                mat.0 = mat.0.invert().unwrap();
+            }
+            pos.0 = mat.0.transform_vector(pos.0);
+        });
     }
 }

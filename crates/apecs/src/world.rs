@@ -255,7 +255,6 @@ impl<'a> SeparateEntityBuilder<'a> {
 
 pub struct Entities {
     pub next_k: usize,
-    pub alive_set: BitSet,
     pub dead: Vec<Entity>,
     pub recycle: Vec<Entity>,
     pub lazy_op_sender: mpsc::Sender<LazyOp>,
@@ -265,7 +264,6 @@ impl Default for Entities {
     fn default() -> Self {
         Self {
             next_k: Default::default(),
-            alive_set: Default::default(),
             dead: Default::default(),
             recycle: Default::default(),
             lazy_op_sender: mpsc::unbounded().0,
@@ -277,7 +275,6 @@ impl Entities {
     pub fn new(lazy_op_sender: mpsc::Sender<LazyOp>) -> Self {
         Self {
             next_k: 0,
-            alive_set: BitSet::new(),
             dead: Default::default(),
             recycle: Default::default(),
             lazy_op_sender,
@@ -285,7 +282,7 @@ impl Entities {
     }
 
     pub fn create(&mut self) -> Entity {
-        let entity = if self.recycle.is_empty() {
+        self.recycle.pop().unwrap_or_else(|| {
             let id = self.next_k;
             self.next_k += 1;
             Entity {
@@ -294,22 +291,12 @@ impl Entities {
                 op_sender: self.lazy_op_sender.clone(),
                 op_receivers: Default::default(),
             }
-        } else {
-            self.recycle.pop().unwrap()
-        };
-
-        self.alive_set.add(entity.id.try_into().unwrap());
-        entity
+        })
     }
 
     pub fn destroy(&mut self, mut entity: Entity) {
         entity.op_receivers = Default::default();
-        self.alive_set.remove(entity.id.try_into().unwrap());
         self.dead.push(entity);
-    }
-
-    pub fn iter(&self) -> Map<BitIter<&BitSet>, fn(u32) -> usize> {
-        (&self.alive_set).iter().map(|id| id as usize)
     }
 
     pub fn recycle_dead(&mut self) {
@@ -317,16 +304,6 @@ impl Entities {
             dead.gen += 1;
             self.recycle.push(dead);
         }
-    }
-}
-
-impl<'a> IntoIterator for &'a Entities {
-    type Item = usize;
-
-    type IntoIter = Map<BitIter<&'a BitSet>, fn(u32) -> usize>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.iter()
     }
 }
 
@@ -705,7 +682,7 @@ mod test {
 
     use crate::{
         self as apecs,
-        storage::archetype::{AllArchetypes, query::Query},
+        storage::archetype::{AllArchetypes, Query},
     };
     use apecs::{
         anyhow, spsc, storage::separated::*, system::*, world::*, Read, Write, WriteExpect,
@@ -983,57 +960,59 @@ mod test {
         assert_eq!(&0.0, rx.try_recv().unwrap());
     }
 
-    //#[test]
-    //fn can_query_empty_ref_archetypes_in_same_batch() {
-    //    let _ = env_logger::builder()
-    //        .is_test(true)
-    //        .filter_level(log::LevelFilter::Trace)
-    //        .try_init();
+    #[test]
+    fn can_query_empty_ref_archetypes_in_same_batch() {
+        let _ = env_logger::builder()
+            .is_test(true)
+            .filter_level(log::LevelFilter::Trace)
+            .try_init();
 
-    //    let mut world = World::default();
-    //    world
-    //        .with_resource(AllArchetypes::default())
-    //        .unwrap()
-    //        .with_system("one", |mut query: Query<(&f32, &bool)>| {
-    //            for (_f, _b) in query.run() {}
-    //            ok()
-    //        })
-    //        .unwrap()
-    //        .with_system("two", |mut query: Query<(&f32, &bool)>| {
-    //            for (_f, _b) in query.run() {}
-    //            ok()
-    //        })
-    //        .unwrap();
-    //    world.tick().unwrap();
-    //}
+        let mut world = World::default();
+        world
+            .with_resource(AllArchetypes::default())
+            .unwrap()
+            .with_system("one", |query: Query<(&f32, &bool)>| {
+                query.for_each(|(_f, _b)| {});
+                ok()
+            })
+            .unwrap()
+            .with_system("two", |query: Query<(&f32, &bool)>| {
+                query.for_each(|(_f, _b)| {});
+                ok()
+            })
+            .unwrap();
+        world.tick().unwrap();
+    }
 
-    //#[test]
-    //fn can_query_ref_archetypes_in_same_batch() {
-    //    let _ = env_logger::builder()
-    //        .is_test(true)
-    //        .filter_level(log::LevelFilter::Trace)
-    //        .try_init();
+    #[test]
+    fn can_query_ref_archetypes_in_same_batch() {
+        let _ = env_logger::builder()
+            .is_test(true)
+            .filter_level(log::LevelFilter::Trace)
+            .try_init();
 
-    //    let mut all = AllArchetypes::default();
-    //    all.insert_bundle(0, (0.0f32, true));
-    //    all.insert_bundle(1, (1.0f32, false));
+        let mut all = AllArchetypes::default();
+        all.insert_bundle(0, (0.0f32, true));
+        all.insert_bundle(1, (1.0f32, false));
 
-    //    let mut world = World::default();
-    //    world
-    //        .with_resource(all)
-    //        .unwrap()
-    //        .with_system("one", |mut query: Query<(&f32, &bool)>| {
-    //            let q = query.run().map(|(f, b)| (f.id(), *f, *b)).collect::<Vec<_>>();
-    //            assert_eq!(vec![(0, 0.0, true), (1, 1.0, false)], q);
-    //            ok()
-    //        })
-    //        .unwrap()
-    //        .with_system("two", |mut query: Query<(&f32, &bool)>| {
-    //            let q = query.run().map(|(f, b)| (f.id(), *f, *b)).collect::<Vec<_>>();
-    //            assert_eq!(vec![(0, 0.0, true), (1, 1.0, false)], q);
-    //            ok()
-    //        })
-    //        .unwrap();
-    //    world.tick().unwrap();
-    //}
+        let mut world = World::default();
+        world
+            .with_resource(all)
+            .unwrap()
+            .with_system("one", |query: Query<(&f32, &bool)>| {
+                let mut q = vec![];
+                query.for_each(|(f, b)| q.push((f.id(), **f, **b)));
+                assert_eq!(vec![(0, 0.0, true), (1, 1.0, false)], q);
+                ok()
+            })
+            .unwrap()
+            .with_system("two", |query: Query<(&f32, &bool)>| {
+                let mut q = vec![];
+                query.for_each(|(f, b)| q.push((f.id(), **f, **b)));
+                assert_eq!(vec![(0, 0.0, true), (1, 1.0, false)], q);
+                ok()
+            })
+            .unwrap();
+        world.tick().unwrap();
+    }
 }

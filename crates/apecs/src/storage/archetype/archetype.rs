@@ -1,9 +1,5 @@
 //! Entity components stored together in contiguous arrays.
-use std::{
-    any::TypeId,
-    ops::DerefMut,
-    sync::Arc,
-};
+use std::{any::TypeId, ops::DerefMut, sync::Arc};
 
 use any_vec::{any_value::AnyValueMut, traits::*, AnyVec};
 use anyhow::Context;
@@ -36,6 +32,7 @@ pub struct ArchetypeBuilder {
     archetype: Archetype,
 }
 
+// TODO: Add entities in build, not in with_components
 impl ArchetypeBuilder {
     pub fn with_components<T: Send + Sync + 'static>(
         mut self,
@@ -74,11 +71,9 @@ impl ArchetypeBuilder {
 
     pub fn build(mut self) -> Archetype {
         self.archetype.entry_types.sort();
-        self.archetype.data.sort_by(|a, b| {
-            a.read()
-                .element_typeid()
-                .cmp(&b.read().element_typeid())
-        });
+        self.archetype
+            .data
+            .sort_by(|a, b| a.read().element_typeid().cmp(&b.read().element_typeid()));
         self.archetype
     }
 }
@@ -181,7 +176,7 @@ impl Archetype {
         Some(col)
     }
 
-    /// Insert a component bundle with the given entity id.
+    /// Insert a bundle of components with the given entity id.
     ///
     /// ## Errs
     /// Errs if the bundle's types don't match the `Archetype`, or if the bundle
@@ -242,9 +237,7 @@ impl Archetype {
         anyhow::ensure!(self.entry_types == bundle.0, "types don't match");
         Ok(
             if let Some(entity_index) = self.entity_lookup.get(&entity_id) {
-                for (ty, component_vec) in bundle.0.iter().zip(bundle.1.iter_mut()) {
-                    debug_assert_eq!(ty, &component_vec.element_typeid());
-                    let ty_index = self.index_of(ty).context("missing column")?;
+                for (ty_index, component_vec) in bundle.1.iter_mut().enumerate() {
                     let mut data = self.data[ty_index].write();
                     let mut element_a = data.at_mut(*entity_index);
                     let mut element_b = component_vec.at_mut(0);
@@ -255,11 +248,7 @@ impl Archetype {
                 let last_index = self.entity_lookup.len();
                 assert!(self.entity_lookup.insert(entity_id, last_index).is_none());
                 self.index_lookup.push(entity_id);
-                for (ty, mut component_vec) in bundle.0.into_iter().zip(bundle.1.into_iter()) {
-                    debug_assert_eq!(ty, component_vec.element_typeid());
-                    let ty_index = self
-                        .index_of(&ty)
-                        .with_context(|| format!("missing column: {:?}", ty))?;
+                for (ty_index, mut component_vec) in bundle.1.into_iter().enumerate() {
                     let mut data = self.data[ty_index].write();
                     debug_assert_eq!(component_vec.element_typeid(), data.element_typeid());
                     data.push(component_vec.pop().unwrap());
@@ -524,18 +513,6 @@ mod test {
     //        );
     //    }
     //}
-
-    #[test]
-    fn mut_sanity() {
-        let mut a = 0.0f32;
-        let mut e = EntityInfo::new(0);
-        {
-            let mut m = Mut(&mut e, &mut a);
-            *m = 1.0;
-        }
-
-        assert_eq!(1.0, a);
-    }
 
     #[test]
     fn any_vec_into_iter_sanity() {
