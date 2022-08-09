@@ -69,9 +69,6 @@ pub use fetch::*;
 pub trait IsResource: Any + Send + Sync + 'static {}
 impl<T: Any + Send + Sync + 'static> IsResource for T {}
 
-pub trait IsComponent: Any + Send + Sync + 'static {}
-impl<T: Any + Send + Sync + 'static> IsComponent for T {}
-
 /// A type-erased resource.
 pub type Resource = Box<dyn Any + Send + Sync + 'static>;
 
@@ -147,13 +144,6 @@ impl ResourceId {
             name: std::any::type_name::<T>(),
         }
     }
-
-    // pub fn new_storage<T: IsComponent>() -> Self {
-    //    ResourceId {
-    //        type_id: ResourceTypeId::Storage(TypeId::of::<T>()),
-    //        name: std::any::type_name::<T>().to_string(),
-    //    }
-    //}
 }
 
 /// Wrapper for one fetched resource.

@@ -2,7 +2,9 @@
 use std::{any::TypeId, marker::PhantomData};
 
 use any_vec::{traits::*, AnyVec};
-use parking_lot::{RwLockReadGuard, RwLockWriteGuard};
+use parking_lot::{
+    MappedRwLockReadGuard, MappedRwLockWriteGuard, RwLockReadGuard, RwLockWriteGuard,
+};
 use rayon::iter::{
     IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, ParallelIterator,
 };
@@ -33,11 +35,18 @@ pub trait IsQuery {
     type QueryRow<'a>: Send + Sync;
 
     fn borrows() -> Vec<Borrow>;
+
     /// Find and acquire a "lock" on the columns for reading or writing.
     fn lock_columns<'a>(arch: &'a Archetype) -> Self::LockedColumns<'a>;
 
     /// Create an iterator over the rows of the given columns.
     fn iter_mut<'a, 'b>(lock: &'b mut Self::LockedColumns<'a>) -> Self::QueryResult<'b>;
+
+    /// Create an iterator over one row with the given index.
+    fn iter_one<'a, 'b>(
+        lock: &'b mut Self::LockedColumns<'a>,
+        index: usize,
+    ) -> Self::QueryResult<'b>;
 
     /// Create an iterator over the rows of the given columns.
     fn par_iter_mut<'a, 'b>(lock: &'b mut Self::LockedColumns<'a>) -> Self::ParQueryResult<'b>;
@@ -71,6 +80,22 @@ impl<'s, T: Send + Sync + 'static> IsQuery for &'s T {
             |data| {
                 data.downcast_ref::<Entry<T>>()
                     .expect("can't downcast")
+                    .into_iter()
+            },
+        )
+    }
+
+    #[inline]
+    fn iter_one<'a, 'b>(
+        lock: &'b mut Self::LockedColumns<'a>,
+        index: usize,
+    ) -> Self::QueryResult<'b> {
+        lock.as_ref().map_or_else(
+            || (&[]).into_iter(),
+            |data| {
+                data.downcast_ref::<Entry<T>>()
+                    .expect("can't downcast")
+                    .as_slice()[index..=index]
                     .into_iter()
             },
         )
@@ -123,6 +148,23 @@ impl<'s, T: Send + Sync + 'static> IsQuery for &'s mut T {
         )
     }
 
+    #[inline]
+    fn iter_one<'a, 'b>(
+        lock: &'b mut Self::LockedColumns<'a>,
+        index: usize,
+    ) -> Self::QueryResult<'b> {
+        lock.as_mut().map_or_else(
+            || (&mut []).into_iter(),
+            |data| {
+                (&mut data
+                    .downcast_mut::<Entry<T>>()
+                    .expect("can't downcast")
+                    .as_mut_slice()[index..=index])
+                    .into_iter()
+            },
+        )
+    }
+
     /// Create an iterator over the rows of the given columns.
     fn par_iter_mut<'a, 'b>(lock: &'b mut Self::LockedColumns<'a>) -> Self::ParQueryResult<'b> {
         lock.as_mut().map_or_else(
@@ -169,6 +211,13 @@ where
         (col_a, col_b): &'b mut Self::LockedColumns<'a>,
     ) -> Self::ParQueryResult<'b> {
         A::par_iter_mut(col_a).zip(B::par_iter_mut(col_b))
+    }
+
+    fn iter_one<'a, 'b>(
+        (col_a, col_b): &'b mut Self::LockedColumns<'a>,
+        index: usize,
+    ) -> Self::QueryResult<'b> {
+        A::iter_one(col_a, index).zip(B::iter_one(col_b, index))
     }
 }
 
@@ -223,6 +272,16 @@ where
             .map(|((a, b), c)| (a, b, c))
     }
 
+    fn iter_one<'a, 'b>(
+        (a, b, c): &'b mut Self::LockedColumns<'a>,
+        index: usize,
+    ) -> Self::QueryResult<'b> {
+        A::iter_one(a, index)
+            .zip(B::iter_one(b, index))
+            .zip(C::iter_one(c, index))
+            .map(|((a, b), c)| (a, b, c))
+    }
+
     fn par_iter_mut<'a, 'b>(
         (col_a, col_b, col_c): &'b mut Self::LockedColumns<'a>,
     ) -> Self::ParQueryResult<'b> {
@@ -255,6 +314,18 @@ impl Archetype {
         let mut cols = Q::lock_columns(self);
         Q::iter_mut(&mut cols).fold(init, f)
     }
+
+    pub fn visit_bundle<Q: IsQuery + 'static, A>(
+        &self,
+        entity_id: usize,
+        f: impl FnOnce(Q::QueryRow<'_>) -> A,
+    ) -> Option<A> {
+        let index = self.entity_lookup.get(&entity_id)?;
+        let mut cols = Q::lock_columns(self);
+        let mut iter: Q::QueryResult<'_> = Q::iter_one(&mut cols, *index);
+        let entry_bundle: Option<Q::QueryRow<'_>> = iter.next();
+        entry_bundle.map(f)
+    }
 }
 
 impl AllArchetypes {
@@ -284,6 +355,20 @@ impl AllArchetypes {
             init = arch.fold::<Q, T>(init, &mut f);
         }
         init
+    }
+
+    pub fn visit_bundle<Q: IsQuery + 'static, A>(
+        &self,
+        entity_id: usize,
+        mut f: impl FnMut(Q::QueryRow<'_>) -> A,
+    ) -> Option<A> {
+        for arch in self.archetypes.iter() {
+            let result = arch.visit_bundle::<Q, A>(entity_id, &mut f);
+            if result.is_some() {
+                return result;
+            }
+        }
+        None
     }
 }
 
@@ -329,8 +414,9 @@ where
 
 #[cfg(test)]
 mod test {
+    use std::ops::DerefMut;
+
     use super::*;
-    use std::ops::{Deref, DerefMut};
 
     #[test]
     fn can_query_archetype() {
@@ -401,16 +487,44 @@ mod test {
         });
         assert_eq!(3, i);
 
-        println!("query 3");
-        store.for_each::<(&String, &mut bool, &mut f32)>(|(s, is_on, f)| {
-            **is_on = true;
-            **f = s.len() as f32;
+        // println!("query 3");
+        // store.for_each::<(&String, &mut bool, &mut f32)>(|(s, is_on, f)| {
+        //    **is_on = true;
+        //    **f = s.len() as f32;
+        //});
+
+        // println!("query 4");
+        // store.for_each::<(&bool, &f32, &String)>(|(is_on, f, s)| {
+        //    assert!(**is_on);
+        //    assert_eq!(**f, s.len() as f32, "{}.len() != {}", **s, **f);
+        //})
+    }
+
+    #[test]
+    fn query_one() {
+        let mut store = AllArchetypes::default();
+        store.insert_bundle(0, (0.0f32, "zero".to_string(), false));
+        store.insert_bundle(1, (1.0f32, "one".to_string(), false));
+        store.insert_bundle(2, (2.0f32, "two".to_string(), false));
+
+        store.visit_bundle::<(&mut f32, &mut String, &bool), ()>(1, |(f, s, b)| {
+            println!("blah");
+            *f.deref_mut() = 666.0;
+            **s = format!("blah {:?} {:?}", f.value(), b.value())
         });
 
-        println!("query 4");
-        store.for_each::<(&bool, &f32, &String)>(|(is_on, f, s)| {
-            assert!(**is_on);
-            assert_eq!(**f, s.len() as f32, "{}.len() != {}", **s, **f);
-        })
+        let vs = store.fold::<(&f32, &String, &bool), _>(vec![], |mut vs, (f, s, b)| {
+            vs.push((f.id(), **f, s.to_string(), **b));
+            vs
+        });
+
+        assert_eq!(
+            vec![
+                (0usize, 0.0f32, "zero".to_string(), false,),
+                (1, 666.0, "blah 666.0 false".to_string(), false,),
+                (2, 2.0, "two".to_string(), false,),
+            ],
+            vs
+        );
     }
 }

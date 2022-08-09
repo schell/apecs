@@ -4,7 +4,9 @@
 //! They are not meant to be used together at this time.
 //! To read more about the difference between separated and archetypal storage
 //! check out [this article](https://csherratt.github.io/blog/posts/specs-and-legion/).
+#[cfg(feature = "storage-archetype")]
 pub mod archetype;
+#[cfg(feature = "storage-separated")]
 pub mod separated;
 
 use std::ops::{Deref, DerefMut};

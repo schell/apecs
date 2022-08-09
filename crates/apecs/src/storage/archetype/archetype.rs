@@ -3,7 +3,7 @@ use std::{any::TypeId, ops::DerefMut, sync::Arc};
 
 use any_vec::{any_value::AnyValueMut, traits::*, AnyVec};
 use anyhow::Context;
-use parking_lot::RwLock;
+use parking_lot::{MappedRwLockReadGuard, RwLock};
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
@@ -355,7 +355,6 @@ impl Archetype {
 #[cfg(test)]
 mod test {
     use any_vec::{mem::Heap, AnyVecMut, AnyVecRef};
-    use std::ops::{Deref, DerefMut};
 
     use crate::storage::*;
 
