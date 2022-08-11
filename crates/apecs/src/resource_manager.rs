@@ -191,6 +191,7 @@ impl ResourceManager {
             // put the exclusively borrowed resources back, there should be nothing stored
             // there currently
             let prev = self.world_resources.insert(rez_id.clone(), resource);
+            debug_assert!(prev.is_none());
             anyhow::ensure!(
                 self.loaned_muts.remove(&rez_id),
                 "{} was not removed from loaned_muts",

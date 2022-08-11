@@ -62,8 +62,8 @@ impl BenchmarkArchetype {
     }
 
     pub fn run(&mut self) {
-        self.0.for_each::<(&Velocity, &mut Position)>(|(velocity, position)| {
+        for (velocity, position) in self.0.query::<(&Velocity, &mut Position)>().iter_mut() {
             position.0 += velocity.0;
-        });
+        }
     }
 }

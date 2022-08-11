@@ -1,4 +1,4 @@
-use apecs::{anyhow, storage::archetype::*, system::*, world::*, CanFetch, Write};
+use apecs::{anyhow, storage::archetype::*, system::*, world::*};
 
 struct A(f32);
 struct B(f32);
@@ -7,21 +7,24 @@ struct D(f32);
 struct E(f32);
 
 fn ab_system(query: Query<(&mut A, &mut B)>) -> anyhow::Result<ShouldContinue> {
-    query.for_each(|(a, b)| {
+    let mut lock = query.lock();
+    lock.iter_mut().for_each(|(a, b)| {
         std::mem::swap(&mut a.0, &mut b.0);
     });
     ok()
 }
 
 fn cd_system(query: Query<(&mut C, &mut D)>) -> anyhow::Result<ShouldContinue> {
-    query.for_each(|(c, d)| {
+    let mut lock = query.lock();
+    lock.iter_mut().for_each(|(c, d)| {
         std::mem::swap(&mut c.0, &mut d.0);
     });
     ok()
 }
 
 fn ce_system(query: Query<(&mut C, &mut E)>) -> anyhow::Result<ShouldContinue> {
-    query.for_each(|(c, e)| {
+    let mut lock = query.lock();
+    lock.iter_mut().for_each(|(c, e)| {
         std::mem::swap(&mut c.0, &mut e.0);
     });
     ok()

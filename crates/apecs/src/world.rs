@@ -2,25 +2,23 @@
 //! systems.
 use std::any::Any;
 use std::future::Future;
+use std::ops::Deref;
 use std::sync::Arc;
-use std::{
-    ops::Deref,
-};
 
 use anyhow::Context;
 use async_oneshot::oneshot;
 use rustc_hash::FxHashSet;
 
+#[cfg(feature = "storage-archetype")]
+use crate::storage::archetype::*;
+#[cfg(feature = "storage-separated")]
+use crate::storage::separated::*;
 use crate::{
     mpsc, oneshot,
     plugins::Plugin,
     resource_manager::{LoanManager, ResourceManager},
     schedule::{IsSchedule, UntypedSystemData},
     spsc,
-    storage::{
-        archetype::{AllArchetypes, IsBundle},
-        separated::{ReadStore, SeparateStorageExt, VecStorage, WriteStore},
-    },
     system::{
         AsyncSchedule, AsyncSystem, AsyncSystemFuture, AsyncSystemRequest, ShouldContinue,
         SyncSchedule, SyncSystem,
@@ -141,7 +139,7 @@ impl Entity {
         self.id
     }
 
-    #[cfg(feature = "storage-separate")]
+    #[cfg(feature = "storage-separated")]
     /// Lazily add a component to separated storage.
     ///
     /// This entity will have the associated component after the next tick.
@@ -150,7 +148,7 @@ impl Entity {
         Ok(self)
     }
 
-    #[cfg(feature = "storage-separate")]
+    #[cfg(feature = "storage-separated")]
     /// Lazily add a component to separated storage.
     ///
     /// This entity will have the associated component after the next tick.
@@ -179,7 +177,10 @@ impl Entity {
     /// Lazily add a component bundle to archetype storage.
     ///
     /// This entity will have the associated components after the next tick.
-    pub fn with_bundle<B: IsBundle + Send + Sync + 'static>(mut self, bundle: B) -> anyhow::Result<Self> {
+    pub fn with_bundle<B: IsBundle + Send + Sync + 'static>(
+        mut self,
+        bundle: B,
+    ) -> anyhow::Result<Self> {
         self.add_bundle(bundle)?;
         Ok(self)
     }
@@ -188,7 +189,10 @@ impl Entity {
     /// Lazily add a component bundle to archetype storage.
     ///
     /// This entity will have the associated components after the next tick.
-    pub fn add_bundle<B: IsBundle + Send + Sync + 'static>(&mut self, bundle: B) -> anyhow::Result<()> {
+    pub fn add_bundle<B: IsBundle + Send + Sync + 'static>(
+        &mut self,
+        bundle: B,
+    ) -> anyhow::Result<()> {
         use crate::Write;
 
         let id = self.id;
@@ -196,7 +200,7 @@ impl Entity {
         let op = LazyOp {
             op: Box::new(move |world: &mut World| {
                 if !world.has_resource::<AllArchetypes>() {
-                    world.with_resource(AllArchetypes::default());
+                    world.with_resource(AllArchetypes::default()).unwrap();
                 }
                 let mut all: Write<AllArchetypes> = world.fetch()?;
                 let _ = all.insert_bundle(id, bundle);
@@ -245,42 +249,48 @@ impl Entity {
         let arc: Arc<dyn Any + Send + Sync> = rx
             .await
             .map_err(|_| anyhow::anyhow!("could not receive get request"))?;
-        let arc_c: Arc<Option<T>> = arc.downcast().map_err(|_| {
-            anyhow::anyhow!("could not downcast")})?;
+        let arc_c: Arc<Option<T>> = arc
+            .downcast()
+            .map_err(|_| anyhow::anyhow!("could not downcast"))?;
         let c: Option<T> =
             Arc::try_unwrap(arc_c).map_err(|_| anyhow::anyhow!("could not unwrap"))?;
         Ok(c)
     }
 
-    //#[cfg(feature = "storage-archetype")]
-    ///// Get reference to a specific component in archetype storage, if it
-    ///// exists.
-    //pub async fn visit_bundle<B: IsBundle + Send + Sync + 'static, T>(&self, f: impl FnOnce(&B) -> T) -> anyhow::Result<Option<T>> {
-    //    use crate::Read;
+    #[cfg(feature = "storage-archetype")]
+    /// Visit a query row to a component entry bundle in archetype storage, if
+    /// it exists.
+    pub async fn visit_bundle<Q: IsQuery + 'static, T: Send + Sync + 'static>(
+        &self,
+        mut f: impl FnMut(Q::QueryRow<'_>) -> T + Send + Sync + 'static,
+    ) -> anyhow::Result<Option<T>> {
+        use crate::Read;
 
-    //    let id = self.id();
-    //    let (tx, rx) = oneshot();
-    //    self.op_sender
-    //        .try_send(LazyOp {
-    //            op: Box::new(move |world: &mut World| {
-    //                if !world.has_resource::<AllArchetypes>() {
-    //                    world.with_resource(AllArchetypes::default())?;
-    //                }
-    //                let storage: Read<AllArchetypes> = world.fetch()?;
-    //                Ok(Arc::new(storage.visit(id, f)) as Arc<dyn Any + Send + Sync>)
-    //            }),
-    //            tx,
-    //        })
-    //        .context("could not send entity op")?;
-    //    let arc: Arc<dyn Any + Send + Sync> = rx
-    //        .await
-    //        .map_err(|_| anyhow::anyhow!("could not receive get request"))?;
-    //    let arc_c: Arc<Option<T>> = arc.downcast().map_err(|_| {
-    //        anyhow::anyhow!("could not downcast")})?;
-    //    let c: Option<T> =
-    //        Arc::try_unwrap(arc_c).map_err(|_| anyhow::anyhow!("could not unwrap"))?;
-    //    Ok(c)
-    //}
+        let id = self.id();
+        let (tx, rx) = oneshot();
+        self.op_sender
+            .try_send(LazyOp {
+                op: Box::new(move |world: &mut World| {
+                    if !world.has_resource::<AllArchetypes>() {
+                        world.with_resource(AllArchetypes::default())?;
+                    }
+                    let storage: Read<AllArchetypes> = world.fetch()?;
+                    Ok(Arc::new(storage.visit_bundle::<Q, T>(id, &mut f))
+                        as Arc<dyn Any + Send + Sync>)
+                }),
+                tx,
+            })
+            .context("could not send entity op")?;
+        let arc: Arc<dyn Any + Send + Sync> = rx
+            .await
+            .map_err(|_| anyhow::anyhow!("could not receive get request"))?;
+        let arc_c: Arc<Option<T>> = arc
+            .downcast()
+            .map_err(|_| anyhow::anyhow!("could not downcast"))?;
+        let c: Option<T> =
+            Arc::try_unwrap(arc_c).map_err(|_| anyhow::anyhow!("could not unwrap"))?;
+        Ok(c)
+    }
 }
 
 pub struct SeparateEntityBuilder<'a> {
@@ -734,7 +744,7 @@ impl World {
 
 #[cfg(test)]
 mod test {
-    use std::{ops::DerefMut, sync::Mutex};
+    use std::ops::DerefMut;
 
     use crate::{
         self as apecs,
@@ -902,49 +912,49 @@ mod test {
         assert_eq!(Some(1), rx.try_recv().ok());
     }
 
+    #[test]
+    fn can_create_entities_and_build_convenience() {
+        struct DataA(f32);
+        struct DataB(f32);
+
+        let mut world = World::default();
+        assert!(world.has_resource::<Entities>(), "missing entities");
+        let e = world
+            .entity()
+            .unwrap()
+            .with(DataA(0.0))
+            .unwrap()
+            .with(DataB(0.0))
+            .unwrap()
+            .build();
+        let id = e.id();
+
+        world.with_async(async move {
+            println!("updating entity");
+            e.with_sep(DataA(666.0))
+                .unwrap()
+                .with_sep(DataB(666.0))
+                .unwrap()
+                .updates()
+                .await
+                .unwrap();
+            println!("done!");
+        });
+
+        while !world.async_task_executor.is_empty() {
+            world.tick().unwrap();
+        }
+
+        let (a_store, b_store): (ReadStore<DataA>, ReadStore<DataB>) = world.fetch().unwrap();
+        let a = a_store.get(id).unwrap();
+        assert_eq!(a.0, 666.0);
+
+        let b = b_store.get(id).unwrap();
+        assert_eq!(b.0, 666.0);
+    }
+
     //#[test]
-    //fn can_create_entities_and_build_convenience() {
-    //    struct DataA(f32);
-    //    struct DataB(f32);
-
-    //    let mut world = World::default();
-    //    assert!(world.has_resource::<Entities>(), "missing entities");
-    //    let e = world
-    //        .entity()
-    //        .unwrap()
-    //        .with(DataA(0.0))
-    //        .unwrap()
-    //        .with(DataB(0.0))
-    //        .unwrap()
-    //        .build();
-    //    let id = e.id();
-
-    //    world.with_async(async move {
-    //        println!("updating entity");
-    //        e.lazy_with(DataA(666.0))
-    //            .unwrap()
-    //            .lazy_with(DataB(666.0))
-    //            .unwrap()
-    //            .updates()
-    //            .await
-    //            .unwrap();
-    //        println!("done!");
-    //    });
-
-    //    while !world.async_task_executor.is_empty() {
-    //        world.tick().unwrap();
-    //    }
-
-    //    let (a_store, b_store): (ReadStore<DataA>, ReadStore<DataB>) = world.fetch().unwrap();
-    //    let a = a_store.get(id).unwrap();
-    //    assert_eq!(a.0, 666.0);
-
-    //    let b = b_store.get(id).unwrap();
-    //    assert_eq!(b.0, 666.0);
-    //}
-
-    //#[test]
-    //fn entities_can_lazy_add_and_get() {
+    // fn entities_can_lazy_add_and_get() {
     //    #[derive(Debug, Clone, PartialEq)]
     //    struct Name(&'static str);
 
@@ -1028,18 +1038,21 @@ mod test {
             .with_resource(AllArchetypes::default())
             .unwrap()
             .with_system("one", |query: Query<(&f32, &bool)>| {
-                query.for_each(|(_f, _b)| {});
+                let mut lock = query.lock();
+                for (_f, _b) in lock.iter_mut() {}
                 ok()
             })
             .unwrap()
             .with_system("two", |query: Query<(&f32, &bool)>| {
-                query.for_each(|(_f, _b)| {});
+                let mut lock = query.lock();
+                for (_f, _b) in lock.iter_mut() {}
                 ok()
             })
             .unwrap();
         world.tick().unwrap();
     }
 
+    #[cfg(feature = "storage-separated")]
     #[test]
     fn can_query_ref_archetypes_in_same_batch() {
         let _ = env_logger::builder()
@@ -1056,16 +1069,20 @@ mod test {
             .with_resource(all)
             .unwrap()
             .with_system("one", |query: Query<(&f32, &bool)>| {
-                let mut q = vec![];
-                query.for_each(|(f, b)| q.push((f.id(), **f, **b)));
-                assert_eq!(vec![(0, 0.0, true), (1, 1.0, false)], q);
+                let mut lock = query.lock();
+                assert_eq!(
+                    vec![(0, 0.0, true), (1, 1.0, false)],
+                    lock.iter_mut().map(|(f, b)| (f.id(), **f, **b)).collect::<Vec<_>>()
+                );
                 ok()
             })
             .unwrap()
             .with_system("two", |query: Query<(&f32, &bool)>| {
-                let mut q = vec![];
-                query.for_each(|(f, b)| q.push((f.id(), **f, **b)));
-                assert_eq!(vec![(0, 0.0, true), (1, 1.0, false)], q);
+                let mut lock = query.lock();
+                assert_eq!(
+                    vec![(0, 0.0, true), (1, 1.0, false)],
+                    lock.iter_mut().map(|(f, b)| (f.id(), **f, **b)).collect::<Vec<_>>()
+                );
                 ok()
             })
             .unwrap();

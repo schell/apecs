@@ -1,6 +1,5 @@
 use apecs::{anyhow, storage::{archetype::*, separated::*}, system::*, world::*, CanFetch};
 use cgmath::*;
-use rayon::prelude::*;
 
 #[derive(Copy, Clone)]
 pub struct Transform(Matrix4<f32>);

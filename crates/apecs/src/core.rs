@@ -297,7 +297,6 @@ impl<'a, T: IsResource + Default> Deref for Read<T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        // I don't like this unwrap, but it works
         self.inner.downcast_ref().unwrap()
     }
 }

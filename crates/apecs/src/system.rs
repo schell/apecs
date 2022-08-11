@@ -10,31 +10,21 @@ use crate::{
     CanFetch, Request, Resource,
 };
 
-//static SYSTEM_ITERATION: AtomicU64 = AtomicU64::new(0);
-static mut SYSTEM_ITERATION: u64 = 0;
+static SYSTEM_ITERATION: AtomicU64 = AtomicU64::new(0);
 
 pub fn clear_iteration() {
-    //SYSTEM_ITERATION.store(0, std::sync::atomic::Ordering::SeqCst)
-    //unsafe{ SYSTEM_ITERATION = 0; }
+    SYSTEM_ITERATION.store(0, std::sync::atomic::Ordering::Relaxed)
 }
 
 #[inline]
 pub fn current_iteration() -> u64 {
-    //SYSTEM_ITERATION.load(std::sync::atomic::Ordering::SeqCst)
-    //unsafe{SYSTEM_ITERATION}
-    0
+    SYSTEM_ITERATION.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Increment the system iteration counter, returning the previous value.
 #[inline]
 pub fn increment_current_iteration() -> u64 {
-    //SYSTEM_ITERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-    //unsafe {
-    //    let u = SYSTEM_ITERATION;
-    //    SYSTEM_ITERATION += 1;
-    //    u
-    //}
-    0
+    SYSTEM_ITERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// A future representing an async system.

@@ -302,6 +302,13 @@ impl AllArchetypes {
     pub fn is_empty(&self) -> bool {
         self.archetypes.iter().all(|a| a.is_empty())
     }
+
+    /// Perform upkeep on all archetypes, removing any given dead ids.
+    pub fn upkeep(&mut self, dead_ids: &[usize]) {
+        for arch in self.archetypes.iter_mut() {
+            arch.upkeep(dead_ids);
+        }
+    }
 }
 
 #[cfg(test)]

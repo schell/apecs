@@ -26,13 +26,13 @@ impl SeparateStorageExt for World {
         store: VecStorage<T>,
     ) -> anyhow::Result<&mut Self> {
         self.with_resource(store)?
-            .with_plugin(crate::plugins::entity_upkeep::plugin::<VecStorage<T>>())
+            .with_plugin(crate::plugins::entity_upkeep::plugin_storage_separated_upkeep::<VecStorage<T>>())
     }
 
     fn with_default_storage<T: Send + Sync + 'static>(&mut self) -> anyhow::Result<&mut Self> {
         let store = VecStorage::<T>::default();
         self.with_resource(store)?
-            .with_plugin(crate::plugins::entity_upkeep::plugin::<T>())
+            .with_plugin(crate::plugins::entity_upkeep::plugin_storage_separated_upkeep::<T>())
     }
 }
 

@@ -3,7 +3,7 @@ use std::{any::TypeId, ops::DerefMut, sync::Arc};
 
 use any_vec::{any_value::AnyValueMut, traits::*, AnyVec};
 use anyhow::Context;
-use parking_lot::{MappedRwLockReadGuard, RwLock};
+use parking_lot::RwLock;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
@@ -348,6 +348,13 @@ impl Archetype {
             }
         } else {
             Ok(None)
+        }
+    }
+
+    /// Perform upkeep on the archetype, removing any given dead ids.
+    pub fn upkeep(&mut self, dead_ids: &[usize]) {
+        for id in dead_ids {
+            let _ = self.remove_any_entry_bundle(*id);
         }
     }
 }
