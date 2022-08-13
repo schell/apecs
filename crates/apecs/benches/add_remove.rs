@@ -53,10 +53,9 @@ pub struct BenchmarkArchetype(AllArchetypes);
 impl BenchmarkArchetype {
     pub fn new() -> Self {
         let mut all = AllArchetypes::default();
-        let archetype = ArchetypeBuilder::default()
-            .with_components(0, (0..10000).map(|_| A(0.0)))
-            .build();
-        all.insert_archetype(archetype);
+        for id in 0..10_000 {
+            all.insert_component(id, A(0.0));
+        }
         Self(all)
     }
 

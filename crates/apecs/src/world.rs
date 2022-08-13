@@ -262,9 +262,9 @@ impl Entity {
     /// it exists.
     pub async fn visit_bundle<Q: IsQuery + 'static, T: Send + Sync + 'static>(
         &self,
-        mut f: impl FnMut(Q::QueryRow<'_>) -> T + Send + Sync + 'static,
+        f: impl FnOnce(Q::QueryRow<'_>) -> T + Send + Sync + 'static,
     ) -> anyhow::Result<Option<T>> {
-        use crate::Read;
+        use crate::Write;
 
         let id = self.id();
         let (tx, rx) = oneshot();
@@ -274,9 +274,9 @@ impl Entity {
                     if !world.has_resource::<AllArchetypes>() {
                         world.with_resource(AllArchetypes::default())?;
                     }
-                    let storage: Read<AllArchetypes> = world.fetch()?;
-                    Ok(Arc::new(storage.visit_bundle::<Q, T>(id, &mut f))
-                        as Arc<dyn Any + Send + Sync>)
+                    let mut storage: Write<AllArchetypes> = world.fetch()?;
+                    let mut q = storage.query::<Q>();
+                    Ok(Arc::new(q.find_one(id).map(f)) as Arc<dyn Any + Send + Sync>)
                 }),
                 tx,
             })

@@ -1,4 +1,4 @@
-use apecs::storage::{archetype::{AllArchetypes, ArchetypeBuilder}, separated::*};
+use apecs::storage::{archetype::AllArchetypes, separated::*, Entry};
 use cgmath::*;
 
 pub struct Transform(Matrix4<f32>);
@@ -42,17 +42,11 @@ impl BenchmarkArchetype {
     }
 
     pub fn run(&mut self) {
-        let ts = (0..10000).map(|_| Transform(Matrix4::<f32>::from_scale(1.0)));
-        let ps = (0..10000).map(|_| Position(Vector3::unit_x()));
-        let rs = (0..10000).map(|_| Rotation(Vector3::unit_x()));
-        let vs = (0..10000).map(|_| Velocity(Vector3::unit_x()));
-        let archetype = ArchetypeBuilder::default()
-            .with_components(0, ts)
-            .with_components(0, ps)
-            .with_components(0, rs)
-            .with_components(0, vs)
-            .build();
+        let ts = Box::new((0..10000).map(|id| Entry::new(id, Transform(Matrix4::<f32>::from_scale(1.0)))));
+        let ps = Box::new((0..10000).map(|id| Entry::new(id, Position(Vector3::unit_x()))));
+        let rs = Box::new((0..10000).map(|id| Entry::new(id, Rotation(Vector3::unit_x()))));
+        let vs = Box::new((0..10000).map(|id| Entry::new(id, Velocity(Vector3::unit_x()))));
         let mut all = AllArchetypes::default();
-        all.insert_archetype(archetype);
+        all.extend::<(Transform, Position, Rotation, Velocity)>((ts, ps, rs, vs));
     }
 }

@@ -1,4 +1,10 @@
-use apecs::{anyhow, storage::{archetype::*, separated::*}, system::*, world::*, CanFetch};
+use apecs::{
+    anyhow,
+    storage::{archetype::*, separated::*, Entry},
+    system::*,
+    world::*,
+    CanFetch,
+};
 use cgmath::*;
 
 #[derive(Copy, Clone)]
@@ -70,20 +76,22 @@ pub struct BenchmarkArchetype(AllArchetypes);
 impl BenchmarkArchetype {
     pub fn new() -> anyhow::Result<Self> {
         let mut archs = AllArchetypes::default();
-        archs.insert_archetype(
-            ArchetypeBuilder::default()
-                .with_components(0, (0..1000).map(|_| Transform(Matrix4::<f32>::from_angle_x(Rad(1.2)))))
-                .with_components(0, (0..1000).map(|_| Position(Vector3::unit_x())))
-                .with_components(0, (0..1000).map(|_| Rotation(Vector3::unit_x())))
-                .with_components(0, (0..1000).map(|_| Velocity(Vector3::unit_x())))
-                .build()
-        );
+        archs.extend::<(Transform, Position, Rotation, Velocity)>((
+            Box::new(
+                (0..1000)
+                    .map(|id| Entry::new(id, Transform(Matrix4::<f32>::from_angle_x(Rad(1.2))))),
+            ),
+            Box::new((0..1000).map(|id| Entry::new(id, Position(Vector3::unit_x())))),
+            Box::new((0..1000).map(|id| Entry::new(id, Rotation(Vector3::unit_x())))),
+            Box::new((0..1000).map(|id| Entry::new(id, Velocity(Vector3::unit_x())))),
+        ));
 
         Ok(Self(archs))
     }
 
     pub fn run(&mut self) {
-        self.0.par_for_each::<(&mut Position, &mut Transform)>(|(pos, mat)| {
+        let mut q = self.0.query::<(&mut Position, &mut Transform)>();
+        q.par_iter_mut().for_each(|(pos, mat)| {
             use cgmath::Transform;
             for _ in 0..100 {
                 mat.0 = mat.0.invert().unwrap();

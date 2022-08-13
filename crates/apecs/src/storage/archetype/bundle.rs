@@ -6,6 +6,7 @@ use anyhow::Context;
 use smallvec::{smallvec, SmallVec};
 
 use crate::storage::Entry;
+use crate as apecs;
 
 pub(crate) trait AnyVecExt: Sized {
     fn anyvec_from_iter<C, I>(iter: I) -> Self
@@ -42,6 +43,9 @@ impl AnyVecExt for AnyVec<dyn Send + Sync + 'static> {
 pub trait IsBundle: Sized {
     /// A bundle where each of this bundle's types are wrapped in `Entry`.
     type EntryBundle: IsBundle;
+    /// A bundle where each of this bundle's types are prefixed with &'static
+    /// mut.
+    type MutBundle: IsBundle;
 
     /// Produces a list of types of a bundle, ordered by their
     /// position in the tuple.
@@ -93,6 +97,7 @@ pub trait IsBundle: Sized {
 
 impl<A: Send + Sync + 'static> IsBundle for (A,) {
     type EntryBundle = (Entry<A>,);
+    type MutBundle = (&'static mut A,);
 
     fn unordered_types() -> SmallVec<[TypeId; 4]> {
         smallvec![TypeId::of::<A>()]
@@ -119,145 +124,17 @@ impl<A: Send + Sync + 'static> IsBundle for (A,) {
     }
 }
 
-impl<A: Send + Sync + 'static, B: Send + Sync + 'static> IsBundle for (A, B) {
-    type EntryBundle = (Entry<A>, Entry<B>);
-
-    fn unordered_types() -> SmallVec<[TypeId; 4]> {
-        smallvec![TypeId::of::<A>(), TypeId::of::<B>()]
-    }
-
-    fn empty_vecs() -> SmallVec<[AnyVec<dyn Send + Sync + 'static>; 4]> {
-        smallvec![AnyVec::new::<A>(), AnyVec::new::<B>()]
-    }
-
-    fn try_from_any_bundle(mut bundle: AnyBundle) -> anyhow::Result<Self> {
-        Ok((
-            bundle.remove::<A>(&TypeId::of::<A>())?,
-            bundle.remove::<B>(&TypeId::of::<B>())?,
-        ))
-    }
-
-    fn into_vecs(self) -> SmallVec<[AnyVec<dyn Send + Sync + 'static>; 4]> {
-        smallvec![AnyVec::wrap(self.0), AnyVec::wrap(self.1),]
-    }
-
-    fn into_entry_bundle(self, entity_id: usize) -> Self::EntryBundle {
-        (Entry::new(entity_id, self.0), Entry::new(entity_id, self.1))
-    }
-
-    fn from_entry_bundle(entry_bundle: Self::EntryBundle) -> Self {
-        (entry_bundle.0.into_inner(), entry_bundle.1.into_inner())
-    }
-}
-
-impl<A: Send + Sync + 'static, B: Send + Sync + 'static, C: Send + Sync + 'static> IsBundle
-    for (A, B, C)
-{
-    type EntryBundle = (Entry<A>, Entry<B>, Entry<C>);
-
-    fn unordered_types() -> SmallVec<[TypeId; 4]> {
-        smallvec![TypeId::of::<A>(), TypeId::of::<B>(), TypeId::of::<C>()]
-    }
-
-    fn empty_vecs() -> SmallVec<[AnyVec<dyn Send + Sync + 'static>; 4]> {
-        smallvec![AnyVec::new::<A>(), AnyVec::new::<B>(), AnyVec::new::<C>()]
-    }
-    fn try_from_any_bundle(mut bundle: AnyBundle) -> anyhow::Result<Self> {
-        Ok((
-            bundle.remove::<A>(&TypeId::of::<A>())?,
-            bundle.remove::<B>(&TypeId::of::<B>())?,
-            bundle.remove::<C>(&TypeId::of::<C>())?,
-        ))
-    }
-
-    fn into_vecs(self) -> SmallVec<[AnyVec<dyn Send + Sync + 'static>; 4]> {
-        smallvec![
-            AnyVec::wrap(self.0),
-            AnyVec::wrap(self.1),
-            AnyVec::wrap(self.2),
-        ]
-    }
-
-    fn into_entry_bundle(self, entity_id: usize) -> Self::EntryBundle {
-        (
-            Entry::new(entity_id, self.0),
-            Entry::new(entity_id, self.1),
-            Entry::new(entity_id, self.2),
-        )
-    }
-
-    fn from_entry_bundle(entry_bundle: Self::EntryBundle) -> Self {
-        (
-            entry_bundle.0.into_inner(),
-            entry_bundle.1.into_inner(),
-            entry_bundle.2.into_inner(),
-        )
-    }
-}
-
-impl<
-        A: Send + Sync + 'static,
-        B: Send + Sync + 'static,
-        C: Send + Sync + 'static,
-        D: Send + Sync + 'static,
-    > IsBundle for (A, B, C, D)
-{
-    type EntryBundle = (Entry<A>, Entry<B>, Entry<C>, Entry<D>);
-
-    fn unordered_types() -> SmallVec<[TypeId; 4]> {
-        smallvec![
-            TypeId::of::<A>(),
-            TypeId::of::<B>(),
-            TypeId::of::<C>(),
-            TypeId::of::<D>()
-        ]
-    }
-
-    fn empty_vecs() -> SmallVec<[AnyVec<dyn Send + Sync + 'static>; 4]> {
-        smallvec![
-            AnyVec::new::<A>(),
-            AnyVec::new::<B>(),
-            AnyVec::new::<C>(),
-            AnyVec::new::<D>()
-        ]
-    }
-
-    fn try_from_any_bundle(mut bundle: AnyBundle) -> anyhow::Result<Self> {
-        Ok((
-            bundle.remove::<A>(&TypeId::of::<A>())?,
-            bundle.remove::<B>(&TypeId::of::<B>())?,
-            bundle.remove::<C>(&TypeId::of::<C>())?,
-            bundle.remove::<D>(&TypeId::of::<D>())?,
-        ))
-    }
-
-    fn into_vecs(self) -> SmallVec<[AnyVec<dyn Send + Sync + 'static>; 4]> {
-        smallvec![
-            AnyVec::wrap(self.0),
-            AnyVec::wrap(self.1),
-            AnyVec::wrap(self.2),
-            AnyVec::wrap(self.3),
-        ]
-    }
-
-    fn into_entry_bundle(self, entity_id: usize) -> Self::EntryBundle {
-        (
-            Entry::new(entity_id, self.0),
-            Entry::new(entity_id, self.1),
-            Entry::new(entity_id, self.2),
-            Entry::new(entity_id, self.3),
-        )
-    }
-
-    fn from_entry_bundle(entry_bundle: Self::EntryBundle) -> Self {
-        (
-            entry_bundle.0.into_inner(),
-            entry_bundle.1.into_inner(),
-            entry_bundle.2.into_inner(),
-            entry_bundle.3.into_inner(),
-        )
-    }
-}
+apecs_derive::impl_isbundle_tuple!((A, B));
+apecs_derive::impl_isbundle_tuple!((A, B, C));
+apecs_derive::impl_isbundle_tuple!((A, B, C, D));
+apecs_derive::impl_isbundle_tuple!((A, B, C, D, E));
+apecs_derive::impl_isbundle_tuple!((A, B, C, D, E, F));
+apecs_derive::impl_isbundle_tuple!((A, B, C, D, E, F, G));
+apecs_derive::impl_isbundle_tuple!((A, B, C, D, E, F, G, H));
+apecs_derive::impl_isbundle_tuple!((A, B, C, D, E, F, G, H, I));
+apecs_derive::impl_isbundle_tuple!((A, B, C, D, E, F, G, H, I, J));
+apecs_derive::impl_isbundle_tuple!((A, B, C, D, E, F, G, H, I, J, K));
+apecs_derive::impl_isbundle_tuple!((A, B, C, D, E, F, G, H, I, J, K, L));
 
 fn ensure_type_info(types: &[TypeId]) -> anyhow::Result<()> {
     for x in types.windows(2) {
@@ -356,7 +233,7 @@ impl AnyBundle {
         // remove the component from the vec
         let mut head_vec = any_head_vec
             .downcast_mut::<T>()
-            .context("could not downcast")?;
+            .with_context(|| format!("could not downcast to {}", std::any::type_name::<T>()))?;
         let head = head_vec
             .pop()
             .with_context(|| format!("missing '{}' component", std::any::type_name::<T>()))?;
@@ -376,21 +253,6 @@ impl AnyBundle {
         tuple.try_into_any_bundle()
     }
 }
-
-// impl<Head, Tail> From<(Head, Tail)> for AnyBundle
-// where
-//    Head: Send + Sync + 'static,
-//    Tail: TupleList + 'static,
-//    AnyBundle: From<Tail>,
-//{
-//    fn from((head, tail): (Head, Tail)) -> Self {
-//        let mut bundle = AnyBundle::from(tail);
-//        let mut store = AnyVec::new::<Head>();
-//        store.downcast_mut::<Head>().unwrap().push(head);
-//        bundle.insert(store.element_typeid(), store);
-//        bundle
-//    }
-//}
 
 #[cfg(test)]
 mod test {

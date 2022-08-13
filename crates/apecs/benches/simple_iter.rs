@@ -1,6 +1,6 @@
 use apecs::{
     anyhow,
-    storage::{archetype::*, separated::*},
+    storage::{archetype::*, separated::*, Entry},
 };
 use cgmath::*;
 
@@ -49,15 +49,12 @@ pub struct BenchmarkArchetype(AllArchetypes);
 
 impl BenchmarkArchetype {
     pub fn new() -> anyhow::Result<Self> {
+        let ts = Box::new((0..10000).map(|id| Entry::new(id, Transform(Matrix4::<f32>::from_scale(1.0)))));
+        let ps = Box::new((0..10000).map(|id| Entry::new(id, Position(Vector3::unit_x()))));
+        let rs = Box::new((0..10000).map(|id| Entry::new(id, Rotation(Vector3::unit_x()))));
+        let vs = Box::new((0..10000).map(|id| Entry::new(id, Velocity(Vector3::unit_x()))));
         let mut archs = AllArchetypes::default();
-        let arch = ArchetypeBuilder::default()
-            .with_components(0, (0..10000).map(|_| Position(Vector3::unit_x())))
-            .with_components(0, (0..10000).map(|_| Velocity(Vector3::unit_x())))
-            .with_components(0, (0..10000).map(|_| Transform(Matrix4::from_scale(1.0))))
-            .with_components(0, (0..10000).map(|_| Rotation(Vector3::unit_x())))
-            .build();
-        archs.insert_archetype(arch);
-
+        archs.extend::<(Transform, Position, Rotation, Velocity)>((ts, ps, rs, vs));
         Ok(Self(archs))
     }
 

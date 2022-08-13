@@ -1,10 +1,8 @@
 //! Entity components stored together in contiguous arrays.
-use std::{any::TypeId, ops::DerefMut, sync::Arc};
+use std::{any::TypeId, sync::Arc};
 
-use any_vec::{any_value::AnyValueMut, traits::*, AnyVec};
-use anyhow::Context;
+use any_vec::{traits::*, AnyVec};
 use parking_lot::RwLock;
-use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
 use crate::storage::Entry;
@@ -20,62 +18,8 @@ pub struct Archetype {
     /// Types stored as Entry<_> in order, in data.
     pub(crate) entry_types: SmallVec<[TypeId; 4]>,
     pub(crate) data: SmallVec<[Arc<RwLock<AnyVec<dyn Send + Sync + 'static>>>; 4]>,
-    // cache of entity_id to storage index
-    pub(crate) entity_lookup: FxHashMap<usize, usize>,
     // cache of storage index to entity_id
     pub(crate) index_lookup: Vec<usize>,
-}
-
-#[derive(Default)]
-pub struct ArchetypeBuilder {
-    min_and_len: Option<(usize, usize)>,
-    archetype: Archetype,
-}
-
-// TODO: Add entities in build, not in with_components
-impl ArchetypeBuilder {
-    pub fn with_components<T: Send + Sync + 'static>(
-        mut self,
-        starting_entity: usize,
-        comps: impl ExactSizeIterator<Item = T>,
-    ) -> Self {
-        let ty = TypeId::of::<Entry<T>>();
-        assert!(
-            self.archetype
-                .entry_types
-                .iter()
-                .find(|t| *t == &ty)
-                .is_none(),
-            "{} is already contained in the archetype",
-            std::any::type_name::<T>()
-        );
-
-        let end = starting_entity + comps.len();
-        let range = starting_entity..end;
-        if let Some((min, len)) = self.min_and_len {
-            assert_eq!(
-                min, starting_entity,
-                "starting entity id is not the same as the previous starting id"
-            );
-            assert_eq!(len, comps.len(), "length is not the same as previous");
-        } else {
-            self.min_and_len = Some((starting_entity, comps.len()));
-            self.archetype.index_lookup = range.clone().collect();
-            self.archetype.entity_lookup = range.clone().zip(0..).collect();
-        }
-        let anyvec = AnyVec::anyvec_from_iter(comps.zip(range).map(|(c, id)| Entry::new(id, c)));
-        self.archetype.entry_types.push(ty);
-        self.archetype.data.push(Arc::new(RwLock::new(anyvec)));
-        self
-    }
-
-    pub fn build(mut self) -> Archetype {
-        self.archetype.entry_types.sort();
-        self.archetype
-            .data
-            .sort_by(|a, b| a.read().element_typeid().cmp(&b.read().element_typeid()));
-        self.archetype
-    }
 }
 
 impl Archetype {
@@ -86,18 +30,13 @@ impl Archetype {
         bundle: AnyBundle,
     ) -> anyhow::Result<Self> {
         let entry_types = bundle.0;
-        let (index_lookup, entity_lookup) = if let Some(entity_id) = may_entity_id {
-            (vec![entity_id], FxHashMap::from_iter([(entity_id, 0)]))
-        } else {
-            (vec![], FxHashMap::default())
-        };
+        let index_lookup = may_entity_id.map_or_else(|| vec![], |e| vec![e]);
         Ok(Archetype {
             data: bundle
                 .1
                 .into_iter()
                 .map(|v| Arc::new(RwLock::new(v)))
                 .collect(),
-            entity_lookup,
             index_lookup,
             entry_types,
         })
@@ -112,17 +51,16 @@ impl Archetype {
                 .map(|v| Arc::new(RwLock::new(v)))
                 .collect(),
             entry_types: entry_bundle.0,
-            entity_lookup: Default::default(),
             index_lookup: Default::default(),
         })
     }
 
     pub fn len(&self) -> usize {
-        self.entity_lookup.len()
+        self.index_lookup.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entity_lookup.is_empty()
+        self.index_lookup.is_empty()
     }
 
     /// Determine the index of the given `Entry<T>` `TypeId`.
@@ -134,10 +72,10 @@ impl Archetype {
             .find_map(|(i, t)| if ty == t { Some(i) } else { None })
     }
 
-    /// Whether this archetype contains the entity
-    pub fn contains_entity(&self, entity_id: &usize) -> bool {
-        self.entity_lookup.contains_key(entity_id)
-    }
+    ///// Whether this archetype contains the entity
+    //pub fn contains_entity(&self, entity_id: &usize) -> bool {
+    //    self.entity_lookup.contains_key(entity_id)
+    //}
 
     /// Whether this archetype contains `T` components
     pub fn has_component<T: 'static>(&self) -> bool {
@@ -176,187 +114,148 @@ impl Archetype {
         Some(col)
     }
 
-    /// Insert a bundle of components with the given entity id.
-    ///
-    /// ## Errs
-    /// Errs if the bundle's types don't match the `Archetype`, or if the bundle
-    /// contains duplicate types.
-    ///
-    /// ## WARNING
-    /// Be certain of the types you are inserting. Because of Rust's coercion
-    /// of types (or lack thereof), this function may fail unexpectedly when a
-    /// type is not coerced as expected. A good example is with f32:
-    ///
-    /// ```rust,ignore
-    /// let mut arch = Archetype::new::<(f32,)>().unwrap();
-    /// arch.insert(0, (0.0,)).unwrap(); // panic!
-    /// ```
-    ///
-    /// The above example panics because `0.0` by default is `f64`. The
-    /// following works as expected:
-    ///
-    /// ```rust,ignore
-    /// let mut arch = Archetype::new::<(f32,)>().unwrap();
-    /// arch.insert(0, (0.0f32,)).unwrap();
-    /// ```
-    ///
-    /// Or this way:
-    /// ```rust,ignore
-    /// let mut arch = Archetype::new::<(f32,)>().unwrap();
-    /// arch.insert::<(f32,)>(0, (0.0,)).unwrap();
-    /// ```
-    pub fn insert_bundle<B>(&mut self, entity_id: usize, bundle: B) -> anyhow::Result<Option<B>>
-    where
-        B: IsBundle + 'static,
-    {
-        let bundle = bundle.into_entry_bundle(entity_id);
-        Ok(
-            if let Some(prev) =
-                self.insert_any_entry_bundle(entity_id, bundle.try_into_any_bundle()?)?
-            {
-                let entry_bundle = <B::EntryBundle as IsBundle>::try_from_any_bundle(prev)?;
-                let bundle = B::from_entry_bundle(entry_bundle);
-                Some(bundle)
-            } else {
-                None
-            },
-        )
-    }
+    ///// Insert a bundle of components with the given entity id.
+    /////
+    ///// ## Errs
+    ///// Errs if the bundle's types don't match the `Archetype`, or if the bundle
+    ///// contains duplicate types.
+    /////
+    ///// ## WARNING
+    ///// Be certain of the types you are inserting. Because of Rust's coercion
+    ///// of types (or lack thereof), this function may fail unexpectedly when a
+    ///// type is not coerced as expected. A good example is with f32:
+    /////
+    ///// ```rust,ignore
+    ///// let mut arch = Archetype::new::<(f32,)>().unwrap();
+    ///// arch.insert(0, (0.0,)).unwrap(); // panic!
+    ///// ```
+    /////
+    ///// The above example panics because `0.0` by default is `f64`. The
+    ///// following works as expected:
+    /////
+    ///// ```rust,ignore
+    ///// let mut arch = Archetype::new::<(f32,)>().unwrap();
+    ///// arch.insert(0, (0.0f32,)).unwrap();
+    ///// ```
+    /////
+    ///// Or this way:
+    ///// ```rust,ignore
+    ///// let mut arch = Archetype::new::<(f32,)>().unwrap();
+    ///// arch.insert::<(f32,)>(0, (0.0,)).unwrap();
+    ///// ```
+    //pub fn insert_bundle<B>(&mut self, entity_id: usize, bundle: B) -> anyhow::Result<Option<B>>
+    //where
+    //    B: IsBundle + 'static,
+    //{
+    //    let bundle = bundle.into_entry_bundle(entity_id);
+    //    Ok(
+    //        if let Some(prev) =
+    //            self.insert_any_entry_bundle(entity_id, bundle.try_into_any_bundle()?)?
+    //        {
+    //            let entry_bundle = <B::EntryBundle as IsBundle>::try_from_any_bundle(prev)?;
+    //            let bundle = B::from_entry_bundle(entry_bundle);
+    //            Some(bundle)
+    //        } else {
+    //            None
+    //        },
+    //    )
+    //}
 
-    /// Insert an entry bundle into the archetype.
-    ///
-    /// Returns any previously stored bundle component entries.
-    ///
-    /// ## Errs
-    /// Errs if the bundle types do not match the archetype.
-    pub(crate) fn insert_any_entry_bundle(
-        &mut self,
-        entity_id: usize,
-        mut bundle: AnyBundle,
-    ) -> anyhow::Result<Option<AnyBundle>> {
-        anyhow::ensure!(self.entry_types == bundle.0, "types don't match");
-        Ok(
-            if let Some(entity_index) = self.entity_lookup.get(&entity_id) {
-                for (ty_index, component_vec) in bundle.1.iter_mut().enumerate() {
-                    let mut data = self.data[ty_index].write();
-                    let mut element_a = data.at_mut(*entity_index);
-                    let mut element_b = component_vec.at_mut(0);
-                    element_a.swap(element_b.deref_mut());
-                }
-                Some(bundle)
-            } else {
-                let last_index = self.entity_lookup.len();
-                assert!(self.entity_lookup.insert(entity_id, last_index).is_none());
-                self.index_lookup.push(entity_id);
-                for (ty_index, mut component_vec) in bundle.1.into_iter().enumerate() {
-                    let mut data = self.data[ty_index].write();
-                    debug_assert_eq!(component_vec.element_typeid(), data.element_typeid());
-                    data.push(component_vec.pop().unwrap());
-                    debug_assert!(data.len() == last_index + 1);
-                }
-                None
-            },
-        )
-    }
+    ///// Insert an entry bundle into the archetype.
+    /////
+    ///// Returns any previously stored bundle component entries.
+    /////
+    ///// ## Errs
+    ///// Errs if the bundle types do not match the archetype.
+    //pub(crate) fn insert_any_entry_bundle(
+    //    &mut self,
+    //    entity_id: usize,
+    //    mut bundle: AnyBundle,
+    //) -> anyhow::Result<Option<AnyBundle>> {
+    //    anyhow::ensure!(self.entry_types == bundle.0, "types don't match");
+    //    Ok(
+    //        if let Some(entity_index) = self.entity_lookup.get(&entity_id) {
+    //            for (ty_index, component_vec) in bundle.1.iter_mut().enumerate() {
+    //                let mut data = self.data[ty_index].write();
+    //                let mut element_a = data.at_mut(*entity_index);
+    //                let mut element_b = component_vec.at_mut(0);
+    //                element_a.swap(element_b.deref_mut());
+    //            }
+    //            Some(bundle)
+    //        } else {
+    //            let last_index = self.entity_lookup.len();
+    //            assert!(self.entity_lookup.insert(entity_id, last_index).is_none());
+    //            self.index_lookup.push(entity_id);
+    //            for (ty_index, mut component_vec) in bundle.1.into_iter().enumerate() {
+    //                let mut data = self.data[ty_index].write();
+    //                debug_assert_eq!(component_vec.element_typeid(), data.element_typeid());
+    //                data.push(component_vec.pop().unwrap());
+    //                debug_assert!(data.len() == last_index + 1);
+    //            }
+    //            None
+    //        },
+    //    )
+    //}
 
-    /// Remove the entity and return its bundle, if any.
-    pub fn remove_bundle<B: IsBundle>(&mut self, entity_id: usize) -> anyhow::Result<Option<B>> {
-        Ok(
-            if let Some(prev) = self.remove_any_entry_bundle(entity_id)? {
-                let prev: B::EntryBundle = <B::EntryBundle as IsBundle>::try_from_any_bundle(prev)?;
-                Some(B::from_entry_bundle(prev))
-            } else {
-                None
-            },
-        )
-    }
+    ///// Remove the entity and return its bundle, if any.
+    //pub fn remove_bundle<B: IsBundle>(&mut self, entity_id: usize) -> anyhow::Result<Option<B>> {
+    //    Ok(
+    //        if let Some(prev) = self.remove_any_entry_bundle(entity_id)? {
+    //            let prev: B::EntryBundle = <B::EntryBundle as IsBundle>::try_from_any_bundle(prev)?;
+    //            Some(B::from_entry_bundle(prev))
+    //        } else {
+    //            None
+    //        },
+    //    )
+    //}
 
-    /// Remove the entity without knowledge of the bundle type and return its
-    /// type-erased entries.
-    pub(crate) fn remove_any_entry_bundle(
-        &mut self,
-        entity_id: usize,
-    ) -> anyhow::Result<Option<AnyBundle>> {
-        if let Some(index) = self.entity_lookup.remove(&entity_id) {
-            // NOTE: last_index is the length of entity_lookup because we removed the entity
-            // in question already!
-            let last_index = self.entity_lookup.len();
-            let mut should_reset_index = index != last_index;
-            let mut anybundle = AnyBundle::default();
-            anybundle.0 = self.entry_types.clone();
-            assert_eq!(self.index_lookup.swap_remove(index), entity_id);
-            for column in self.data.iter_mut() {
-                let mut data = column.write();
-                if should_reset_index {
-                    // the index of the last entity was swapped for that of the removed
-                    // index, so we need to update the lookup
-                    self.entity_lookup.insert(self.index_lookup[index], index);
-                    should_reset_index = false;
-                }
 
-                let mut temp_store = data.clone_empty();
-                debug_assert!(
-                    index < data.len(),
-                    "store len {} does not contain index {}",
-                    data.len(),
-                    index
-                );
-                let value = data.swap_remove(index);
-                temp_store.push(value);
-                anybundle.1.push(temp_store);
-            }
-            Ok(Some(anybundle))
-        } else {
-            Ok(None)
-        }
-    }
+    //// Visit a specific component with a closure.
+    //pub fn visit<T: 'static, A>(
+    //    &self,
+    //    entity_id: usize,
+    //    f: impl FnOnce(&Entry<T>) -> A,
+    //) -> anyhow::Result<Option<A>> {
+    //    if let Some(entity_index) = self.entity_lookup.get(&entity_id) {
+    //        let ty = TypeId::of::<Entry<T>>();
+    //        if let Some(ty_index) = self.index_of(&ty) {
+    //            let data = self.data[ty_index].read();
+    //            let entries = data.downcast_ref::<Entry<T>>().context("can't downcast")?;
+    //            Ok(entries.get(*entity_index).map(f))
+    //        } else {
+    //            Ok(None)
+    //        }
+    //    } else {
+    //        Ok(None)
+    //    }
+    //}
 
-    // Visit a specific component with a closure.
-    pub fn visit<T: 'static, A>(
-        &self,
-        entity_id: usize,
-        f: impl FnOnce(&Entry<T>) -> A,
-    ) -> anyhow::Result<Option<A>> {
-        if let Some(entity_index) = self.entity_lookup.get(&entity_id) {
-            let ty = TypeId::of::<Entry<T>>();
-            if let Some(ty_index) = self.index_of(&ty) {
-                let data = self.data[ty_index].read();
-                let entries = data.downcast_ref::<Entry<T>>().context("can't downcast")?;
-                Ok(entries.get(*entity_index).map(f))
-            } else {
-                Ok(None)
-            }
-        } else {
-            Ok(None)
-        }
-    }
+    //// Visit a specific mutable component with a closure.
+    //pub fn visit_mut<T: 'static, A>(
+    //    &self,
+    //    entity_id: usize,
+    //    f: impl FnOnce(&mut Entry<T>) -> A,
+    //) -> anyhow::Result<Option<A>> {
+    //    if let Some(entity_index) = self.entity_lookup.get(&entity_id) {
+    //        let ty = TypeId::of::<Entry<T>>();
+    //        if let Some(ty_index) = self.index_of(&ty) {
+    //            let mut data = self.data[ty_index].write();
+    //            let mut entries = data.downcast_mut::<Entry<T>>().context("can't downcast")?;
+    //            Ok(entries.get_mut(*entity_index).map(f))
+    //        } else {
+    //            Ok(None)
+    //        }
+    //    } else {
+    //        Ok(None)
+    //    }
+    //}
 
-    // Visit a specific mutable component with a closure.
-    pub fn visit_mut<T: 'static, A>(
-        &self,
-        entity_id: usize,
-        f: impl FnOnce(&mut Entry<T>) -> A,
-    ) -> anyhow::Result<Option<A>> {
-        if let Some(entity_index) = self.entity_lookup.get(&entity_id) {
-            let ty = TypeId::of::<Entry<T>>();
-            if let Some(ty_index) = self.index_of(&ty) {
-                let mut data = self.data[ty_index].write();
-                let mut entries = data.downcast_mut::<Entry<T>>().context("can't downcast")?;
-                Ok(entries.get_mut(*entity_index).map(f))
-            } else {
-                Ok(None)
-            }
-        } else {
-            Ok(None)
-        }
-    }
-
-    /// Perform upkeep on the archetype, removing any given dead ids.
-    pub fn upkeep(&mut self, dead_ids: &[usize]) {
-        for id in dead_ids {
-            let _ = self.remove_any_entry_bundle(*id);
-        }
-    }
+    ///// Perform upkeep on the archetype, removing any given dead ids.
+    //pub fn upkeep(&mut self, dead_ids: &[usize]) {
+    //    for id in dead_ids {
+    //        let _ = self.remove_any_entry_bundle(*id);
+    //    }
+    //}
 }
 
 #[cfg(test)]
@@ -373,51 +272,6 @@ mod test {
         assert_eq!(Some(0), arch.index_of(&TypeId::of::<Entry<f32>>()));
     }
 
-    #[test]
-    fn archetype_can_create_add_remove_get_mut() {
-        let _ = env_logger::builder()
-            .is_test(true)
-            .filter_level(log::LevelFilter::Trace)
-            .try_init();
-
-        let mut arch = Archetype::new::<(f32, &str, u32)>().unwrap();
-        assert!(arch
-            .insert_bundle(0, (0.0f32, "zero", 0u32))
-            .unwrap()
-            .is_none());
-        assert!(arch
-            .insert_bundle(1, (1.0f32, "one", 1u32))
-            .unwrap()
-            .is_none());
-        assert!(arch
-            .insert_bundle(2, (2.0f32, "two", 2u32))
-            .unwrap()
-            .is_none());
-        assert!(arch
-            .insert_bundle(3, (3.0f32, "three", 3u32))
-            .unwrap()
-            .is_none());
-        assert_eq!(
-            Some((1.0f32, "one", 1u32)),
-            arch.insert_bundle(1, (111.0f32, "one", 1u32)).unwrap()
-        );
-        assert_eq!(
-            (111.0f32, "one", 1u32),
-            arch.remove_bundle(1).unwrap().unwrap()
-        );
-        assert_eq!(
-            Some(3.0f32),
-            arch.visit(3, |c: &Entry<f32>| *c.value()).unwrap(),
-            "{:#?}",
-            arch
-        );
-        arch.visit_mut(0, |c: &mut Entry<&str>| {
-            c.set_value("000");
-        })
-        .unwrap();
-        let actual: Option<String> = arch.visit::<&str, _>(0, |c| c.to_string()).unwrap();
-        assert_eq!(Some("000".to_string()), actual, "{:#?}", arch.entity_lookup);
-    }
 
     #[test]
     fn archetype_can_match() {

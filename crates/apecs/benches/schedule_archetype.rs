@@ -1,4 +1,9 @@
-use apecs::{anyhow, storage::archetype::*, system::*, world::*};
+use apecs::{
+    anyhow,
+    storage::{archetype::*, Entry},
+    system::*,
+    world::*,
+};
 
 struct A(f32);
 struct B(f32);
@@ -35,36 +40,28 @@ pub struct Benchmark(World);
 impl Benchmark {
     pub fn new() -> Self {
         let mut archs = AllArchetypes::default();
-        archs.insert_archetype(
-            ArchetypeBuilder::default()
-                .with_components(0, (0..10_000).map(|_| A(0.0)))
-                .with_components(0, (0..10_000).map(|_| B(0.0)))
-                .build()
-        );
-        archs.insert_archetype(
-            ArchetypeBuilder::default()
-                .with_components(10_000, (0..10_000).map(|_| A(0.0)))
-                .with_components(10_000, (0..10_000).map(|_| B(0.0)))
-                .with_components(10_000, (0..10_000).map(|_| C(0.0)))
-                .build()
-        );
-        archs.insert_archetype(
-            ArchetypeBuilder::default()
-                .with_components(20_000, (0..10_000).map(|_| A(0.0)))
-                .with_components(20_000, (0..10_000).map(|_| B(0.0)))
-                .with_components(20_000, (0..10_000).map(|_| C(0.0)))
-                .with_components(20_000, (0..10_000).map(|_| D(0.0)))
-                .build()
-        );
-        archs.insert_archetype(
-            ArchetypeBuilder::default()
-                .with_components(30_000, (0..10_000).map(|_| A(0.0)))
-                .with_components(30_000, (0..10_000).map(|_| B(0.0)))
-                .with_components(30_000, (0..10_000).map(|_| C(0.0)))
-                .with_components(30_000, (0..10_000).map(|_| D(0.0)))
-                .with_components(30_000, (0..10_000).map(|_| E(0.0)))
-                .build()
-        );
+        archs.extend::<(A, B)>((
+            Box::new((0..10_000).map(|id| Entry::new(id, A(0.0)))),
+            Box::new((0..10_000).map(|id| Entry::new(id, B(0.0)))),
+        ));
+        archs.extend::<(A, B, C)>((
+            Box::new((0..10_000).map(|id| Entry::new(id, A(0.0)))),
+            Box::new((0..10_000).map(|id| Entry::new(id, B(0.0)))),
+            Box::new((0..10_000).map(|id| Entry::new(id, C(0.0)))),
+        ));
+        archs.extend::<(A, B, C, D)>((
+            Box::new((0..10_000).map(|id| Entry::new(id, A(0.0)))),
+            Box::new((0..10_000).map(|id| Entry::new(id, B(0.0)))),
+            Box::new((0..10_000).map(|id| Entry::new(id, C(0.0)))),
+            Box::new((0..10_000).map(|id| Entry::new(id, D(0.0)))),
+        ));
+        archs.extend::<(A, B, C, D, E)>((
+            Box::new((0..10_000).map(|id| Entry::new(id, A(0.0)))),
+            Box::new((0..10_000).map(|id| Entry::new(id, B(0.0)))),
+            Box::new((0..10_000).map(|id| Entry::new(id, C(0.0)))),
+            Box::new((0..10_000).map(|id| Entry::new(id, D(0.0)))),
+            Box::new((0..10_000).map(|id| Entry::new(id, E(0.0)))),
+        ));
 
         let mut world = World::default();
         world
