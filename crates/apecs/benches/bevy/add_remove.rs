@@ -1,6 +1,8 @@
 use bevy_ecs::prelude::*;
 
+#[derive(Component)]
 struct A(f32);
+#[derive(Component)]
 struct B(f32);
 
 pub struct Benchmark(World, Vec<Entity>);

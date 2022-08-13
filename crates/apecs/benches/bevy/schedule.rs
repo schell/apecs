@@ -1,9 +1,14 @@
 use bevy_ecs::{prelude::*, schedule::Schedule};
 
+#[derive(Component)]
 struct A(f32);
+#[derive(Component)]
 struct B(f32);
+#[derive(Component)]
 struct C(f32);
+#[derive(Component)]
 struct D(f32);
+#[derive(Component)]
 struct E(f32);
 
 fn ab(mut query: Query<(&mut A, &mut B)>) {
@@ -40,9 +45,9 @@ impl Benchmark {
 
         let mut schedule = Schedule::default();
         schedule.add_stage("main", SystemStage::parallel());
-        schedule.add_system_to_stage("main", ab.system());
-        schedule.add_system_to_stage("main", cd.system());
-        schedule.add_system_to_stage("main", ce.system());
+        schedule.add_system_to_stage("main", ab);
+        schedule.add_system_to_stage("main", cd);
+        schedule.add_system_to_stage("main", ce);
 
         Self(world, schedule)
     }

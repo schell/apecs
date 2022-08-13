@@ -458,7 +458,7 @@ pub fn impl_isquery_tuple(input: proc_macro::TokenStream) -> proc_macro::TokenSt
             fn extend_locked_columns<'a, 'b>(
                 (#(#nvars),*): &'b mut Self::LockedColumns<'a>,
                 (#(#mvars),*): Self::ExtensionColumns,
-                output_ids: Option<&mut Vec<usize>>,
+                output_ids: Option<(&mut Vec<usize>, &mut usize)>,
             ) {
                 A::extend_locked_columns(n0, m0, output_ids);
                 #(#extend_impl)*

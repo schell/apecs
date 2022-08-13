@@ -62,7 +62,7 @@ pub trait IsBundle: Sized {
     }
 
     /// Produces an unordered list of empty `AnyVec`s to store
-    /// components.
+    /// components, with the given capacity.
     fn empty_vecs() -> SmallVec<[AnyVec<dyn Send + Sync + 'static>; 4]>;
 
     fn empty_any_bundle() -> anyhow::Result<AnyBundle> {

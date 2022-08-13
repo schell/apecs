@@ -51,7 +51,7 @@ pub trait IsQuery {
     fn extend_locked_columns<'a, 'b>(
         lock: &'b mut Self::LockedColumns<'a>,
         extension_columns: Self::ExtensionColumns,
-        output_ids: Option<&mut Vec<usize>>,
+        output_ids: Option<(&mut Vec<usize>, &mut usize)>,
     );
 
     /// Create an iterator over the rows of the given columns.
@@ -92,7 +92,7 @@ impl<'s, T: Send + Sync + 'static> IsQuery for &'s T {
     fn extend_locked_columns<'a, 'b>(
         _: &'b mut Self::LockedColumns<'a>,
         (): Self::ExtensionColumns,
-        _: Option<&mut Vec<usize>>,
+        _: Option<(&mut Vec<usize>, &mut usize)>,
     ) {
         panic!("cannot mutate a read-only lock");
     }
@@ -167,13 +167,18 @@ impl<'s, T: Send + Sync + 'static> IsQuery for &'s mut T {
     fn extend_locked_columns<'a, 'b>(
         lock: &'b mut Self::LockedColumns<'a>,
         extension_columns: Self::ExtensionColumns,
-        output_ids: Option<&mut Vec<usize>>,
+        output_ids: Option<(&mut Vec<usize>, &mut usize)>,
     ) {
         lock.as_mut().map(|guard| {
             let mut vs = guard.downcast_mut::<Entry<T>>().expect("can't downcast");
-            if let Some(output_ids) = output_ids {
+            let (lower, may_upper) = extension_columns.size_hint();
+            let additional = may_upper.unwrap_or(lower);
+            vs.reserve(additional);
+            if let Some((output_ids, max_id)) = output_ids {
                 for entry in extension_columns {
-                    output_ids.push(entry.id());
+                    let id = entry.id();
+                    *max_id = id.max(*max_id);
+                    output_ids.push(id);
                     vs.push(entry);
                 }
             } else {
@@ -249,7 +254,7 @@ where
     fn extend_locked_columns<'a, 'b>(
         lock: &'b mut Self::LockedColumns<'a>,
         ext: Self::ExtensionColumns,
-        output_ids: Option<&mut Vec<usize>>,
+        output_ids: Option<(&mut Vec<usize>, &mut usize)>,
     ) {
         A::extend_locked_columns(lock, ext, output_ids);
     }
@@ -298,7 +303,7 @@ where
     fn extend_locked_columns<'a, 'b>(
         (a, b): &'b mut Self::LockedColumns<'a>,
         (ea, eb): Self::ExtensionColumns,
-        output_ids: Option<&mut Vec<usize>>,
+        output_ids: Option<(&mut Vec<usize>, &mut usize)>,
     ) {
         A::extend_locked_columns(a, ea, output_ids);
         B::extend_locked_columns(b, eb, None);
@@ -352,20 +357,22 @@ impl AllArchetypes {
             arch = &mut self.archetypes[archetype_index];
         }
         let mut index_lookup: Vec<usize> = vec![];
+        let mut max_id: usize = 0;
         {
             let mut lock = <B::MutBundle as IsQuery>::lock_columns(arch);
             <B::MutBundle as IsQuery>::extend_locked_columns(
                 &mut lock,
                 extension,
-                Some(&mut index_lookup),
+                Some((&mut index_lookup, &mut max_id)),
             );
         }
         arch.index_lookup = index_lookup.clone();
         drop(arch);
+
+        if max_id >= self.entity_lookup.len() {
+            self.entity_lookup.resize_with(max_id + 1, Default::default);
+        }
         index_lookup.iter().enumerate().for_each(|(i, id)| {
-            if id >= &self.entity_lookup.len() {
-                self.entity_lookup.resize_with(id + 1, Default::default);
-            }
             self.entity_lookup[*id] = Some((archetype_index, i));
         });
     }
