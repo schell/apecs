@@ -5,11 +5,10 @@ use std::{any::TypeId, marker::PhantomData};
 use any_vec::{traits::*, AnyVec};
 use anyhow::Context;
 use parking_lot::{RwLockReadGuard, RwLockWriteGuard};
-use rayon::iter::{
-    IndexedParallelIterator, IntoParallelIterator, ParallelIterator,
-};
+use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 
 use crate as apecs;
+use crate::storage::HasId;
 use crate::{
     resource_manager::LoanManager,
     schedule::Borrow,
@@ -64,7 +63,10 @@ pub trait IsQuery {
     ) -> Self::QueryResult<'b>;
 
     /// Create an iterator over the rows of the given columns.
-    fn par_iter_mut<'a, 'b>(lock: &'b mut Self::LockedColumns<'a>) -> Self::ParQueryResult<'b>;
+    fn par_iter_mut<'a, 'b>(
+        len: usize,
+        lock: &'b mut Self::LockedColumns<'a>,
+    ) -> Self::ParQueryResult<'b>;
 }
 
 impl<'s, T: Send + Sync + 'static> IsQuery for &'s T {
@@ -129,7 +131,10 @@ impl<'s, T: Send + Sync + 'static> IsQuery for &'s T {
     }
 
     /// Create an iterator over the rows of the given columns.
-    fn par_iter_mut<'a, 'b>(lock: &'b mut Self::LockedColumns<'a>) -> Self::ParQueryResult<'b> {
+    fn par_iter_mut<'a, 'b>(
+        _: usize,
+        lock: &'b mut Self::LockedColumns<'a>,
+    ) -> Self::ParQueryResult<'b> {
         lock.as_ref().map_or_else(
             || (&[]).into_par_iter(),
             |data| {
@@ -219,7 +224,10 @@ impl<'s, T: Send + Sync + 'static> IsQuery for &'s mut T {
     }
 
     /// Create an iterator over the rows of the given columns.
-    fn par_iter_mut<'a, 'b>(lock: &'b mut Self::LockedColumns<'a>) -> Self::ParQueryResult<'b> {
+    fn par_iter_mut<'a, 'b>(
+        _: usize,
+        lock: &'b mut Self::LockedColumns<'a>,
+    ) -> Self::ParQueryResult<'b> {
         lock.as_mut().map_or_else(
             || (&mut []).into_par_iter(),
             |data| {
@@ -229,6 +237,230 @@ impl<'s, T: Send + Sync + 'static> IsQuery for &'s mut T {
                     .into_par_iter()
             },
         )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Maybe<T> {
+    pub key: usize,
+    pub inner: Option<T>,
+}
+
+impl<T> HasId for Maybe<T> {
+    fn id(&self) -> usize {
+        self.key
+    }
+}
+
+impl<'s, T: Send + Sync + 'static> IsQuery for Maybe<&'s T> {
+    type LockedColumns<'a> = Option<RwLockReadGuard<'a, AnyVec<dyn Send + Sync + 'static>>>;
+    type ExtensionColumns = ();
+    type QueryResult<'a> = itertools::Either<
+        std::iter::RepeatWith<fn() -> Option<&'a Entry<T>>>,
+        std::iter::Map<
+            std::slice::Iter<'a, Entry<T>>,
+            for<'r> fn(&'r Entry<T>) -> Option<&'r Entry<T>>,
+        >,
+    >;
+    type ParQueryResult<'a> = rayon::iter::Either<
+        rayon::iter::Map<rayon::iter::RepeatN<()>, fn(()) -> Option<&'a Entry<T>>>,
+        rayon::iter::Map<
+            rayon::slice::Iter<'a, Entry<T>>,
+            for<'r> fn(&'r Entry<T>) -> Option<&'r Entry<T>>,
+        >,
+    >;
+    type QueryRow<'a> = Option<&'a Entry<T>>;
+
+    fn borrows() -> Vec<Borrow> {
+        <&mut T as IsQuery>::borrows()
+    }
+
+    fn lock_columns<'a>(arch: &'a Archetype) -> Self::LockedColumns<'a> {
+        <&T as IsQuery>::lock_columns(arch)
+    }
+
+    fn extend_locked_columns<'a, 'b>(
+        _: &'b mut Self::LockedColumns<'a>,
+        _: Self::ExtensionColumns,
+        _: Option<(&mut Vec<usize>, &mut usize)>,
+    ) {
+        panic!("cannot extend Maybe columns");
+    }
+
+    fn iter_mut<'a, 'b>(lock: &'b mut Self::LockedColumns<'a>) -> Self::QueryResult<'b> {
+        lock.as_mut().map_or_else(
+            || {
+                itertools::Either::Left(std::iter::repeat_with(
+                    (|| None) as fn() -> Option<&'a Entry<T>>,
+                ))
+            },
+            |data| {
+                itertools::Either::Right(
+                    data.downcast_ref::<Entry<T>>()
+                        .expect("can't downcast")
+                        .into_iter()
+                        .map((|e| Some(e)) as fn(&Entry<T>) -> Option<&Entry<T>>),
+                )
+            },
+        )
+    }
+
+    fn iter_one<'a, 'b>(
+        lock: &'b mut Self::LockedColumns<'a>,
+        index: usize,
+    ) -> Self::QueryResult<'b> {
+        lock.as_mut().map_or_else(
+            || {
+                itertools::Either::Left(std::iter::repeat_with(
+                    (|| None) as fn() -> Option<&'b Entry<T>>,
+                ))
+            },
+            |data| {
+                itertools::Either::Right(
+                    (&data
+                        .downcast_ref::<Entry<T>>()
+                        .expect("can't downcast")
+                        .as_slice()[index..=index])
+                        .into_iter()
+                        .map((|e| Some(e)) as fn(&Entry<T>) -> Option<&Entry<T>>),
+                )
+            },
+        )
+    }
+
+    fn par_iter_mut<'a, 'b>(
+        len: usize,
+        lock: &'b mut Self::LockedColumns<'a>,
+    ) -> Self::ParQueryResult<'b> {
+        lock.as_mut().map_or_else(
+            || {
+                rayon::iter::Either::Left(
+                    rayon::iter::repeatn((), len)
+                        .map((|()| None) as fn(()) -> Option<&'a Entry<T>>),
+                )
+            },
+            |data| {
+                rayon::iter::Either::Right(
+                    data.downcast_ref::<Entry<T>>()
+                        .expect("can't downcast")
+                        .as_slice()
+                        .into_par_iter()
+                        .map((|e| Some(e)) as fn(&Entry<T>) -> Option<&Entry<T>>),
+                )
+            },
+        )
+    }
+}
+
+impl<'s, T: Send + Sync + 'static> IsQuery for Maybe<&'s mut T> {
+    type LockedColumns<'a> = Option<RwLockWriteGuard<'a, AnyVec<dyn Send + Sync + 'static>>>;
+    type ExtensionColumns = ();
+    type QueryResult<'a> = itertools::Either<
+        std::iter::RepeatWith<fn() -> Option<&'a mut Entry<T>>>,
+        std::iter::Map<
+            std::slice::IterMut<'a, Entry<T>>,
+            for<'r> fn(&'r mut Entry<T>) -> Option<&'r mut Entry<T>>,
+        >,
+    >;
+    type ParQueryResult<'a> = rayon::iter::Either<
+        rayon::iter::Map<rayon::iter::RepeatN<()>, fn(()) -> Option<&'a mut Entry<T>>>,
+        rayon::iter::Map<
+            rayon::slice::IterMut<'a, Entry<T>>,
+            for<'r> fn(&'r mut Entry<T>) -> Option<&'r mut Entry<T>>,
+        >,
+    >;
+    type QueryRow<'a> = Option<&'a mut Entry<T>>;
+
+    fn borrows() -> Vec<Borrow> {
+        <&mut T as IsQuery>::borrows()
+    }
+
+    fn lock_columns<'a>(arch: &'a Archetype) -> Self::LockedColumns<'a> {
+        <&mut T as IsQuery>::lock_columns(arch)
+    }
+
+    fn extend_locked_columns<'a, 'b>(
+        _: &'b mut Self::LockedColumns<'a>,
+        _: Self::ExtensionColumns,
+        _: Option<(&mut Vec<usize>, &mut usize)>,
+    ) {
+        panic!("cannot extend Maybe columns");
+    }
+
+    fn iter_mut<'a, 'b>(lock: &'b mut Self::LockedColumns<'a>) -> Self::QueryResult<'b> {
+        lock.as_mut().map_or_else(
+            || {
+                itertools::Either::Left(std::iter::repeat_with(
+                    (|| None) as fn() -> Option<&'a mut Entry<T>>,
+                ))
+            },
+            |data| {
+                itertools::Either::Right(
+                    data.downcast_mut::<Entry<T>>()
+                        .expect("can't downcast")
+                        .into_iter()
+                        .map((|e| Some(e)) as fn(&mut Entry<T>) -> Option<&mut Entry<T>>),
+                )
+            },
+        )
+    }
+
+    fn iter_one<'a, 'b>(
+        lock: &'b mut Self::LockedColumns<'a>,
+        index: usize,
+    ) -> Self::QueryResult<'b> {
+        lock.as_mut().map_or_else(
+            || {
+                itertools::Either::Left(std::iter::repeat_with(
+                    (|| None) as fn() -> Option<&'b mut Entry<T>>,
+                ))
+            },
+            |data| {
+                itertools::Either::Right(
+                    (&mut data
+                        .downcast_mut::<Entry<T>>()
+                        .expect("can't downcast")
+                        .as_mut_slice()[index..=index])
+                        .into_iter()
+                        .map((|e| Some(e)) as fn(&mut Entry<T>) -> Option<&mut Entry<T>>),
+                )
+            },
+        )
+    }
+
+    fn par_iter_mut<'a, 'b>(
+        len: usize,
+        lock: &'b mut Self::LockedColumns<'a>,
+    ) -> Self::ParQueryResult<'b> {
+        lock.as_mut().map_or_else(
+            || {
+                rayon::iter::Either::Left(
+                    rayon::iter::repeatn((), len)
+                        .map((|()| None) as fn(()) -> Option<&'a mut Entry<T>>),
+                )
+            },
+            |data| {
+                rayon::iter::Either::Right(
+                    data.downcast_mut::<Entry<T>>()
+                        .expect("can't downcast")
+                        .as_mut_slice()
+                        .into_par_iter()
+                        .map((|e| Some(e)) as fn(&mut Entry<T>) -> Option<&mut Entry<T>>),
+                )
+            },
+        )
+    }
+}
+
+pub struct MaybeParIter<T>(T);
+
+impl<T: IntoParallelIterator> IntoParallelIterator for MaybeParIter<T> {
+    type Iter = rayon::iter::Map<T::Iter, fn(T::Item) -> Option<T::Item>>;
+
+    type Item = Option<T::Item>;
+
+    fn into_par_iter(self) -> Self::Iter {
+        self.0.into_par_iter().map(Option::Some)
     }
 }
 
@@ -271,8 +503,11 @@ where
         A::iter_one(lock, index)
     }
 
-    fn par_iter_mut<'a, 'b>(lock: &'b mut Self::LockedColumns<'a>) -> Self::ParQueryResult<'b> {
-        A::par_iter_mut(lock)
+    fn par_iter_mut<'a, 'b>(
+        len: usize,
+        lock: &'b mut Self::LockedColumns<'a>,
+    ) -> Self::ParQueryResult<'b> {
+        A::par_iter_mut(len, lock)
     }
 }
 
@@ -322,9 +557,10 @@ where
     }
 
     fn par_iter_mut<'a, 'b>(
+        len: usize,
         (col_a, col_b): &'b mut Self::LockedColumns<'a>,
     ) -> Self::ParQueryResult<'b> {
-        A::par_iter_mut(col_a).zip(B::par_iter_mut(col_b))
+        A::par_iter_mut(len, col_a).zip(B::par_iter_mut(len, col_b))
     }
 }
 
@@ -385,6 +621,12 @@ impl AllArchetypes {
     }
 }
 
+pub type QueryIter<'a, 'b, Q> = std::iter::FlatMap<
+    std::slice::IterMut<'b, <Q as IsQuery>::LockedColumns<'a>>,
+    <Q as IsQuery>::QueryResult<'b>,
+    for<'r> fn(&'r mut <Q as IsQuery>::LockedColumns<'a>) -> <Q as IsQuery>::QueryResult<'r>,
+>;
+
 /// A query that is active.
 pub struct QueryGuard<'a, Q: IsQuery + ?Sized>(Vec<Q::LockedColumns<'a>>, &'a AllArchetypes);
 
@@ -392,35 +634,27 @@ impl<'a, Q> QueryGuard<'a, Q>
 where
     Q: IsQuery + ?Sized,
 {
-    pub fn iter_mut<'b>(
-        &mut self,
-    ) -> std::iter::FlatMap<
-        std::slice::IterMut<'_, Q::LockedColumns<'a>>,
-        Q::QueryResult<'_>,
-        for<'r> fn(&'r mut Q::LockedColumns<'a>) -> Q::QueryResult<'r>,
-    > {
+    pub fn iter_mut(&mut self) -> QueryIter<'a, '_, Q> {
         self.0.iter_mut().flat_map(|cols| Q::iter_mut(cols))
     }
 
     pub fn find_one(&mut self, entity_id: usize) -> Option<Q::QueryRow<'_>> {
-        self.1
-            .entity_lookup
-            .get(entity_id)
-            .copied()
-            .flatten()
-            .map(|(archetype_index, component_index)| {
-                let mut vs = Q::iter_one(&mut self.0[archetype_index], component_index)
-                    .collect::<Vec<_>>();
+        self.1.entity_lookup.get(entity_id).copied().flatten().map(
+            |(archetype_index, component_index)| {
+                let mut vs =
+                    Q::iter_one(&mut self.0[archetype_index], component_index).collect::<Vec<_>>();
                 vs.pop().unwrap()
-            })
+            },
+        )
     }
 
     pub fn par_iter_mut(
         &mut self,
     ) -> rayon::iter::Flatten<rayon::vec::IntoIter<<Q as IsQuery>::ParQueryResult<'_>>> {
-        self.0
-            .iter_mut()
-            .map(|cols| Q::par_iter_mut(cols))
+        let size_hints = self.1.archetypes.iter().map(|arch| arch.index_lookup.len());
+        size_hints
+            .zip(self.0.iter_mut())
+            .map(|(len, cols)| Q::par_iter_mut(len, cols))
             .collect::<Vec<_>>()
             .into_par_iter()
             .flatten()
@@ -449,14 +683,18 @@ where
         let all = Read::<AllArchetypes>::construct(loan_mngr)?;
         Ok(Query(Box::new(all), PhantomData))
     }
+
+    fn plugin() -> apecs::plugins::Plugin {
+        apecs::plugins::Plugin::default().with_default_resource::<AllArchetypes>()
+    }
 }
 
 impl<Q> Query<Q>
 where
     Q: IsQuery + ?Sized,
 {
-    /// Acquire a lock on the archetype columns needed to perform the query.
-    pub fn lock(&self) -> QueryGuard<'_, Q> {
+    /// Acquire a lock on the archetype columns needed to iterate the query.
+    pub fn query(&self) -> QueryGuard<'_, Q> {
         QueryGuard(
             self.0
                 .archetypes
@@ -596,5 +834,36 @@ mod test {
             count += 1;
         }
         assert_eq!(3, count);
+    }
+
+    #[test]
+    fn can_query_maybe() {
+        let mut archset = AllArchetypes::default();
+        archset.insert_bundle(0, (0.0f32, "zero".to_string()));
+        archset.insert_bundle(1, (1.0f32, "one".to_string(), false));
+        archset.insert_bundle(2, (2.0f32, "two".to_string()));
+
+        let cols = archset
+            .query::<(&f32, Maybe<&bool>, &String)>()
+            .iter_mut()
+            .map(|(f, mb, s)| (**f, mb.map(|b| **b), s.value().clone()))
+            .collect::<Vec<_>>();
+        // we can't depend on any given order because the order depends on
+        // the order of archetypes
+        assert_eq!(
+            vec![
+                (0.0, None, "zero".to_string()),
+                (2.0, None, "two".to_string()),
+                (1.0, Some(false), "one".to_string()),
+            ],
+            cols
+        );
+
+        let par_cols = archset
+            .query::<(&f32, Maybe<&bool>, &String)>()
+            .par_iter_mut()
+            .map(|(f, mb, s)| (**f, mb.map(|b| **b), s.value().clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(cols, par_cols);
     }
 }

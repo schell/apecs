@@ -2,6 +2,11 @@
 
 APECS is an **A**syncronous **P**arallel **ECS**.
 
+This supports traditional synchronous systems and less traditional asyncronous
+systems and can spawn asynchronous operations.
+
+Component storage is archetypal with a nice query API.
+
 ## Asyncronous
 
 Most ECSs are polling (`legion` example code):
@@ -44,8 +49,8 @@ struct DataOne(u32);
     })
     .unwrap();
 
-world.tick().unwrap();
-world.tick().unwrap();
+world.tick();
+world.tick();
 
 let data: Read<DataOne> = world.fetch().unwrap();
 assert_eq!(2, *data.0);
@@ -73,9 +78,9 @@ struct DataOne(u32);
         Ok(())
     });
 
-world.tick().unwrap();
-world.tick().unwrap();
-world.tick().unwrap();
+world.tick();
+world.tick();
+world.tick();
 
 let data: Read<DataOne> = world.fetch().unwrap();
 assert_eq!(2, *data.0);
@@ -116,18 +121,18 @@ world
     .with_sync_systems_run_in_parallel(true);
 ```
 
-It also supports "inner parallelism" (that is, joining entities and components whithin a system, in parallel):
+It also supports "inner parallelism" (that is, querying entities and components within a system in parallel):
 ```rust,ignore
-let mut vs_abc: VecStorage<String> = make_abc_vecstorage();
-let vs_246: VecStorage<u32> = make_2468_vecstorage();
-(&mut vs_abc, &vs_246).par_join().for_each(|(abc, num)| {
-    *abc.value() = format!("{:.2}", num);
-});
+fn system(data: Query<(&mut String, &u32)>) -> ShouldContinue {
+    data.query().par_iter_mut().for_each(|(abc, num)| {
+        *abc = format!("{:.2}", num);
+    });
+}
 ```
 
 ## Examples
 
-(go to your terminal)
+see benchmarks
 
 ## Benchmarks
 

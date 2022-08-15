@@ -14,5 +14,5 @@ async fn can_run_async() {
         .with_async(async move {
             rx.recv().await.unwrap();
         });
-    world.run().unwrap();
+    world.run();
 }

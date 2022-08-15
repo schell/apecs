@@ -125,7 +125,7 @@ impl Plugin {
 #[cfg(test)]
 mod test {
     use crate as apecs;
-    use apecs::{system::*, storage::separated::*, world::World, CanFetch, Write};
+    use apecs::{system::*, storage::*, world::World, CanFetch};
 
     #[test]
      fn sanity() {
@@ -135,21 +135,18 @@ mod test {
             .try_init();
 
         #[derive(CanFetch)]
-        struct MyData {
-            strings: Write<VecStorage<&'static str>>,
-            numbers: Write<VecStorage<usize>>,
-        }
+        struct MyData(Query<(&'static mut String, &'static mut usize)>);
 
-        fn my_system(mut data: MyData) -> anyhow::Result<ShouldContinue> {
-            for (_, n) in (&data.strings, &mut data.numbers).join() {
-                n.set_value(n.value() + 1);
+        fn my_system(data: MyData) -> anyhow::Result<ShouldContinue> {
+            for (_, n) in data.0.query().iter_mut() {
+                **n = **n + 1;
             }
 
             ok()
         }
 
         let plugin = MyData::plugin();
-        assert_eq!(2, plugin.resources.len());
+        assert_eq!(1, plugin.resources.len());
 
         let mut world = World::default();
         world.with_system("my_system", my_system).unwrap();

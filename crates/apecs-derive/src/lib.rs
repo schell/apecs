@@ -55,7 +55,7 @@ fn gen_from_body(ast: &Data, name: &Ident) -> (proc_macro2::TokenStream, Vec<Typ
         }
         DataType::Tuple => {
             let count = tys.len();
-            let fetch = vec![quote! { apecs::CanFetch::construct(loan_mngr) }; count];
+            let fetch = vec![quote! { apecs::CanFetch::construct(loan_mngr)? }; count];
 
             quote! {
                 #name ( #( #fetch ),* )
@@ -394,8 +394,8 @@ pub fn impl_isquery_tuple(input: proc_macro::TokenStream) -> proc_macro::TokenSt
     let par_iter_mut_impl_zip = tys.iter().zip(nvars.iter()).fold(None, |prev, (ty, n)| {
         Some(
             prev.map_or_else(
-                || quote! {#ty::par_iter_mut(#n)},
-                |p| quote! {#p.zip(#ty::par_iter_mut(#n))}
+                || quote! {#ty::par_iter_mut(len, #n)},
+                |p| quote! {#p.zip(#ty::par_iter_mut(len, #n))}
             )
         )
     }).unwrap();
@@ -481,6 +481,7 @@ pub fn impl_isquery_tuple(input: proc_macro::TokenStream) -> proc_macro::TokenSt
 
             #[inline]
             fn par_iter_mut<'a, 'b>(
+                len: usize,
                 (#(#nvars),*): &'b mut Self::LockedColumns<'a>
             ) -> Self::ParQueryResult<'b> {
                 #par_iter_mut_impl

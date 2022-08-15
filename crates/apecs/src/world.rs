@@ -9,21 +9,18 @@ use anyhow::Context;
 use async_oneshot::oneshot;
 use rustc_hash::FxHashSet;
 
-#[cfg(feature = "storage-archetype")]
-use crate::storage::archetype::*;
-#[cfg(feature = "storage-separated")]
-use crate::storage::separated::*;
 use crate::{
     mpsc, oneshot,
-    plugins::Plugin,
+    plugins::{Plugin, entity_upkeep::plugin_storage_archetype_plugin},
     resource_manager::{LoanManager, ResourceManager},
     schedule::{IsSchedule, UntypedSystemData},
     spsc,
+    storage::{AllArchetypes, IsBundle, IsQuery},
     system::{
         AsyncSchedule, AsyncSystem, AsyncSystemFuture, AsyncSystemRequest, ShouldContinue,
         SyncSchedule, SyncSystem,
     },
-    CanFetch, IsResource, Request, Resource, ResourceId, ResourceRequirement, WriteExpect,
+    CanFetch, IsResource, Request, Resource, ResourceId, ResourceRequirement, Write,
 };
 
 /// Fetches world resources in async systems.
@@ -139,62 +136,18 @@ impl Entity {
         self.id
     }
 
-    #[cfg(feature = "storage-separated")]
-    /// Lazily add a component to separated storage.
-    ///
-    /// This entity will have the associated component after the next tick.
-    pub fn with_sep<T: Send + Sync + 'static>(mut self, component: T) -> anyhow::Result<Self> {
-        self.add_sep(component)?;
-        Ok(self)
-    }
-
-    #[cfg(feature = "storage-separated")]
-    /// Lazily add a component to separated storage.
-    ///
-    /// This entity will have the associated component after the next tick.
-    pub fn add_sep<T: Send + Sync + 'static>(&mut self, component: T) -> anyhow::Result<()> {
-        let id = self.id;
-        let (tx, rx) = oneshot();
-        let op = LazyOp {
-            op: Box::new(move |world: &mut World| {
-                if !world.has_resource::<VecStorage<T>>() {
-                    world.with_default_storage::<T>()?;
-                }
-                let mut storage: WriteStore<T> = world.fetch()?;
-                let _ = storage.insert(id, component);
-                Ok(Arc::new(()) as Arc<dyn Any + Send + Sync>)
-            }),
-            tx,
-        };
-        self.op_sender
-            .try_send(op)
-            .context("could not send entity op")?;
-        self.op_receivers.push(rx);
-        Ok(())
-    }
-
-    #[cfg(feature = "storage-archetype")]
     /// Lazily add a component bundle to archetype storage.
     ///
     /// This entity will have the associated components after the next tick.
-    pub fn with_bundle<B: IsBundle + Send + Sync + 'static>(
-        mut self,
-        bundle: B,
-    ) -> anyhow::Result<Self> {
-        self.add_bundle(bundle)?;
-        Ok(self)
+    pub fn with_bundle<B: IsBundle + Send + Sync + 'static>(mut self, bundle: B) -> Self {
+        self.add_bundle(bundle);
+        self
     }
 
-    #[cfg(feature = "storage-archetype")]
     /// Lazily add a component bundle to archetype storage.
     ///
     /// This entity will have the associated components after the next tick.
-    pub fn add_bundle<B: IsBundle + Send + Sync + 'static>(
-        &mut self,
-        bundle: B,
-    ) -> anyhow::Result<()> {
-        use crate::Write;
-
+    pub fn add_bundle<B: IsBundle + Send + Sync + 'static>(&mut self, bundle: B) {
         let id = self.id;
         let (tx, rx) = oneshot();
         let op = LazyOp {
@@ -210,62 +163,31 @@ impl Entity {
         };
         self.op_sender
             .try_send(op)
-            .context("could not send entity op")?;
+            .expect("could not send entity op");
         self.op_receivers.push(rx);
-        Ok(())
     }
 
     /// Await a future that completes after all lazy updates have been
     /// performed.
-    pub async fn updates(&mut self) -> anyhow::Result<()> {
+    pub async fn updates(&mut self) {
         let updates: Vec<oneshot::Receiver<Arc<dyn Any + Send + Sync>>> =
             std::mem::take(&mut self.op_receivers);
         for update in updates.into_iter() {
             let _ = update
                 .await
-                .map_err(|_| anyhow::anyhow!("updates oneshot is closed"))?;
+                .map_err(|_| anyhow::anyhow!("updates oneshot is closed"))
+                .unwrap();
         }
-        Ok(())
     }
 
-    #[cfg(feature = "storage-separated")]
-    /// Get the value of a specific component in separated storage, if it
-    /// exists.
-    pub async fn get_sep<T: Clone + Send + Sync + 'static>(&self) -> anyhow::Result<Option<T>> {
-        let id = self.id();
-        let (tx, rx) = oneshot();
-        self.op_sender
-            .try_send(LazyOp {
-                op: Box::new(move |world: &mut World| {
-                    if !world.has_resource::<VecStorage<T>>() {
-                        world.with_default_storage::<T>()?;
-                    }
-                    let storage: ReadStore<T> = world.fetch()?;
-                    Ok(Arc::new(storage.get(id).map(Clone::clone)) as Arc<dyn Any + Send + Sync>)
-                }),
-                tx,
-            })
-            .context("could not send entity op")?;
-        let arc: Arc<dyn Any + Send + Sync> = rx
-            .await
-            .map_err(|_| anyhow::anyhow!("could not receive get request"))?;
-        let arc_c: Arc<Option<T>> = arc
-            .downcast()
-            .map_err(|_| anyhow::anyhow!("could not downcast"))?;
-        let c: Option<T> =
-            Arc::try_unwrap(arc_c).map_err(|_| anyhow::anyhow!("could not unwrap"))?;
-        Ok(c)
-    }
-
-    #[cfg(feature = "storage-archetype")]
-    /// Visit a query row to a component entry bundle in archetype storage, if
-    /// it exists.
-    pub async fn visit_bundle<Q: IsQuery + 'static, T: Send + Sync + 'static>(
+    /// Visit this entity's query row in storage, if it exists.
+    ///
+    /// ## Panics
+    /// Panics if the query is malformed (the bundle is not unique).
+    pub async fn visit<Q: IsQuery + 'static, T: Send + Sync + 'static>(
         &self,
         f: impl FnOnce(Q::QueryRow<'_>) -> T + Send + Sync + 'static,
-    ) -> anyhow::Result<Option<T>> {
-        use crate::Write;
-
+    ) -> Option<T> {
         let id = self.id();
         let (tx, rx) = oneshot();
         self.op_sender
@@ -280,42 +202,20 @@ impl Entity {
                 }),
                 tx,
             })
-            .context("could not send entity op")?;
+            .context("could not send entity op")
+            .unwrap();
         let arc: Arc<dyn Any + Send + Sync> = rx
             .await
-            .map_err(|_| anyhow::anyhow!("could not receive get request"))?;
+            .map_err(|_| anyhow::anyhow!("could not receive get request"))
+            .unwrap();
         let arc_c: Arc<Option<T>> = arc
             .downcast()
-            .map_err(|_| anyhow::anyhow!("could not downcast"))?;
-        let c: Option<T> =
-            Arc::try_unwrap(arc_c).map_err(|_| anyhow::anyhow!("could not unwrap"))?;
-        Ok(c)
-    }
-}
-
-pub struct SeparateEntityBuilder<'a> {
-    entity: Entity,
-    world: &'a mut World,
-}
-
-impl<'a> SeparateEntityBuilder<'a> {
-    /// Adds a component immediately.
-    pub fn with<T: Send + Sync + 'static>(self, component: T) -> anyhow::Result<Self> {
-        self.world
-            .resource_manager
-            .unify_resources("SeparateEntityBuilder::with")?;
-
-        if !self.world.has_resource::<VecStorage<T>>() {
-            self.world.with_default_storage::<T>()?;
-        }
-        let mut storage: WriteStore<T> = self.world.fetch()?;
-        let _ = storage.insert(self.entity.id(), component);
-        Ok(self)
-    }
-
-    /// Build and return the entity
-    pub fn build(self) -> Entity {
-        self.entity
+            .map_err(|_| anyhow::anyhow!("could not downcast"))
+            .unwrap();
+        let c: Option<T> = Arc::try_unwrap(arc_c)
+            .map_err(|_| anyhow::anyhow!("could not unwrap"))
+            .unwrap();
+        c
     }
 }
 
@@ -340,10 +240,8 @@ impl Default for Entities {
 impl Entities {
     pub fn new(lazy_op_sender: mpsc::Sender<LazyOp>) -> Self {
         Self {
-            next_k: 0,
-            dead: Default::default(),
-            recycle: Default::default(),
             lazy_op_sender,
+            ..Default::default()
         }
     }
 
@@ -366,9 +264,11 @@ impl Entities {
     }
 
     pub fn recycle_dead(&mut self) {
-        for mut dead in std::mem::take(&mut self.dead).into_iter() {
-            dead.gen += 1;
-            self.recycle.push(dead);
+        if !self.dead.is_empty() {
+            for mut dead in std::mem::take(&mut self.dead).into_iter() {
+                dead.gen += 1;
+                self.recycle.push(dead);
+            }
         }
     }
 }
@@ -400,6 +300,8 @@ impl Default for World {
             .with_resource(lazy)
             .unwrap()
             .with_resource(entities)
+            .unwrap()
+            .with_plugin(plugin_storage_archetype_plugin())
             .unwrap();
         world
     }
@@ -507,15 +409,6 @@ impl World {
         self.with_plugin(T::plugin())
     }
 
-    pub fn entity(&mut self) -> anyhow::Result<SeparateEntityBuilder<'_>> {
-        let mut entities = self.fetch::<WriteExpect<Entities>>()?;
-        let entity = entities.create();
-        Ok(SeparateEntityBuilder {
-            world: self,
-            entity,
-        })
-    }
-
     pub fn with_system<T, F>(
         &mut self,
         name: impl AsRef<str>,
@@ -611,12 +504,13 @@ impl World {
     ///
     /// Calls `World::tick_async`, then `World::tick_sync`, then
     /// `World::tick_lazy`.
-    pub fn tick(&mut self) -> anyhow::Result<()> {
-        self.tick_async()?;
-        self.tick_sync()?;
-        self.tick_lazy()?;
-        log::trace!(" ");
-        Ok(())
+    ///
+    /// ## Panics
+    /// Panics if any sub-tick step returns an error
+    pub fn tick(&mut self) {
+        self.tick_async().unwrap();
+        self.tick_sync().unwrap();
+        self.tick_lazy().unwrap();
     }
 
     /// Just tick the synchronous systems.
@@ -721,11 +615,16 @@ impl World {
         T::construct(&mut LoanManager(&mut self.resource_manager))
     }
 
+    pub fn entity(&mut self) -> Entity {
+        let mut entities = self.fetch::<Write<Entities>>().unwrap();
+        entities.create()
+    }
+
     /// Run all system and non-system futures until they have all finished or
     /// one system has erred, whichever comes first.
-    pub fn run(&mut self) -> anyhow::Result<&mut Self> {
+    pub fn run(&mut self) -> &mut Self {
         loop {
-            self.tick()?;
+            self.tick();
             if self.async_systems.is_empty()
                 && self.sync_schedule.is_empty()
                 && self.async_task_executor.is_empty()
@@ -734,7 +633,7 @@ impl World {
             }
         }
 
-        Ok(self)
+        self
     }
 
     pub fn get_schedule_description(&self) -> String {
@@ -744,33 +643,36 @@ impl World {
 
 #[cfg(test)]
 mod test {
-    use std::ops::DerefMut;
+    use std::{ops::DerefMut, sync::Mutex};
 
     use crate::{
-        self as apecs,
-        storage::archetype::{AllArchetypes, Query},
-    };
-    use apecs::{
-        anyhow, spsc, storage::separated::*, system::*, world::*, Read, Write, WriteExpect,
+        self as apecs, anyhow, spsc,
+        storage::{AllArchetypes, Query},
+        system::*,
+        world::*,
+        Read, Write, WriteExpect,
     };
     use rustc_hash::FxHashMap;
 
     #[test]
-    fn can_closure_system() -> anyhow::Result<()> {
+    fn can_closure_system() {
+        #[derive(Copy, Clone, Debug, PartialEq)]
+        struct F32s(f32, f32);
+
         #[derive(CanFetch)]
         struct StatefulSystemData {
-            positions: Read<VecStorage<(f32, f32)>>,
+            positions: Query<&'static F32s>,
         }
 
         fn mk_stateful_system(
-            tx: spsc::Sender<(f32, f32)>,
+            tx: spsc::Sender<F32s>,
         ) -> impl FnMut(StatefulSystemData) -> anyhow::Result<ShouldContinue> {
             println!("making stateful system");
-            let mut highest_pos: (f32, f32) = (0.0, f32::NEG_INFINITY);
+            let mut highest_pos: F32s = F32s(0.0, f32::NEG_INFINITY);
 
             move |data: StatefulSystemData| {
                 println!("running stateful system: highest_pos:{:?}", highest_pos);
-                for pos in data.positions.iter() {
+                for pos in data.positions.query().iter_mut() {
                     if pos.1 > highest_pos.1 {
                         highest_pos = *pos.value();
                         println!("set new highest_pos: {:?}", highest_pos);
@@ -784,24 +686,21 @@ mod test {
             }
         }
 
-        let mut positions: VecStorage<(f32, f32)> = VecStorage::default();
-        positions.insert(0, (20.0, 30.0));
-        positions.insert(1, (0.0, 0.0));
-        positions.insert(2, (100.0, 100.0));
-
         let (tx, rx) = spsc::bounded(1);
 
         let mut world = World::default();
-        world
-            .with_resource(positions)?
-            .with_system("stateful", mk_stateful_system(tx))?;
+        world.with_system("stateful", mk_stateful_system(tx)).unwrap();
+        {
+            let mut archset: Write<AllArchetypes> = world.fetch().unwrap();
+            archset.insert_component(0, F32s(20.0, 30.0));
+            archset.insert_component(1, F32s(0.0, 0.0));
+            archset.insert_component(2, F32s(100.0, 100.0));
+        }
 
-        world.tick()?;
+        world.tick();
 
-        let highest = rx.try_recv()?;
-        assert_eq!(highest, (100.0, 100.0));
-
-        Ok(())
+        let highest = rx.try_recv().unwrap();
+        assert_eq!(F32s(100.0, 100.0), highest);
     }
 
     #[test]
@@ -814,30 +713,22 @@ mod test {
         async fn create(tx: spsc::Sender<()>, mut facade: Facade) -> anyhow::Result<()> {
             log::info!("create running");
             tx.try_send(()).unwrap();
-            let (mut entities, mut names, mut numbers): (
-                WriteExpect<Entities>,
-                Write<VecStorage<String>>,
-                Write<VecStorage<u32>>,
-            ) = facade.fetch().await?;
-            for n in 0..100 {
+            let (mut entities, mut archset): (WriteExpect<Entities>, Write<AllArchetypes>) =
+                facade.fetch().await?;
+            for n in 0..100u32 {
                 let e = entities.create();
-                let _ = names.insert(e.id(), format!("entity_{}", n));
-                let _ = numbers.insert(e.id(), n);
+                archset.insert_bundle(e.id(), (format!("entity_{}", n), n))
             }
 
             Ok(())
         }
 
         fn maintain_map(
-            mut data: (
-                Read<VecStorage<String>>,
-                Read<VecStorage<u32>>,
-                Write<FxHashMap<String, u32>>,
-            ),
+            mut data: (Query<(&String, &u32)>, Write<FxHashMap<String, u32>>),
         ) -> anyhow::Result<ShouldContinue> {
-            for (name, number) in (&data.0, &data.1).join() {
-                if !data.2.contains_key(name.value()) {
-                    let _ = data.2.insert(name.to_string(), *number.value());
+            for (name, number) in data.0.query().iter_mut() {
+                if !data.1.contains_key(name.value()) {
+                    let _ = data.1.insert(name.to_string(), *number.value());
                 }
             }
 
@@ -852,12 +743,12 @@ mod test {
             .unwrap();
 
         // create system runs - sending on the channel and making the fetch request
-        world.tick().unwrap();
+        world.tick();
         rx.try_recv().unwrap();
 
         // world sends resources to the create system which makes
         // entities+components, then the maintain system updates the book
-        world.tick().unwrap();
+        world.tick();
 
         let book = world.fetch::<Read<FxHashMap<String, u32>>>().unwrap();
         for n in 0..100 {
@@ -907,8 +798,8 @@ mod test {
         // it takes two ticks for asys to run:
         // 1. execute up to the first await point
         // 2. deliver resources and compute the rest
-        world.tick().unwrap();
-        world.tick().unwrap();
+        world.tick();
+        world.tick();
         assert_eq!(Some(1), rx.try_recv().ok());
     }
 
@@ -919,89 +810,79 @@ mod test {
 
         let mut world = World::default();
         assert!(world.has_resource::<Entities>(), "missing entities");
-        let e = world
-            .entity()
-            .unwrap()
-            .with(DataA(0.0))
-            .unwrap()
-            .with(DataB(0.0))
-            .unwrap()
-            .build();
+        let e = world.entity().with_bundle((DataA(0.0), DataB(0.0)));
         let id = e.id();
 
         world.with_async(async move {
             println!("updating entity");
-            e.with_sep(DataA(666.0))
-                .unwrap()
-                .with_sep(DataB(666.0))
-                .unwrap()
-                .updates()
-                .await
-                .unwrap();
+            e.with_bundle((DataA(666.0), DataB(666.0))).updates().await;
             println!("done!");
         });
 
         while !world.async_task_executor.is_empty() {
-            world.tick().unwrap();
+            world.tick();
         }
 
-        let (a_store, b_store): (ReadStore<DataA>, ReadStore<DataB>) = world.fetch().unwrap();
-        let a = a_store.get(id).unwrap();
-        assert_eq!(a.0, 666.0);
-
-        let b = b_store.get(id).unwrap();
-        assert_eq!(b.0, 666.0);
+        let data: Query<(&DataA, &DataB)> = world.fetch().unwrap();
+        let mut q = data.query();
+        let (a, b) = q.find_one(id).unwrap();
+        assert_eq!(666.0, a.0);
+        assert_eq!(666.0, b.0);
     }
 
-    //#[test]
-    // fn entities_can_lazy_add_and_get() {
-    //    #[derive(Debug, Clone, PartialEq)]
-    //    struct Name(&'static str);
+    #[test]
+    fn entities_can_lazy_add_and_get() {
+        #[derive(Debug, Clone, PartialEq)]
+        struct Name(&'static str);
 
-    //    #[derive(Debug, Clone, PartialEq)]
-    //    struct Age(u32);
+        #[derive(Debug, Clone, PartialEq)]
+        struct Age(u32);
 
-    //    // this tests that we can use an Entity to set components and
-    //    // await those component updates, as well as that ticking the
-    //    // world advances tho async system up to exactly one await
-    //    // point per tick.
-    //    let await_points = Arc::new(Mutex::new(vec![]));
-    //    let awaits = await_points.clone();
-    //    let mut world = World::default();
-    //    world.with_async_system("test", |mut facade| async move {
-    //        await_points.lock().unwrap().push(1);
-    //        let mut e = {
-    //            let mut entities: Write<Entities> = facade.fetch().await?;
-    //            await_points.lock().unwrap().push(2);
-    //            entities.create()
-    //        };
+        // this tests that we can use an Entity to set components and
+        // await those component updates, as well as that ticking the
+        // world advances tho async system up to exactly one await
+        // point per tick.
+        let await_points = Arc::new(Mutex::new(vec![]));
+        let awaits = await_points.clone();
+        let mut world = World::default();
+        world.with_async_system("test", |mut facade| async move {
+            await_points.lock().unwrap().push(1);
+            let mut e = {
+                let mut entities: Write<Entities> = facade.fetch().await?;
+                await_points.lock().unwrap().push(2);
+                entities.create()
+            };
 
-    //        e.lazy_add(Name("ada")).unwrap();
-    //        e.lazy_add(Age(666)).unwrap();
-    //        e.updates().await.unwrap();
-    //        await_points.lock().unwrap().push(3);
+            e.add_bundle((Name("ada"), Age(666)));
+            e.updates().await;
+            await_points.lock().unwrap().push(3);
 
-    //        let name = e.get_sep::<Name>().await.unwrap();
-    //        await_points.lock().unwrap().push(4);
-    //        assert_eq!(Some(Name("ada")), name);
+            let (name, age) = e
+                .visit::<(&Name, &Age), _>(|(name, age)| {
+                    (name.value().clone(), age.value().clone())
+                })
+                .await
+                .unwrap();
+            await_points.lock().unwrap().push(4);
+            assert_eq!(Name("ada"), name);
+            assert_eq!(Age(666), age);
 
-    //        let age = e.get_sep::<Age>().await.unwrap();
-    //        await_points.lock().unwrap().push(5);
-    //        assert_eq!(Some(Age(666)), age);
+            println!("done!");
+            Ok(())
+        });
 
-    //        println!("done!");
-    //        Ok(())
-    //    });
+        for i in 1..=5 {
+            world.tick();
+            // there should only be 4 awaits because the system exits after the 4th
+            let num_awaits = i.min(4);
+            assert_eq!(Some(num_awaits), awaits.lock().unwrap().last().cloned());
+        }
 
-    //    for i in 1..=5 {
-    //        world.tick().unwrap();
-    //        assert!(awaits.lock().unwrap().last().cloned() == Some(i));
-    //    }
-
-    //    let store = world.fetch::<ReadStore<Age>>().unwrap();
-    //    let age = store.get(0).unwrap();
-    //    assert_eq!(&Age(666), age);
-    //}
+        let ages = world.fetch::<Query<&Age>>().unwrap();
+        let mut q = ages.query();
+        let age = q.find_one(0).unwrap();
+        assert_eq!(&Age(666), age.value());
+    }
 
     #[test]
     fn plugin_inserts_resources_from_canfetch_in_systems() {
@@ -1034,58 +915,16 @@ mod test {
             .try_init();
 
         let mut world = World::default();
-        world
-            .with_resource(AllArchetypes::default())
-            .unwrap()
-            .with_system("one", |query: Query<(&f32, &bool)>| {
-                let mut lock = query.lock();
-                for (_f, _b) in lock.iter_mut() {}
+        world.with_system("one", |q: Query<(&f32, &bool)>| {
+                for (_f, _b) in q.query().iter_mut() {}
                 ok()
             })
             .unwrap()
-            .with_system("two", |query: Query<(&f32, &bool)>| {
-                let mut lock = query.lock();
-                for (_f, _b) in lock.iter_mut() {}
+            .with_system("two", |q: Query<(&f32, &bool)>| {
+                for (_f, _b) in q.query().iter_mut() {}
                 ok()
             })
             .unwrap();
-        world.tick().unwrap();
-    }
-
-    #[cfg(feature = "storage-separated")]
-    #[test]
-    fn can_query_ref_archetypes_in_same_batch() {
-        let _ = env_logger::builder()
-            .is_test(true)
-            .filter_level(log::LevelFilter::Trace)
-            .try_init();
-
-        let mut all = AllArchetypes::default();
-        all.insert_bundle(0, (0.0f32, true));
-        all.insert_bundle(1, (1.0f32, false));
-
-        let mut world = World::default();
-        world
-            .with_resource(all)
-            .unwrap()
-            .with_system("one", |query: Query<(&f32, &bool)>| {
-                let mut lock = query.lock();
-                assert_eq!(
-                    vec![(0, 0.0, true), (1, 1.0, false)],
-                    lock.iter_mut().map(|(f, b)| (f.id(), **f, **b)).collect::<Vec<_>>()
-                );
-                ok()
-            })
-            .unwrap()
-            .with_system("two", |query: Query<(&f32, &bool)>| {
-                let mut lock = query.lock();
-                assert_eq!(
-                    vec![(0, 0.0, true), (1, 1.0, false)],
-                    lock.iter_mut().map(|(f, b)| (f.id(), **f, **b)).collect::<Vec<_>>()
-                );
-                ok()
-            })
-            .unwrap();
-        world.tick().unwrap();
+        world.tick();
     }
 }

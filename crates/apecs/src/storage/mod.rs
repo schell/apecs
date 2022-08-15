@@ -4,14 +4,12 @@
 //! They are not meant to be used together at this time.
 //! To read more about the difference between separated and archetypal storage
 //! check out [this article](https://csherratt.github.io/blog/posts/specs-and-legion/).
-#[cfg(feature = "storage-archetype")]
-pub mod archetype;
-#[cfg(feature = "storage-separated")]
-pub mod separated;
-
 use std::ops::{Deref, DerefMut};
 
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
+
+mod archetype;
+pub use archetype::*;
 
 pub trait HasId {
     fn id(&self) -> usize;
@@ -133,85 +131,6 @@ impl<T> Entry<T> {
 
     pub fn last_changed(&self) -> u64 {
         self.changed
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Maybe<T> {
-    pub key: usize,
-    pub inner: Option<T>,
-}
-
-impl<T> HasId for Maybe<T> {
-    fn id(&self) -> usize {
-        self.key
-    }
-}
-
-pub struct MaybeIter<C: HasId, T: Iterator<Item = C>> {
-    iter: T,
-    id: usize,
-    next_id: usize,
-    next_entry: Option<C>,
-}
-
-impl<C, T> MaybeIter<C, T>
-where
-    C: HasId,
-    T: Iterator<Item = C>,
-{
-    pub(crate) fn new(mut iter: T) -> Self {
-        let next_entry = iter.next();
-        MaybeIter {
-            iter,
-            id: 0,
-            next_id: next_entry.as_ref().map(|e| e.id()).unwrap_or(usize::MAX),
-            next_entry,
-        }
-    }
-}
-
-impl<C, T> Iterator for MaybeIter<C, T>
-where
-    C: HasId,
-    T: Iterator<Item = C>,
-{
-    type Item = Maybe<C>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let entry = if self.next_id == self.id {
-            if let Some(entry) = self.next_entry.take() {
-                self.next_entry = self.iter.next();
-                self.next_id = self
-                    .next_entry
-                    .as_ref()
-                    .map(|e| e.id())
-                    .unwrap_or_else(|| usize::MAX);
-                Some(entry)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        let maybe = Maybe {
-            key: self.id,
-            inner: entry,
-        };
-        self.id += 1;
-        Some(maybe)
-    }
-}
-
-pub struct MaybeParIter<T>(T);
-
-impl<T: IntoParallelIterator> IntoParallelIterator for MaybeParIter<T> {
-    type Iter = rayon::iter::Map<T::Iter, fn(T::Item) -> Option<T::Item>>;
-
-    type Item = Option<T::Item>;
-
-    fn into_par_iter(self) -> Self::Iter {
-        self.0.into_par_iter().map(Option::Some)
     }
 }
 
