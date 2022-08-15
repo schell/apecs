@@ -2,9 +2,9 @@
 //!
 //! Makes sure that destroyed entities have their components removed from
 //! storages.
-use crate::storage::AllArchetypes;
+use crate::storage::ArchetypeSet;
 #[cfg(feature = "storage-archetype")]
-use crate::storage::archetype::AllArchetypes;
+use crate::storage::archetype::ArchetypeSet;
 #[cfg(feature = "storage-separated")]
 use crate::storage::separated::VecStorage;
 use crate::system::{ok, ShouldContinue};
@@ -35,7 +35,7 @@ fn pre_upkeep_system(mut data: PreEntityUpkeepData) -> anyhow::Result<ShouldCont
 }
 
 fn archetype_upkeep_system(
-    mut data: (Read<DestroyedIds>, Write<AllArchetypes>)
+    mut data: (Read<DestroyedIds>, Write<ArchetypeSet>)
 ) -> anyhow::Result<ShouldContinue>
 where
 {
@@ -46,7 +46,7 @@ where
 /// The upkeep plugin for archetype component storage
 pub fn plugin_storage_archetype_plugin() -> Plugin {
     Plugin::default()
-        .with_default_resource::<AllArchetypes>()
+        .with_default_resource::<ArchetypeSet>()
         .with_system("entity_pre_upkeep", pre_upkeep_system, &[])
         .with_system("entity_upkeep_archetype", archetype_upkeep_system, &["entity_pre_upkeep"])
 }
@@ -71,7 +71,7 @@ mod test {
             .unwrap();
 
         let c = {
-            let (mut entities, mut all): (Write<Entities>, Write<AllArchetypes>) =
+            let (mut entities, mut all): (Write<Entities>, Write<ArchetypeSet>) =
                 world.fetch().unwrap();
 
             let a = entities.create();
@@ -87,7 +87,7 @@ mod test {
         world.tick();
 
         {
-            let (q, all): (Query<&usize>, Read<AllArchetypes>) = world.fetch().unwrap();
+            let (q, all): (Query<&usize>, Read<ArchetypeSet>) = world.fetch().unwrap();
             assert_eq!(Some(2), q.query().find_one(c.id()).map(|i| **i), "{:#?}", all.deref());
         }
 
@@ -99,7 +99,7 @@ mod test {
         world.tick();
 
         {
-            let (q, all): (Query<&usize>, Read<AllArchetypes>) = world.fetch().unwrap();
+            let (q, all): (Query<&usize>, Read<ArchetypeSet>) = world.fetch().unwrap();
             assert_eq!(None, q.query().find_one(c.id()), "{:#?}", all.deref());
         }
     }

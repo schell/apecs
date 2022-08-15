@@ -3,8 +3,7 @@ use criterion::{criterion_group, criterion_main, Criterion};
 mod add_remove;
 mod frag_iter;
 mod heavy_compute;
-mod schedule_separate;
-mod schedule_archetype;
+mod schedule;
 mod simple_insert;
 mod simple_iter;
 
@@ -37,12 +36,8 @@ fn bench_simple_insert(c: &mut Criterion) {
     //    criterion::PlotConfiguration::default().
     // summary_scale(criterion::AxisScale::Logarithmic);
     // group.plot_config(plot_config);
-    group.bench_function("apecs::separate", |b| {
-        let mut bench = simple_insert::BenchmarkSeparate::new();
-        b.iter(move || bench.run());
-    });
-    group.bench_function("apecs::archetype", |b| {
-        let mut bench = simple_insert::BenchmarkArchetype::new();
+    group.bench_function("apecs", |b| {
+        let mut bench = simple_insert::Benchmark::new();
         b.iter(move || bench.run());
     });
     group.bench_function("legion", |b| {
@@ -78,12 +73,8 @@ fn bench_add_remove(c: &mut Criterion) {
     //summary_scale(criterion::AxisScale::Logarithmic);
     //group.plot_config(plot_config);
     group.throughput(criterion::Throughput::Elements(10_000));
-    group.bench_function("apecs::separate", |b| {
-        let mut bench = add_remove::BenchmarkSeparate::new();
-        b.iter(move || bench.run());
-    });
-    group.bench_function("apecs::archetype", |b| {
-        let mut bench = add_remove::BenchmarkArchetype::new();
+    group.bench_function("apecs", |b| {
+        let mut bench = add_remove::Benchmark::new();
         b.iter(move || bench.run());
     });
     group.bench_function("legion", |b| {
@@ -121,14 +112,9 @@ fn bench_simple_iter(c: &mut Criterion) {
         let mut bench = legion::simple_iter::Benchmark::new();
         b.iter(move || bench.run());
     });
-    group.bench_function("apecs::separate", |b| {
-        let mut bench = simple_iter::BenchmarkSeparate::new()
+    group.bench_function("apecs", |b| {
+        let mut bench = simple_iter::Benchmark::new()
         .unwrap();
-        b.iter(move || bench.run());
-    });
-    group.bench_function("apecs::archetype", |b| {
-        let mut bench = simple_iter::BenchmarkArchetype::new()
-            .unwrap();
         b.iter(move || bench.run());
     });
     group.bench_function("bevy", |b| {
@@ -158,11 +144,7 @@ fn bench_simple_iter(c: &mut Criterion) {
 fn bench_frag_iter(c: &mut Criterion) {
     let mut group = c.benchmark_group("frag_iter");
 
-    group.bench_function("apecs::separate", |b| {
-        let mut store = frag_iter::sep();
-        b.iter(move || frag_iter::tick_sep(&mut store))
-    });
-    group.bench_function("apecs::archetype", |b| {
+    group.bench_function("apecs", |b| {
         let mut store = frag_iter::arch();
         b.iter(move || frag_iter::tick_arch(&mut store))
     });
@@ -197,12 +179,8 @@ fn bench_frag_iter(c: &mut Criterion) {
 fn bench_schedule(c: &mut Criterion) {
     let mut group = c.benchmark_group("schedule");
 
-    group.bench_function("apecs::separate", |b| {
-        let mut bench = schedule_separate::Benchmark::new();
-        b.iter(move || bench.run())
-    });
-    group.bench_function("apecs::archetype", |b| {
-        let mut bench = schedule_archetype::Benchmark::new();
+    group.bench_function("apecs", |b| {
+        let mut bench = schedule::Benchmark::new();
         b.iter(move || bench.run())
     });
     group.bench_function("legion", |b| {
@@ -232,14 +210,9 @@ fn bench_schedule(c: &mut Criterion) {
 fn bench_heavy_compute(c: &mut Criterion) {
     let mut group = c.benchmark_group("heavy_compute");
 
-    group.bench_function("apecs::storage::archetype", |b| {
-        let mut bench = heavy_compute::BenchmarkArchetype::new()
+    group.bench_function("apecs", |b| {
+        let mut bench = heavy_compute::Benchmark::new()
             .unwrap();
-        b.iter(move || bench.run());
-    });
-    group.bench_function("apecs::storage::separate", |b| {
-        let mut bench = heavy_compute::BenchmarkSeparate::new()
-        .unwrap();
         b.iter(move || bench.run());
     });
     group.bench_function("legion", |b| {

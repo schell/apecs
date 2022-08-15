@@ -9,7 +9,7 @@ use std::{
     sync::Arc,
 };
 
-pub use apecs_derive::{CanFetch, StoredComponent_Range, StoredComponent_Vec};
+pub use apecs_derive::CanFetch;
 
 pub mod oneshot {
     pub use async_oneshot::*;

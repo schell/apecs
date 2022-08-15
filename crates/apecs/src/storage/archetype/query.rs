@@ -8,12 +8,11 @@ use parking_lot::{RwLockReadGuard, RwLockWriteGuard};
 use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 
 use crate as apecs;
-use crate::storage::HasId;
 use crate::{
     resource_manager::LoanManager,
     schedule::Borrow,
     storage::{
-        archetype::{AllArchetypes, Archetype},
+        archetype::{ArchetypeSet, Archetype},
         Entry,
     },
     CanFetch, Read, ResourceId,
@@ -470,13 +469,13 @@ impl<'s, T: Send + Sync + 'static> IsQuery for Without<&'s T> {
     fn iter_mut<'a, 'b>(lock: &'b mut Self::LockedColumns<'a>) -> Self::QueryResult<'b> {
         lock.as_mut().map_or_else(
             || itertools::Either::Left(std::iter::repeat(())),
-            |data| itertools::Either::Right(vec![].into_iter()),
+            |_| itertools::Either::Right(vec![].into_iter()),
         )
     }
 
     fn iter_one<'a, 'b>(
         lock: &'b mut Self::LockedColumns<'a>,
-        index: usize,
+        _: usize,
     ) -> Self::QueryResult<'b> {
         lock.as_mut().map_or_else(
             || itertools::Either::Left(std::iter::repeat(())),
@@ -606,7 +605,20 @@ apecs_derive::impl_isquery_tuple!((A, B, C, D, E, F, G, H, I, J));
 apecs_derive::impl_isquery_tuple!((A, B, C, D, E, F, G, H, I, J, K));
 apecs_derive::impl_isquery_tuple!((A, B, C, D, E, F, G, H, I, J, K, L));
 
-impl AllArchetypes {
+impl ArchetypeSet {
+    /// Append to the existing set of archetypes in bulk.
+    ///
+    /// This assumes the entries being inserted have unique ids and don't already
+    /// exist in the set.
+    ///
+    /// ``` rust,ignore
+    /// let mut archset = ArchetypeSet::default();
+    /// let ts = Box::new((0..10000).map(|id| Entry::new(id, Transform(Matrix4::<f32>::from_scale(1.0)))));
+    /// let ps = Box::new((0..10000).map(|id| Entry::new(id, Position(Vector3::unit_x()))));
+    /// let rs = Box::new((0..10000).map(|id| Entry::new(id, Rotation(Vector3::unit_x()))));
+    /// let vs = Box::new((0..10000).map(|id| Entry::new(id, Velocity(Vector3::unit_x()))));
+    /// archset.extend::<(Transform, Position, Rotation, Velocity)>((ts, ps, rs, vs));
+    /// ```
     pub fn extend<B: IsBundle>(&mut self, extension: <B::MutBundle as IsQuery>::ExtensionColumns)
     where
         B::MutBundle: IsQuery,
@@ -659,7 +671,7 @@ pub type QueryIter<'a, 'b, Q> = std::iter::FlatMap<
 >;
 
 /// A query that is active.
-pub struct QueryGuard<'a, Q: IsQuery + ?Sized>(Vec<Q::LockedColumns<'a>>, &'a AllArchetypes);
+pub struct QueryGuard<'a, Q: IsQuery + ?Sized>(Vec<Q::LockedColumns<'a>>, &'a ArchetypeSet);
 
 impl<'a, Q> QueryGuard<'a, Q>
 where
@@ -694,7 +706,7 @@ where
 
 /// A query that has been prepared over all archetypes.
 pub struct Query<T>(
-    Box<dyn Deref<Target = AllArchetypes> + Send + Sync + 'static>,
+    Box<dyn Deref<Target = ArchetypeSet> + Send + Sync + 'static>,
     PhantomData<T>,
 )
 where
@@ -706,17 +718,17 @@ where
 {
     fn borrows() -> Vec<Borrow> {
         let mut bs = <T as IsQuery>::borrows();
-        bs.extend(Read::<AllArchetypes>::borrows());
+        bs.extend(Read::<ArchetypeSet>::borrows());
         bs
     }
 
     fn construct(loan_mngr: &mut LoanManager) -> anyhow::Result<Self> {
-        let all = Read::<AllArchetypes>::construct(loan_mngr)?;
+        let all = Read::<ArchetypeSet>::construct(loan_mngr)?;
         Ok(Query(Box::new(all), PhantomData))
     }
 
     fn plugin() -> apecs::plugins::Plugin {
-        apecs::plugins::Plugin::default().with_default_resource::<AllArchetypes>()
+        apecs::plugins::Plugin::default().with_default_resource::<ArchetypeSet>()
     }
 }
 
@@ -750,7 +762,7 @@ mod test {
             .filter_level(log::LevelFilter::Trace)
             .try_init();
 
-        let mut all = AllArchetypes::default();
+        let mut all = ArchetypeSet::default();
         all.insert_bundle(0, (0.0f32, true));
         all.insert_bundle(1, (1.0f32, false, "hello"));
         all.insert_bundle(2, (2.0f32, true, ()));
@@ -769,7 +781,7 @@ mod test {
             .try_init();
 
         println!("insert");
-        let mut store = AllArchetypes::default();
+        let mut store = ArchetypeSet::default();
         store.insert_bundle(0, (0.0f32, "zero".to_string(), false));
         store.insert_bundle(1, (1.0f32, "one".to_string(), false));
         store.insert_bundle(2, (2.0f32, "two".to_string(), false));
@@ -818,7 +830,7 @@ mod test {
 
     #[test]
     fn query_one() {
-        let mut store = AllArchetypes::default();
+        let mut store = ArchetypeSet::default();
         store.insert_bundle(0, (0.0f32, "zero".to_string(), false));
         store.insert_bundle(1, (1.0f32, "one".to_string(), false));
         store.insert_bundle(2, (2.0f32, "two".to_string(), false));
@@ -847,7 +859,7 @@ mod test {
 
     #[test]
     fn sanity_query_iter() {
-        let mut store = AllArchetypes::default();
+        let mut store = ArchetypeSet::default();
         store.insert_bundle(0, (0.0f32, "zero".to_string(), false));
         store.insert_bundle(1, (1.0f32, "one".to_string(), false));
         store.insert_bundle(2, (2.0f32, "two".to_string(), false));
@@ -869,7 +881,7 @@ mod test {
 
     #[test]
     fn can_query_maybe() {
-        let mut archset = AllArchetypes::default();
+        let mut archset = ArchetypeSet::default();
         archset.insert_bundle(0, (0.0f32, "zero".to_string()));
         archset.insert_bundle(1, (1.0f32, "one".to_string(), false));
         archset.insert_bundle(2, (2.0f32, "two".to_string()));
@@ -899,7 +911,7 @@ mod test {
 
     #[test]
     fn can_query_without() {
-        let mut archset = AllArchetypes::default();
+        let mut archset = ArchetypeSet::default();
         archset.insert_bundle(0, (0.0f32, "zero".to_string()));
         archset.insert_bundle(1, (1.0f32, "one".to_string(), false));
         archset.insert_bundle(2, (2.0f32, "two".to_string()));

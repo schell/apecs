@@ -15,7 +15,7 @@ use crate::{
     resource_manager::{LoanManager, ResourceManager},
     schedule::{IsSchedule, UntypedSystemData},
     spsc,
-    storage::{AllArchetypes, IsBundle, IsQuery},
+    storage::{ArchetypeSet, IsBundle, IsQuery},
     system::{
         AsyncSchedule, AsyncSystem, AsyncSystemFuture, AsyncSystemRequest, ShouldContinue,
         SyncSchedule, SyncSystem,
@@ -152,10 +152,10 @@ impl Entity {
         let (tx, rx) = oneshot();
         let op = LazyOp {
             op: Box::new(move |world: &mut World| {
-                if !world.has_resource::<AllArchetypes>() {
-                    world.with_resource(AllArchetypes::default()).unwrap();
+                if !world.has_resource::<ArchetypeSet>() {
+                    world.with_resource(ArchetypeSet::default()).unwrap();
                 }
-                let mut all: Write<AllArchetypes> = world.fetch()?;
+                let mut all: Write<ArchetypeSet> = world.fetch()?;
                 let _ = all.insert_bundle(id, bundle);
                 Ok(Arc::new(()) as Arc<dyn Any + Send + Sync>)
             }),
@@ -193,10 +193,10 @@ impl Entity {
         self.op_sender
             .try_send(LazyOp {
                 op: Box::new(move |world: &mut World| {
-                    if !world.has_resource::<AllArchetypes>() {
-                        world.with_resource(AllArchetypes::default())?;
+                    if !world.has_resource::<ArchetypeSet>() {
+                        world.with_resource(ArchetypeSet::default())?;
                     }
-                    let mut storage: Write<AllArchetypes> = world.fetch()?;
+                    let mut storage: Write<ArchetypeSet> = world.fetch()?;
                     let mut q = storage.query::<Q>();
                     Ok(Arc::new(q.find_one(id).map(f)) as Arc<dyn Any + Send + Sync>)
                 }),
@@ -647,7 +647,7 @@ mod test {
 
     use crate::{
         self as apecs, anyhow, spsc,
-        storage::{AllArchetypes, Query},
+        storage::{ArchetypeSet, Query},
         system::*,
         world::*,
         Read, Write, WriteExpect,
@@ -691,7 +691,7 @@ mod test {
         let mut world = World::default();
         world.with_system("stateful", mk_stateful_system(tx)).unwrap();
         {
-            let mut archset: Write<AllArchetypes> = world.fetch().unwrap();
+            let mut archset: Write<ArchetypeSet> = world.fetch().unwrap();
             archset.insert_component(0, F32s(20.0, 30.0));
             archset.insert_component(1, F32s(0.0, 0.0));
             archset.insert_component(2, F32s(100.0, 100.0));
@@ -713,7 +713,7 @@ mod test {
         async fn create(tx: spsc::Sender<()>, mut facade: Facade) -> anyhow::Result<()> {
             log::info!("create running");
             tx.try_send(()).unwrap();
-            let (mut entities, mut archset): (WriteExpect<Entities>, Write<AllArchetypes>) =
+            let (mut entities, mut archset): (WriteExpect<Entities>, Write<ArchetypeSet>) =
                 facade.fetch().await?;
             for n in 0..100u32 {
                 let e = entities.create();

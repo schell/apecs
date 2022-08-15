@@ -1,20 +1,21 @@
 //! Operate on all archetypes.
-use std::{any::TypeId, ops::DerefMut};
+use std::{any::TypeId, ops::DerefMut, sync::Arc};
 
 use any_vec::{any_value::AnyValueMut, AnyVec};
+use parking_lot::RwLock;
 
 use crate::storage::Entry;
 
-use super::{bundle::*, Archetype, InnerColumn};
+use super::{bundle::*, Archetype};
 
 #[derive(Debug)]
-pub struct AllArchetypes {
+pub struct ArchetypeSet {
     pub archetypes: Vec<Archetype>,
     // cache of entity_id to (archetype_index, component_index)
     pub(crate) entity_lookup: Vec<Option<(usize, usize)>>,
 }
 
-impl Default for AllArchetypes {
+impl Default for ArchetypeSet {
     fn default() -> Self {
         Self {
             archetypes: Default::default(),
@@ -23,8 +24,8 @@ impl Default for AllArchetypes {
     }
 }
 
-impl AllArchetypes {
-    pub fn get_column<T: 'static>(&self) -> Vec<InnerColumn> {
+impl ArchetypeSet {
+    pub fn get_column<T: 'static>(&self) -> Vec<Arc<RwLock<AnyVec<dyn Send + Sync + 'static>>>> {
         let ty = TypeId::of::<T>();
         self.archetypes
             .iter()
@@ -290,7 +291,9 @@ impl AllArchetypes {
     /// Perform upkeep on all archetypes, removing any given dead ids.
     pub fn upkeep(&mut self, dead_ids: &[usize]) {
         for id in dead_ids {
-            if let Some((archetype_index, component_index)) = self.entity_lookup.get(*id).copied().flatten() {
+            if let Some((archetype_index, component_index)) =
+                self.entity_lookup.get(*id).copied().flatten()
+            {
                 log::trace!(
                     "removing entity {} from archetype {}:{}",
                     id,
@@ -325,10 +328,10 @@ impl AllArchetypes {
 
 #[cfg(test)]
 mod test {
-    use crate::storage::archetype::AllArchetypes;
+    use crate::storage::archetype::ArchetypeSet;
     #[test]
     fn all_archetypes_send_sync() {
-        let _: Box<dyn Send + Sync + 'static> = Box::new(AllArchetypes::default());
+        let _: Box<dyn Send + Sync + 'static> = Box::new(ArchetypeSet::default());
     }
 
     #[test]
@@ -338,7 +341,7 @@ mod test {
             .filter_level(log::LevelFilter::Trace)
             .try_init();
 
-        let mut arch = AllArchetypes::default();
+        let mut arch = ArchetypeSet::default();
         assert!(arch.insert_component(0, 0.0f32).is_none());
         assert!(arch.insert_component(1, 1.0f32).is_none());
         assert!(arch.insert_component(2, 2.0f32).is_none());
@@ -347,7 +350,7 @@ mod test {
         assert!(arch.insert_component(2, "two".to_string()).is_none());
         assert_eq!(arch.insert_component(3, 3.33f32).unwrap(), 3.00);
 
-        let mut arch = AllArchetypes::default();
+        let mut arch = ArchetypeSet::default();
         arch.insert_bundle(0, (0.0f32, "zero", 0u32));
         arch.insert_bundle(1, (1.0f32, "one", 1u32));
         arch.insert_bundle(2, (2.0f32, "two", 2u32));
@@ -358,7 +361,7 @@ mod test {
 
     #[test]
     fn all_archetypes_can_remove() {
-        let mut all = AllArchetypes::default();
+        let mut all = ArchetypeSet::default();
 
         for id in 0..10000 {
             all.insert_component(id, id);

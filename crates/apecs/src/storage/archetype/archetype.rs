@@ -1,16 +1,105 @@
 //! Entity components stored together in contiguous arrays.
-use std::{any::TypeId, sync::Arc};
+use std::{any::TypeId, sync::Arc, ops::{Deref, DerefMut}};
 
 use any_vec::{traits::*, AnyVec};
 use parking_lot::RwLock;
 use smallvec::SmallVec;
 
-use crate::storage::Entry;
-
 use super::bundle::*;
 
-#[derive(Debug)]
-pub struct InnerColumn(Arc<RwLock<AnyVec<dyn Sync + Send + 'static>>>);
+/// Component entries.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Entry<T> {
+    pub(crate) value: T,
+    /// The entity id.
+    pub(crate) key: usize,
+    /// The last time this component was changed.
+    pub(crate) changed: u64,
+    /// Whether this component was added the last time it was changed.
+    pub(crate) added: bool,
+}
+
+impl<T> AsRef<T> for Entry<T> {
+    fn as_ref(&self) -> &T {
+        &self.value
+    }
+}
+
+impl<T> Deref for Entry<T> {
+    type Target = T;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.value
+    }
+}
+
+impl<T> DerefMut for Entry<T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.mark_changed();
+        &mut self.value
+    }
+}
+
+impl<T> Entry<T> {
+    pub fn new(id: usize, value: T) -> Self {
+        Entry {
+            value,
+            changed: crate::system::current_iteration(),
+            added: true,
+            key: id,
+        }
+    }
+
+    pub fn id(&self) -> usize {
+        self.key
+    }
+
+    pub fn value(&self) -> &T {
+        &self.value
+    }
+
+    pub fn set_value(&mut self, t: T) {
+        self.mark_changed();
+        self.value = t;
+    }
+
+    pub fn replace_value(&mut self, t: T) -> T {
+        self.mark_changed();
+        std::mem::replace(&mut self.value, t)
+    }
+
+    pub fn into_inner(self) -> T {
+        self.value
+    }
+
+    pub fn split(self) -> (usize, T) {
+        (self.key, self.value)
+    }
+
+    #[inline]
+    fn mark_changed(&mut self) {
+        self.changed = crate::system::current_iteration();
+        self.added = false;
+    }
+
+    pub fn has_changed_since(&self, iteration: u64) -> bool {
+        self.changed >= iteration
+    }
+
+    pub fn was_added_since(&self, iteration: u64) -> bool {
+        self.changed >= iteration && self.added
+    }
+
+    pub fn was_modified_since(&self, iteration: u64) -> bool {
+        self.changed >= iteration && !self.added
+    }
+
+    pub fn last_changed(&self) -> u64 {
+        self.changed
+    }
+}
 
 /// A collection of entities having the same component types
 #[derive(Debug, Default)]
@@ -107,11 +196,10 @@ impl Archetype {
     }
 
     /// Attempts to get a clone of the column matching the given entry type.
-    pub fn column_clone(&self, ty: &TypeId) -> Option<InnerColumn> {
+    pub fn column_clone(&self, ty: &TypeId) -> Option<Arc<RwLock<AnyVec<dyn Send + Sync + 'static>>>> {
         let i = self.index_of(ty)?;
         let data = self.data[i].clone();
-        let col = InnerColumn(data);
-        Some(col)
+        Some(data)
     }
 
     ///// Insert a bundle of components with the given entity id.
@@ -261,8 +349,6 @@ impl Archetype {
 #[cfg(test)]
 mod test {
     use any_vec::{mem::Heap, AnyVecMut, AnyVecRef};
-
-    use crate::storage::*;
 
     use super::*;
 
