@@ -240,17 +240,7 @@ impl<'s, T: Send + Sync + 'static> IsQuery for &'s mut T {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct Maybe<T> {
-    pub key: usize,
-    pub inner: Option<T>,
-}
-
-impl<T> HasId for Maybe<T> {
-    fn id(&self) -> usize {
-        self.key
-    }
-}
+pub struct Maybe<T>(PhantomData<T>);
 
 impl<'s, T: Send + Sync + 'static> IsQuery for Maybe<&'s T> {
     type LockedColumns<'a> = Option<RwLockReadGuard<'a, AnyVec<dyn Send + Sync + 'static>>>;
@@ -452,15 +442,56 @@ impl<'s, T: Send + Sync + 'static> IsQuery for Maybe<&'s mut T> {
     }
 }
 
-pub struct MaybeParIter<T>(T);
+pub struct Without<T>(PhantomData<T>);
 
-impl<T: IntoParallelIterator> IntoParallelIterator for MaybeParIter<T> {
-    type Iter = rayon::iter::Map<T::Iter, fn(T::Item) -> Option<T::Item>>;
+impl<'s, T: Send + Sync + 'static> IsQuery for Without<&'s T> {
+    type LockedColumns<'a> = Option<RwLockReadGuard<'a, AnyVec<dyn Send + Sync + 'static>>>;
+    type ExtensionColumns = ();
+    type QueryResult<'a> = itertools::Either<std::iter::Repeat<()>, std::vec::IntoIter<()>>;
+    type ParQueryResult<'a> = rayon::iter::RepeatN<()>;
+    type QueryRow<'a> = ();
 
-    type Item = Option<T::Item>;
+    fn borrows() -> Vec<Borrow> {
+        <&mut T as IsQuery>::borrows()
+    }
 
-    fn into_par_iter(self) -> Self::Iter {
-        self.0.into_par_iter().map(Option::Some)
+    fn lock_columns<'a>(arch: &'a Archetype) -> Self::LockedColumns<'a> {
+        <&T as IsQuery>::lock_columns(arch)
+    }
+
+    fn extend_locked_columns<'a, 'b>(
+        _: &'b mut Self::LockedColumns<'a>,
+        _: Self::ExtensionColumns,
+        _: Option<(&mut Vec<usize>, &mut usize)>,
+    ) {
+        panic!("cannot extend Maybe columns");
+    }
+
+    fn iter_mut<'a, 'b>(lock: &'b mut Self::LockedColumns<'a>) -> Self::QueryResult<'b> {
+        lock.as_mut().map_or_else(
+            || itertools::Either::Left(std::iter::repeat(())),
+            |data| itertools::Either::Right(vec![].into_iter()),
+        )
+    }
+
+    fn iter_one<'a, 'b>(
+        lock: &'b mut Self::LockedColumns<'a>,
+        index: usize,
+    ) -> Self::QueryResult<'b> {
+        lock.as_mut().map_or_else(
+            || itertools::Either::Left(std::iter::repeat(())),
+            |_| itertools::Either::Right(vec![].into_iter()),
+        )
+    }
+
+    fn par_iter_mut<'a, 'b>(
+        len: usize,
+        lock: &'b mut Self::LockedColumns<'a>,
+    ) -> Self::ParQueryResult<'b> {
+        lock.as_mut().map_or_else(
+            || rayon::iter::repeatn((), len),
+            |_| rayon::iter::repeatn((), 0),
+        )
     }
 }
 
@@ -848,8 +879,7 @@ mod test {
             .iter_mut()
             .map(|(f, mb, s)| (**f, mb.map(|b| **b), s.value().clone()))
             .collect::<Vec<_>>();
-        // we can't depend on any given order because the order depends on
-        // the order of archetypes
+        // these appear in order of archetypes added
         assert_eq!(
             vec![
                 (0.0, None, "zero".to_string()),
@@ -863,6 +893,34 @@ mod test {
             .query::<(&f32, Maybe<&bool>, &String)>()
             .par_iter_mut()
             .map(|(f, mb, s)| (**f, mb.map(|b| **b), s.value().clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(cols, par_cols);
+    }
+
+    #[test]
+    fn can_query_without() {
+        let mut archset = AllArchetypes::default();
+        archset.insert_bundle(0, (0.0f32, "zero".to_string()));
+        archset.insert_bundle(1, (1.0f32, "one".to_string(), false));
+        archset.insert_bundle(2, (2.0f32, "two".to_string()));
+
+        let cols = archset
+            .query::<(&f32, Without<&bool>, &String)>()
+            .iter_mut()
+            .map(|(f, (), s)| (**f, (), s.value().clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            vec![
+                (0.0, (), "zero".to_string()),
+                (2.0, (), "two".to_string()),
+            ],
+            cols
+        );
+
+        let par_cols = archset
+            .query::<(&f32, Without<&bool>, &String)>()
+            .par_iter_mut()
+            .map(|(f, (), s)| (**f, (), s.value().clone()))
             .collect::<Vec<_>>();
         assert_eq!(cols, par_cols);
     }
