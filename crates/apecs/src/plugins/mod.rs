@@ -7,8 +7,6 @@ use crate::{
     CanFetch, IsResource, LazyResource, ResourceId, ResourceRequirement,
 };
 
-pub mod entity_upkeep;
-
 pub struct SyncSystemWithDeps(pub SyncSystem, pub Vec<String>);
 
 impl SyncSystemWithDeps {

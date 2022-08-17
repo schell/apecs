@@ -188,7 +188,7 @@ impl IsSchedule for SyncSchedule {
     type System = SyncSystem;
     type Batch = SyncBatch;
 
-    fn batches_mut(&mut self) -> &mut [Self::Batch] {
+    fn batches_mut(&mut self) -> &mut Vec<Self::Batch> {
         &mut self.batches
     }
 
@@ -335,8 +335,8 @@ impl<'a> IsSchedule for AsyncSchedule<'a> {
     type System = AsyncSystemRequest<'a>;
     type Batch = AsyncBatch<'a>;
 
-    fn batches_mut(&mut self) -> &mut [Self::Batch] {
-        self.0.as_mut_slice()
+    fn batches_mut(&mut self) -> &mut Vec<Self::Batch> {
+        &mut self.0
     }
 
     fn batches(&self) -> &[Self::Batch] {

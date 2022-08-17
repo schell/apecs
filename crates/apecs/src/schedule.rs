@@ -171,7 +171,7 @@ pub trait IsSchedule: std::fmt::Debug {
         false
     }
 
-    fn batches_mut(&mut self) -> &mut [Self::Batch];
+    fn batches_mut(&mut self) -> &mut Vec<Self::Batch>;
 
     fn batches(&self) -> &[Self::Batch];
 
@@ -248,6 +248,7 @@ pub trait IsSchedule: std::fmt::Debug {
     ) -> anyhow::Result<()> {
         resource_manager.unify_resources("IsSchedule::run before all")?;
         let parallelize = self.get_should_parallelize();
+        self.batches_mut().retain(|batch| !batch.systems().is_empty());
         for batch in self.batches_mut() {
             batch.run(parallelize, extra.clone(), resource_manager)?;
             resource_manager.unify_resources("IsSchedule::run after one")?;

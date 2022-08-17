@@ -85,7 +85,7 @@ impl ResourceManager {
 
     fn missing_msg(label: &str, borrow: &Borrow, extra: &str) -> String {
         format!(
-            r#"'{}' requested missing resource "{}" encountered while building request\n{}
+            r#"'{}' requested missing resource "{}" encountered while building request: {}
 "#,
             label,
             borrow.rez_id().name,

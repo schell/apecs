@@ -1,17 +1,18 @@
 //! The [`World`] contains resources and is responsible for ticking
 //! systems.
-use std::any::Any;
 use std::future::Future;
 use std::ops::Deref;
 use std::sync::Arc;
+use std::{any::Any, collections::VecDeque};
 
 use anyhow::Context;
 use async_oneshot::oneshot;
 use rustc_hash::FxHashSet;
 
+use crate::storage::Entry;
 use crate::{
     mpsc, oneshot,
-    plugins::{Plugin, entity_upkeep::plugin_storage_archetype_plugin},
+    plugins::Plugin,
     resource_manager::{LoanManager, ResourceManager},
     schedule::{IsSchedule, UntypedSystemData},
     spsc,
@@ -110,6 +111,15 @@ pub struct Entity {
     op_receivers: Vec<oneshot::Receiver<Arc<dyn Any + Send + Sync>>>,
 }
 
+impl std::fmt::Debug for Entity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Entity")
+            .field("id", &self.id)
+            .field("gen", &self.gen)
+            .finish()
+    }
+}
+
 /// You may clone entities, but each one does its own lazy updates,
 /// separate from all other clones.
 impl Clone for Entity {
@@ -140,14 +150,14 @@ impl Entity {
     ///
     /// This entity will have the associated components after the next tick.
     pub fn with_bundle<B: IsBundle + Send + Sync + 'static>(mut self, bundle: B) -> Self {
-        self.add_bundle(bundle);
+        self.insert_bundle(bundle);
         self
     }
 
     /// Lazily add a component bundle to archetype storage.
     ///
     /// This entity will have the associated components after the next tick.
-    pub fn add_bundle<B: IsBundle + Send + Sync + 'static>(&mut self, bundle: B) {
+    pub fn insert_bundle<B: IsBundle + Send + Sync + 'static>(&mut self, bundle: B) {
         let id = self.id;
         let (tx, rx) = oneshot();
         let op = LazyOp {
@@ -155,8 +165,54 @@ impl Entity {
                 if !world.has_resource::<ArchetypeSet>() {
                     world.with_resource(ArchetypeSet::default()).unwrap();
                 }
-                let mut all: Write<ArchetypeSet> = world.fetch()?;
+                let all: &mut ArchetypeSet = world.resource_mut()?;
                 let _ = all.insert_bundle(id, bundle);
+                Ok(Arc::new(()) as Arc<dyn Any + Send + Sync>)
+            }),
+            tx,
+        };
+        self.op_sender
+            .try_send(op)
+            .expect("could not send entity op");
+        self.op_receivers.push(rx);
+    }
+
+    /// Lazily add a component bundle to archetype storage.
+    ///
+    /// This entity will have the associated component after the next tick.
+    pub fn insert_component<T: Send + Sync + 'static>(&mut self, component: T) {
+        let id = self.id;
+        let (tx, rx) = oneshot();
+        let op = LazyOp {
+            op: Box::new(move |world: &mut World| {
+                if !world.has_resource::<ArchetypeSet>() {
+                    world.with_resource(ArchetypeSet::default()).unwrap();
+                }
+                let all: &mut ArchetypeSet = world.resource_mut()?;
+                let _ = all.insert_component(id, component);
+                Ok(Arc::new(()) as Arc<dyn Any + Send + Sync>)
+            }),
+            tx,
+        };
+        self.op_sender
+            .try_send(op)
+            .expect("could not send entity op");
+        self.op_receivers.push(rx);
+    }
+
+    /// Lazily remove a component bundle to archetype storage.
+    ///
+    /// This entity will have lost the associated component after the next tick.
+    pub fn remove_component<T: Send + Sync + 'static>(&mut self) {
+        let id = self.id;
+        let (tx, rx) = oneshot();
+        let op = LazyOp {
+            op: Box::new(move |world: &mut World| {
+                if !world.has_resource::<ArchetypeSet>() {
+                    world.with_resource(ArchetypeSet::default()).unwrap();
+                }
+                let all: &mut ArchetypeSet = world.resource_mut()?;
+                let _ = all.remove_component::<T>(id);
                 Ok(Arc::new(()) as Arc<dyn Any + Send + Sync>)
             }),
             tx,
@@ -221,8 +277,10 @@ impl Entity {
 
 pub struct Entities {
     pub next_k: usize,
-    pub dead: Vec<Entity>,
-    pub recycle: Vec<Entity>,
+    pub generations: Vec<usize>,
+    pub dead: Vec<usize>,
+    pub recycle: Vec<usize>,
+    pub deleted_cache: VecDeque<(u64, Vec<usize>)>,
     pub lazy_op_sender: mpsc::Sender<LazyOp>,
 }
 
@@ -230,8 +288,10 @@ impl Default for Entities {
     fn default() -> Self {
         Self {
             next_k: Default::default(),
+            generations: vec![],
             dead: Default::default(),
             recycle: Default::default(),
+            deleted_cache: Default::default(),
             lazy_op_sender: mpsc::unbounded().0,
         }
     }
@@ -241,34 +301,111 @@ impl Entities {
     pub fn new(lazy_op_sender: mpsc::Sender<LazyOp>) -> Self {
         Self {
             lazy_op_sender,
+            deleted_cache: {
+                let mut cache = VecDeque::default();
+                cache.push_back((crate::system::current_iteration(), vec![]));
+                cache
+            },
             ..Default::default()
         }
     }
 
     pub fn create(&mut self) -> Entity {
-        self.recycle.pop().unwrap_or_else(|| {
+        let id = if let Some(id) = self.recycle.pop() {
+            self.generations[id] += 1;
+            id
+        } else {
             let id = self.next_k;
+            self.generations.push(0);
             self.next_k += 1;
-            Entity {
-                id,
-                gen: 0,
-                op_sender: self.lazy_op_sender.clone(),
-                op_receivers: Default::default(),
-            }
-        })
+            id
+        };
+        Entity {
+            id,
+            gen: self.generations[id],
+            op_sender: self.lazy_op_sender.clone(),
+            op_receivers: Default::default(),
+        }
     }
 
     pub fn destroy(&mut self, mut entity: Entity) {
         entity.op_receivers = Default::default();
-        self.dead.push(entity);
+        self.deleted_cache[0].1.push(entity.id());
+        self.dead.push(entity.id);
     }
 
-    pub fn recycle_dead(&mut self) {
+    /// Recycles any destroyed entities, allowing them to be re-used as a new
+    /// generation.
+    ///
+    /// Returns a vector of the entities' ids.
+    pub fn recycle_dead(&mut self) -> Vec<usize> {
+        self.deleted_cache
+            .push_front((crate::system::current_iteration(), vec![]));
+        while self.deleted_cache.len() > 2 {
+            self.deleted_cache.pop_back();
+        }
         if !self.dead.is_empty() {
-            for mut dead in std::mem::take(&mut self.dead).into_iter() {
-                dead.gen += 1;
-                self.recycle.push(dead);
-            }
+            let dead_ids = std::mem::take(&mut self.dead);
+            self.recycle.extend(dead_ids.clone());
+            dead_ids
+        } else {
+            vec![]
+        }
+    }
+
+    /// Produce an iterator of deleted entities as entries.
+    ///
+    /// This iterator should be filtered at the callsite for the latest changed
+    /// entries since a stored iteration timestamp.
+    pub fn deleted_iter<'a>(&'a self) -> impl Iterator<Item = Entry<()>> + 'a {
+        self.deleted_cache.iter().flat_map(|(changed, ids)| {
+            ids.iter().map(|id| Entry {
+                value: (),
+                key: *id,
+                changed: *changed,
+                added: false,
+            })
+        })
+    }
+
+    /// Hydrate an `Entity` from an id.
+    pub fn hydrate(&self, entity_id: usize) -> Option<Entity> {
+        let gen = self.generations.get(entity_id)?;
+        Some(Entity {
+            id: entity_id,
+            gen: *gen,
+            op_sender: self.lazy_op_sender.clone(),
+            op_receivers: Default::default(),
+        })
+    }
+
+    /// Hydrate the entity with the given id and then lazily add the given
+    /// bundle to the entity.
+    ///
+    /// This is a noop if the entity does not exist.
+    pub fn insert_bundle<B: IsBundle + Send + Sync + 'static>(&self, entity_id: usize, bundle: B) {
+        if let Some(mut entity) = self.hydrate(entity_id) {
+            entity.insert_bundle(bundle);
+        }
+    }
+
+    /// Hydrate the entity with the given id and then lazily add the given
+    /// component.
+    ///
+    /// This is a noop if the entity does not exist.
+    pub fn insert_component<T: Send + Sync + 'static>(&self, entity_id: usize, component: T) {
+        if let Some(mut entity) = self.hydrate(entity_id) {
+            entity.insert_component(component);
+        }
+    }
+
+    /// Hydrate the entity with the given id and then lazily remove the
+    /// component of the given type.
+    ///
+    /// This is a noop if the entity does not exist.
+    pub fn remove_component<T: Send + Sync + 'static>(&self, entity_id: usize) {
+        if let Some(mut entity) = self.hydrate(entity_id) {
+            entity.remove_component::<T>();
         }
     }
 }
@@ -301,7 +438,7 @@ impl Default for World {
             .unwrap()
             .with_resource(entities)
             .unwrap()
-            .with_plugin(plugin_storage_archetype_plugin())
+            .with_resource(ArchetypeSet::default())
             .unwrap();
         world
     }
@@ -587,6 +724,8 @@ impl World {
     }
 
     /// Applies lazy world updates.
+    ///
+    /// Also runs component entity and archetype upkeep.
     pub fn tick_lazy(&mut self) -> anyhow::Result<()> {
         log::trace!("tick lazy");
 
@@ -596,17 +735,27 @@ impl World {
             let _ = tx.send(t);
         }
 
+        self.resource_manager.unify_resources("World::tick_lazy")?;
+        let dead_ids = {
+            let entities: &mut Entities = self.resource_mut()?;
+            entities.recycle_dead()
+        };
+        {
+            let archset: &mut ArchetypeSet = self.resource_mut()?;
+            archset.upkeep(&dead_ids);
+        }
+
         Ok(())
     }
 
     /// Attempt to get a reference to one resource.
-    pub fn resource_get<T: IsResource>(&self) -> anyhow::Result<&T> {
+    pub fn resource<T: IsResource>(&self) -> anyhow::Result<&T> {
         let id = ResourceId::new::<T>();
         self.resource_manager.get(&id)
     }
 
     /// Attempt to get a mutable reference to one resource.
-    pub fn resource_get_mut<T: IsResource>(&mut self) -> anyhow::Result<&mut T> {
+    pub fn resource_mut<T: IsResource>(&mut self) -> anyhow::Result<&mut T> {
         self.resource_manager.get_mut::<T>()
     }
 
@@ -689,7 +838,9 @@ mod test {
         let (tx, rx) = spsc::bounded(1);
 
         let mut world = World::default();
-        world.with_system("stateful", mk_stateful_system(tx)).unwrap();
+        world
+            .with_system("stateful", mk_stateful_system(tx))
+            .unwrap();
         {
             let mut archset: Write<ArchetypeSet> = world.fetch().unwrap();
             archset.insert_component(0, F32s(20.0, 30.0));
@@ -853,7 +1004,7 @@ mod test {
                 entities.create()
             };
 
-            e.add_bundle((Name("ada"), Age(666)));
+            e.insert_bundle((Name("ada"), Age(666)));
             e.updates().await;
             await_points.lock().unwrap().push(3);
 
@@ -895,7 +1046,7 @@ mod test {
         world
             .with_system("test", |_: Write<&'static str>| ok())
             .unwrap();
-        let s = world.resource_get_mut::<&'static str>().unwrap();
+        let s = world.resource_mut::<&'static str>().unwrap();
         *s = "blah";
     }
 
@@ -915,7 +1066,8 @@ mod test {
             .try_init();
 
         let mut world = World::default();
-        world.with_system("one", |q: Query<(&f32, &bool)>| {
+        world
+            .with_system("one", |q: Query<(&f32, &bool)>| {
                 for (_f, _b) in q.query().iter_mut() {}
                 ok()
             })

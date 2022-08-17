@@ -17,10 +17,12 @@ pub struct ArchetypeSet {
 
 impl Default for ArchetypeSet {
     fn default() -> Self {
-        Self {
+        let mut set = Self {
             archetypes: Default::default(),
             entity_lookup: Default::default(),
-        }
+        };
+        set.upkeep(&[]);
+        set
     }
 }
 
@@ -300,7 +302,6 @@ impl ArchetypeSet {
                     archetype_index,
                     component_index
                 );
-                let _ = self.remove_any_entry_bundle(*id, archetype_index, component_index);
                 if self.archetypes[archetype_index].index_lookup.is_empty() {
                     log::trace!("archetype {} is empty", archetype_index);
                     // remove the archetype
