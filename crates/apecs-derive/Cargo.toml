@@ -1,13 +1,13 @@
 [package]
 name = "apecs-derive"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 keywords = ["gamedev", "ecs", "async"]
 documentation = "https://docs.rs/apecs/"
 repository = "https://github.com/schell/apecs"
 categories = ["concurrency", "game-engines"]
-description = "derive macros for the apecs library"
+description = "derive and other macros for the apecs library"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
