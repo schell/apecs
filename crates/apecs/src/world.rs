@@ -9,6 +9,7 @@ use anyhow::Context;
 use async_oneshot::oneshot;
 use rustc_hash::FxHashSet;
 
+use crate::schedule::{IsBatch, IsSystem};
 use crate::storage::Entry;
 use crate::{
     mpsc, oneshot,
@@ -552,6 +553,10 @@ impl World {
         self.with_plugin(T::plugin())
     }
 
+    /// Add a syncronous system.
+    ///
+    /// ## Errs
+    /// Errs if expected resources must first be added to the world.
     pub fn with_system<T, F>(
         &mut self,
         name: impl AsRef<str>,
@@ -561,14 +566,19 @@ impl World {
         F: FnMut(T) -> anyhow::Result<ShouldContinue> + Send + Sync + 'static,
         T: CanFetch + 'static,
     {
-        self.with_system_with_dependencies(name, &[], sys_fn)
+        self.with_system_with_dependencies(name, sys_fn, &[])
     }
 
+    /// Add a syncronous system that has a dependency on one or more other
+    /// syncronous systems.
+    ///
+    /// ## Errs
+    /// Errs if expected resources must first be added to the world.
     pub fn with_system_with_dependencies<T, F>(
         &mut self,
         name: impl AsRef<str>,
-        deps: &[&str],
         sys_fn: F,
+        deps: &[&str],
     ) -> anyhow::Result<&mut Self>
     where
         F: FnMut(T) -> anyhow::Result<ShouldContinue> + Send + Sync + 'static,
@@ -582,20 +592,38 @@ impl World {
         Ok(self)
     }
 
+    /// Add a syncronous system barrier.
+    ///
+    /// Any systems added after the barrier will be scheduled after the systems
+    /// added before the barrier.
+    pub fn with_system_barrier(&mut self) -> &mut Self {
+        self.sync_schedule.add_barrier();
+        self
+    }
+
     pub fn with_parallelism(&mut self, parallelism: Parallelism) -> &mut Self {
         let num_threads = match parallelism {
             Parallelism::Automatic => {
                 #[cfg(target_arch = "wasm32")]
-                {1}
+                {
+                    1
+                }
                 #[cfg(not(target_arch = "wasm32"))]
-                {rayon::current_num_threads() as u32}
+                {
+                    rayon::current_num_threads() as u32
+                }
             }
-            Parallelism::Explicit(n) => if n > 1 {
-                log::info!("building a rayon thread pool with {} threads", n);
-                rayon::ThreadPoolBuilder::new().num_threads(n as usize).build().unwrap();
-                n
-            } else {
-                1
+            Parallelism::Explicit(n) => {
+                if n > 1 {
+                    log::info!("building a rayon thread pool with {} threads", n);
+                    rayon::ThreadPoolBuilder::new()
+                        .num_threads(n as usize)
+                        .build()
+                        .unwrap();
+                    n
+                } else {
+                    1
+                }
             }
         };
         self.sync_schedule.set_parallelism(num_threads);
@@ -808,6 +836,21 @@ impl World {
 
     pub fn get_schedule_description(&self) -> String {
         format!("{:#?}", self.sync_schedule)
+    }
+
+    /// Returns the scheduled systems' names, collated by batch.
+    pub fn get_sync_schedule_names(&self) -> Vec<Vec<&str>> {
+        self.sync_schedule
+            .batches()
+            .iter()
+            .map(|batch| {
+                batch
+                    .systems()
+                    .iter()
+                    .map(|sys| sys.name())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
     }
 }
 
@@ -1110,7 +1153,8 @@ mod test {
 
         let mut world = World::default();
         world
-            .with_resource(0u32).unwrap()
+            .with_resource(0u32)
+            .unwrap()
             .with_async_system("one", |mut facade: Facade| -> AsyncSystemFuture {
                 Box::pin(async move {
                     let mut number: Write<u32> = facade.fetch().await?;

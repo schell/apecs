@@ -152,13 +152,14 @@ pub trait IsSchedule: std::fmt::Debug {
         new_system: Self::System,
         deps: impl Iterator<Item = impl AsRef<str>>,
     ) {
-        let deps = rustc_hash::FxHashSet::from_iter(deps.map(|s| s.as_ref().to_string()));
+        let mut deps = rustc_hash::FxHashSet::from_iter(deps.map(|s| s.as_ref().to_string()));
         let current_barrier = self.current_barrier();
         'batch_loop: for batch in self.batches_mut() {
             if batch.get_barrier() != current_barrier {
                 continue;
             }
-            for system in batch.systems() {
+            let mut batch_systems = batch.systems().iter();
+            'system_loop: while let Some(system) = batch_systems.next() {
                 if system.conflicts_with(&new_system) {
                     // the new system conflicts with one in
                     // the current batch, break and check
@@ -167,15 +168,23 @@ pub trait IsSchedule: std::fmt::Debug {
                 }
                 if deps.contains(system.name()) {
                     // the new system has a dependency on this system,
-                    // so it must be added to a later batch.
-                    continue 'batch_loop;
+                    // so it must be added after it.
+                    deps.remove(system.name());
+                    continue 'system_loop;
+                } else if !deps.is_empty() {
+                    // there are system dependencies we haven't seen yet,
+                    // so continue looking through the systems
+                    continue 'system_loop;
                 }
             }
 
-            // the new system doesn't conflict with any existing
-            // system, so add it to the batch
-            batch.add_system(new_system);
-            return;
+            if deps.is_empty() {
+                // the new system doesn't conflict with any existing
+                // system and doesn't have any dependency on a system
+                // running before it, so add it to the batch
+                batch.add_system(new_system);
+                return;
+            }
         }
 
         // if the system hasn't found a compatible batch, make a new
@@ -200,11 +209,11 @@ pub trait IsSchedule: std::fmt::Debug {
     ) -> anyhow::Result<()> {
         resource_manager.unify_resources("IsSchedule::run before all")?;
         let parallelism = self.get_parallelism();
-        self.batches_mut().retain(|batch| !batch.systems().is_empty());
         for batch in self.batches_mut() {
             batch.run(parallelism, extra.clone(), resource_manager)?;
             resource_manager.unify_resources("IsSchedule::run after one")?;
         }
+        self.batches_mut().retain(|batch| !batch.systems().is_empty());
 
         Ok(())
     }
@@ -256,9 +265,9 @@ mod test {
             .add_system_with_dependecies(SyncSystem::new("two", |()| ok()), ["one"].into_iter());
 
         let batches = schedule.batches();
-        assert_eq!(batches.len(), 2);
+        assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].systems()[0].name(), "one");
-        assert_eq!(batches[1].systems()[0].name(), "two");
+        assert_eq!(batches[0].systems()[1].name(), "two");
     }
 
     #[test]

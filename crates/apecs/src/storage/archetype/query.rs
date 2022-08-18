@@ -611,13 +611,15 @@ impl ArchetypeSet {
     /// This assumes the entries being inserted have unique ids and don't
     /// already exist in the set.
     ///
-    /// ``` rust,ignore
+    /// ```rust
+    /// use apecs::storage::*;
     /// let mut archset = ArchetypeSet::default();
-    /// let ts = Box::new((0..10000).map(|id| Entry::new(id, Transform(Matrix4::<f32>::from_scale(1.0)))));
-    /// let ps = Box::new((0..10000).map(|id| Entry::new(id, Position(Vector3::unit_x()))));
-    /// let rs = Box::new((0..10000).map(|id| Entry::new(id, Rotation(Vector3::unit_x()))));
-    /// let vs = Box::new((0..10000).map(|id| Entry::new(id, Velocity(Vector3::unit_x()))));
-    /// archset.extend::<(Transform, Position, Rotation, Velocity)>((ts, ps, rs, vs));
+    /// let a = Box::new((0..10_000).map(|id| Entry::new(id, id as u32)));
+    /// let b = Box::new((0..10_000).map(|id| Entry::new(id, id as f32)));
+    /// let c = Box::new((0..10_000).map(|id| Entry::new(id, format!("string{}", id))));
+    /// let d = Box::new((0..10_000).map(|id| Entry::new(id, id % 2 == 0)));
+    /// archset.extend::<(u32, f32, String, bool)>((a, b, c, d));
+    /// assert_eq!(10_000, archset.len());
     /// ```
     pub fn extend<B: IsBundle>(&mut self, extension: <B::MutBundle as IsQuery>::ExtensionColumns)
     where
