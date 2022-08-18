@@ -584,7 +584,12 @@ impl World {
 
     pub fn with_parallelism(&mut self, parallelism: Parallelism) -> &mut Self {
         let num_threads = match parallelism {
-            Parallelism::Automatic => rayon::current_num_threads() as u32,
+            Parallelism::Automatic => {
+                #[cfg(target_arch = "wasm32")]
+                {1}
+                #[cfg(not(target_arch = "wasm32"))]
+                {rayon::current_num_threads() as u32}
+            }
             Parallelism::Explicit(n) => if n > 1 {
                 log::info!("building a rayon thread pool with {} threads", n);
                 rayon::ThreadPoolBuilder::new().num_threads(n as usize).build().unwrap();
@@ -1094,5 +1099,44 @@ mod test {
             })
             .unwrap();
         world.tick();
+    }
+
+    #[test]
+    fn parallelism() {
+        let _ = env_logger::builder()
+            .is_test(true)
+            .filter_level(log::LevelFilter::Trace)
+            .try_init();
+
+        let mut world = World::default();
+        world
+            .with_resource(0u32).unwrap()
+            .with_async_system("one", |mut facade: Facade| -> AsyncSystemFuture {
+                Box::pin(async move {
+                    let mut number: Write<u32> = facade.fetch().await?;
+                    *number = 1;
+                    Ok(())
+                })
+            })
+            .with_async_system("two", |mut facade: Facade| -> AsyncSystemFuture {
+                Box::pin(async move {
+                    for _ in 0..2 {
+                        let mut number: Write<u32> = facade.fetch().await?;
+                        *number = 2;
+                    }
+                    Ok(())
+                })
+            })
+            .with_async_system("three", |mut facade: Facade| -> AsyncSystemFuture {
+                Box::pin(async move {
+                    for _ in 0..3 {
+                        let mut number: Write<u32> = facade.fetch().await?;
+                        *number = 3;
+                    }
+                    Ok(())
+                })
+            })
+            .with_parallelism(Parallelism::Automatic);
+        world.run();
     }
 }

@@ -37,19 +37,5 @@ smallvec = "^1.9"
 
 [dev-dependencies]
 async-timer = "^0.7"
-bevy_ecs = "^0.8"
-bevy_tasks = "^0.8"
-cgmath = { version = "0.17", features = ["serde"] }
-criterion = "^0.3"
 env_logger = "^0.9"
-hecs = { version = "^0.9", features = ["column-serialize", "row-serialize"] }
-legion = "^0.4"
-planck_ecs = { version = "^1.2", features = ["parallel"] }
-shipyard = "^0.5"
-specs = {version = "0.16.1", features = ["serde"] }
-specs-derive = "0.4.1"
 wasm-bindgen-test = "^0.3"
-
-[[bench]]
-name = "benchmark"
-harness = false

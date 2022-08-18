@@ -29,7 +29,6 @@ impl std::fmt::Display for Syncronicity {
     }
 }
 
-
 fn bench_simple_insert(c: &mut Criterion) {
     let mut group = c.benchmark_group("simple_insert");
     // let plot_config =

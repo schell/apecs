@@ -1,0 +1,24 @@
+[package]
+name = "benchmarks"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dev-dependencies]
+apecs = { path = "../apecs" }
+bevy_ecs = "^0.8"
+bevy_tasks = "^0.8"
+cgmath = { version = "0.17", features = ["serde"] }
+criterion = "^0.3"
+hecs = { version = "^0.9", features = ["column-serialize", "row-serialize"] }
+legion = "^0.4"
+planck_ecs = { version = "^1.2", features = ["parallel"] }
+rayon = "^1.5"
+shipyard = "^0.5"
+specs = {version = "0.16.1", features = ["serde"] }
+specs-derive = "0.4.1"
+
+[[bench]]
+name = "benchmarks"
+harness = false
