@@ -2,9 +2,10 @@
 **A**syncronous **P**arallel **E**ntity **C**omponent **S**ystem
 
 ## Why
-`apecs` is an entity-component system that supports traditional syncronous systems as well as
-asyncronous systems that can evolve over time. This makes it great for general applications,
-quick game prototypes, DIY engines and any simulation that has discrete steps.
+`apecs` is an entity-component system written in Rust that supports traditional syncronous
+systems as well as asyncronous systems that can evolve over time. This makes it great for
+general applications, quick game prototypes, DIY engines and any simulation that has discrete
+steps.
 
 ## Goals
 * productivity
@@ -48,8 +49,12 @@ I like firefox, but you can use different browsers for the wasm tests. For the m
 just to make sure apecs works on wasm.
 
 ## Benchmarks
-`apecs` has benchmarks for itself as well as `specs`, `bevy`, `hecs`, `legion`, `shipyard` and `planck_ecs`.
+The `apecs` benchmarks measure itself against my favorite ECS libs:
+`specs`, `bevy`, `hecs`, `legion`, `shipyard` and `planck_ecs`.
 
 ```
 cargo bench -p benchmarks
 ```
+
+# Caveats
+`apecs` uses generic associated types. This means it can only be compiled with nightly.
