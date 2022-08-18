@@ -16,6 +16,13 @@ steps.
 
 ## Features
 - syncronous systems with early exit and failure
+  ```rust 
+  let mut world = apecs::world::World::default();
+  world.with_sync_system("demo", |u32_number: Write<u32>| -> anyhow::Result<ShouldContinue> {
+      u32_number += 1;
+      ok()
+  })?;
+  ```
 - async systems, ie systems that end and/or change over time (for scenes, stories, etc)
   - fetch resources from the world asyncronously
   - resources are acquired without lifetimes
