@@ -2,13 +2,12 @@
 //!
 //! This module contains trait definitions. Implementations can be found in
 //! other modeluse.
-use rayon::{iter::Either, prelude::*};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::{collections::VecDeque, iter::FlatMap, slice::Iter, sync::Arc, any::Any};
 
 use crate::{
     resource_manager::{ResourceManager, LoanManager},
-    system::{increment_current_iteration, ShouldContinue},
+    system::ShouldContinue,
     FetchReadyResource, Resource, ResourceId,
 };
 
@@ -98,64 +97,17 @@ pub trait IsBatch: std::fmt::Debug + Default {
 
     fn set_systems(&mut self, systems: Vec<Self::System>);
 
-    /// Run the batch in parallel and then unify the resources to make the world
+    /// Run the batch (possibly in parallel) and then unify the resources and make the world
     /// "whole".
+    ///
+    /// ## Note
+    /// `parallelism` is roughly the number of threads to use for parallel operations.
     fn run(
         &mut self,
-        parallelize: bool,
+        parallelism: u32,
         _: Self::ExtraRunData,
         resource_manager: &mut ResourceManager,
-    ) -> anyhow::Result<()> {
-        let mut loan_mngr = LoanManager(resource_manager);
-        let systems = self.take_systems();
-        let mut data = vec![];
-        for sys in systems.iter() {
-            data.push(sys.prep(&mut loan_mngr)?);
-        }
-        let (remaining_systems, errs): (Vec<_>, Vec<_>) = if parallelize {
-            (systems, data)
-                .into_par_iter()
-                .filter_map(|(mut system, data)| {
-                    log::trace!("running par system '{}'", system.name());
-                    let _ = increment_current_iteration();
-                    match system.run(data) {
-                        Ok(ShouldContinue::Yes) => Some(Either::Left(system)),
-                        Ok(ShouldContinue::No) => None,
-                        Err(err) => Some(Either::Right(err)),
-                    }
-                })
-                .partition_map(|e| e)
-        } else {
-            let mut remaining_systems = vec![];
-            let mut errs = vec![];
-            systems.into_iter()
-                .zip(data.into_iter())
-                .for_each(|(mut system, data)| {
-                    log::trace!("running system '{}'", system.name());
-                    let _ = increment_current_iteration();
-                    match system.run(data) {
-                        Ok(ShouldContinue::Yes) => {
-                            remaining_systems.push(system);
-                        }
-                        Ok(ShouldContinue::No) => {}
-                        Err(err) => {
-                            errs.push(err);
-                        }
-                    }
-                });
-            (remaining_systems, errs)
-        };
-
-        self.set_systems(remaining_systems);
-
-        errs.into_iter()
-            .fold(Ok(()), |may_err, err| match may_err {
-                Ok(()) => Err(err),
-                Err(prev) => Err(prev.context(format!("and {}", err))),
-            })?;
-
-        Ok(())
-    }
+    ) -> anyhow::Result<()>;
 }
 
 pub trait IsSchedule: std::fmt::Debug {
@@ -186,9 +138,9 @@ pub trait IsSchedule: std::fmt::Debug {
         true
     }
 
-    fn set_should_parallelize(&mut self, should: bool);
+    fn set_parallelism(&mut self, threads: u32);
 
-    fn get_should_parallelize(&self) -> bool;
+    fn get_parallelism(&self) -> u32;
 
     fn add_system(&mut self, new_system: Self::System) {
         let deps: Vec<String> = vec![];
@@ -247,10 +199,10 @@ pub trait IsSchedule: std::fmt::Debug {
         resource_manager: &mut ResourceManager,
     ) -> anyhow::Result<()> {
         resource_manager.unify_resources("IsSchedule::run before all")?;
-        let parallelize = self.get_should_parallelize();
+        let parallelism = self.get_parallelism();
         self.batches_mut().retain(|batch| !batch.systems().is_empty());
         for batch in self.batches_mut() {
-            batch.run(parallelize, extra.clone(), resource_manager)?;
+            batch.run(parallelism, extra.clone(), resource_manager)?;
             resource_manager.unify_resources("IsSchedule::run after one")?;
         }
 

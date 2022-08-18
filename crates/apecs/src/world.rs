@@ -410,6 +410,35 @@ impl Entities {
     }
 }
 
+pub(crate) fn make_async_system_pack<F, Fut>(
+    name: String,
+    make_system_future: F,
+) -> (AsyncSystem, AsyncSystemFuture)
+where
+    F: FnOnce(Facade) -> Fut,
+    Fut: Future<Output = anyhow::Result<()>> + Send + Sync + 'static,
+{
+    let (resource_request_tx, resource_request_rx) = spsc::unbounded();
+    let (resources_to_system_tx, resources_to_system_rx) = spsc::bounded(1);
+    let facade = Facade {
+        resource_request_tx,
+        resources_to_system_rx,
+    };
+    let system = AsyncSystem {
+        name: name.clone(),
+        resource_request_rx,
+        resources_to_system_tx,
+    };
+    let asys = Box::pin((make_system_future)(facade));
+    (system, asys)
+}
+
+/// Defines the number of threads to use for inner and outer parallelism.
+pub enum Parallelism {
+    Automatic,
+    Explicit(u32),
+}
+
 pub struct World {
     pub resource_manager: ResourceManager,
     pub sync_schedule: SyncSchedule,
@@ -442,29 +471,6 @@ impl Default for World {
             .unwrap();
         world
     }
-}
-
-pub(crate) fn make_async_system_pack<F, Fut>(
-    name: String,
-    make_system_future: F,
-) -> (AsyncSystem, AsyncSystemFuture)
-where
-    F: FnOnce(Facade) -> Fut,
-    Fut: Future<Output = anyhow::Result<()>> + Send + Sync + 'static,
-{
-    let (resource_request_tx, resource_request_rx) = spsc::unbounded();
-    let (resources_to_system_tx, resources_to_system_rx) = spsc::bounded(1);
-    let facade = Facade {
-        resource_request_tx,
-        resources_to_system_rx,
-    };
-    let system = AsyncSystem {
-        name: name.clone(),
-        resource_request_rx,
-        resources_to_system_tx,
-    };
-    let asys = Box::pin((make_system_future)(facade));
-    (system, asys)
 }
 
 impl World {
@@ -576,8 +582,18 @@ impl World {
         Ok(self)
     }
 
-    pub fn with_sync_systems_run_in_parallel(&mut self, parallelize: bool) -> &mut Self {
-        self.sync_schedule.set_should_parallelize(parallelize);
+    pub fn with_parallelism(&mut self, parallelism: Parallelism) -> &mut Self {
+        let num_threads = match parallelism {
+            Parallelism::Automatic => rayon::current_num_threads() as u32,
+            Parallelism::Explicit(n) => if n > 1 {
+                log::info!("building a rayon thread pool with {} threads", n);
+                rayon::ThreadPoolBuilder::new().num_threads(n as usize).build().unwrap();
+                n
+            } else {
+                1
+            }
+        };
+        self.sync_schedule.set_parallelism(num_threads);
         self
     }
 

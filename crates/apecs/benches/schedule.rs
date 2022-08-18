@@ -73,7 +73,7 @@ impl Benchmark {
             .unwrap()
             .with_system("ce", ce_system)
             .unwrap()
-            .with_sync_systems_run_in_parallel(true);
+            .with_parallelism(Parallelism::Automatic);
 
         Self(world)
     }

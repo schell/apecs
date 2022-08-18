@@ -1,6 +1,7 @@
 use std::{collections::VecDeque, future::Future, pin::Pin, sync::atomic::AtomicU64};
 
 use anyhow::Context;
+use rayon::prelude::*;
 
 use crate::{
     resource_manager::{LoanManager, ResourceManager},
@@ -175,12 +176,78 @@ impl IsBatch for SyncBatch {
     fn set_systems(&mut self, systems: Vec<Self::System>) {
         self.0 = systems;
     }
+
+    fn run(
+        &mut self,
+        parallelism: u32,
+        _: Self::ExtraRunData,
+        resource_manager: &mut ResourceManager,
+    ) -> anyhow::Result<()> {
+        let mut loan_mngr = LoanManager(resource_manager);
+        let systems = self.take_systems();
+        let mut data = vec![];
+        for sys in systems.iter() {
+            data.push(sys.prep(&mut loan_mngr)?);
+        }
+        let (remaining_systems, errs): (Vec<_>, Vec<_>) = if parallelism > 1 {
+            let available_threads = rayon::current_num_threads();
+            if parallelism > available_threads as u32 {
+                log::warn!(
+                    "the rayon threadpool does not contain enough threads! requested {}, have {}",
+                    parallelism,
+                    available_threads
+                );
+            }
+            (systems, data)
+                .into_par_iter()
+                .filter_map(|(mut system, data)| {
+                    log::trace!("running par system '{}'", system.name());
+                    let _ = increment_current_iteration();
+                    match system.run(data) {
+                        Ok(ShouldContinue::Yes) => Some(rayon::iter::Either::Left(system)),
+                        Ok(ShouldContinue::No) => None,
+                        Err(err) => Some(rayon::iter::Either::Right(err)),
+                    }
+                })
+                .partition_map(|e| e)
+        } else {
+            let mut remaining_systems = vec![];
+            let mut errs = vec![];
+            systems
+                .into_iter()
+                .zip(data.into_iter())
+                .for_each(|(mut system, data)| {
+                    log::trace!("running system '{}'", system.name());
+                    let _ = increment_current_iteration();
+                    match system.run(data) {
+                        Ok(ShouldContinue::Yes) => {
+                            remaining_systems.push(system);
+                        }
+                        Ok(ShouldContinue::No) => {}
+                        Err(err) => {
+                            errs.push(err);
+                        }
+                    }
+                });
+            (remaining_systems, errs)
+        };
+
+        self.set_systems(remaining_systems);
+
+        errs.into_iter()
+            .fold(Ok(()), |may_err, err| match may_err {
+                Ok(()) => Err(err),
+                Err(prev) => Err(prev.context(format!("and {}", err))),
+            })?;
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Default)]
 pub struct SyncSchedule {
     batches: Vec<SyncBatch>,
-    should_run_parallel: bool,
+    num_threads: u32,
     current_barrier: usize,
 }
 
@@ -200,12 +267,12 @@ impl IsSchedule for SyncSchedule {
         self.batches.push(batch);
     }
 
-    fn set_should_parallelize(&mut self, should: bool) {
-        self.should_run_parallel = should;
+    fn set_parallelism(&mut self, threads: u32) {
+        self.num_threads = threads;
     }
 
-    fn get_should_parallelize(&self) -> bool {
-        self.should_run_parallel
+    fn get_parallelism(&self) -> u32 {
+        self.num_threads
     }
 
     fn current_barrier(&self) -> usize {
@@ -285,7 +352,7 @@ impl<'a> IsBatch for AsyncBatch<'a> {
 
     fn run(
         &mut self,
-        _: bool,
+        parallelism: u32,
         extra: &'a async_executor::Executor<'static>,
         resource_manager: &mut ResourceManager,
     ) -> anyhow::Result<()> {
@@ -310,14 +377,27 @@ impl<'a> IsBatch for AsyncBatch<'a> {
 
         self.set_systems(systems);
 
+        fn tick(executor: &async_executor::Executor<'static>) {
+            while executor.try_tick() {
+                let _ = increment_current_iteration();
+            }
+        }
         // tick the executor until the loaned resources have been returned
         loop {
-            while extra.try_tick() {
-                let _ = increment_current_iteration();
+            if parallelism > 1 {
+                (0..parallelism as u32).into_par_iter().for_each(|_| tick(extra));
+            } else {
+                tick(extra);
             }
             let resources_still_loaned = resource_manager.try_unify_resources("async batch")?;
             if resources_still_loaned {
-                log::warn!("system in the batch is holding on to resources over an await point!");
+                log::warn!(
+                    "an async system is holding onto resources over an await point! systems:{:#?}",
+                    self.systems()
+                        .iter()
+                        .map(|sys| sys.name())
+                        .collect::<Vec<_>>()
+                );
             } else {
                 log::trace!("all resources returned");
                 break;
@@ -329,28 +409,33 @@ impl<'a> IsBatch for AsyncBatch<'a> {
 }
 
 #[derive(Debug, Default)]
-pub struct AsyncSchedule<'a>(Vec<AsyncBatch<'a>>);
+pub struct AsyncSchedule<'a> {
+    batches: Vec<AsyncBatch<'a>>,
+    num_threads: u32
+}
 
 impl<'a> IsSchedule for AsyncSchedule<'a> {
     type System = AsyncSystemRequest<'a>;
     type Batch = AsyncBatch<'a>;
 
     fn batches_mut(&mut self) -> &mut Vec<Self::Batch> {
-        &mut self.0
+        &mut self.batches
     }
 
     fn batches(&self) -> &[Self::Batch] {
-        self.0.as_slice()
+        self.batches.as_slice()
     }
 
     fn add_batch(&mut self, batch: Self::Batch) {
-        self.0.push(batch);
+        self.batches.push(batch);
     }
 
-    fn set_should_parallelize(&mut self, _: bool) {}
+    fn set_parallelism(&mut self, threads: u32) {
+        self.num_threads = threads;
+    }
 
-    fn get_should_parallelize(&self) -> bool {
-        false
+    fn get_parallelism(&self) -> u32 {
+        self.num_threads
     }
 
     fn current_barrier(&self) -> usize {
