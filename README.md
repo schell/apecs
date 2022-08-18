@@ -3,8 +3,8 @@
 
 ## Why
 `apecs` is an entity-component system that supports traditional syncronous systems as well as
-asyncronous systems that can evolve over time. This makes it great for quick game prototypes,
-DIY engines and any simulation that has discrete, transformative stages.
+asyncronous systems that can evolve over time. This makes it great for general applications,
+quick game prototypes, DIY engines and any simulation that has discrete steps.
 
 ## Goals
 * productivity
