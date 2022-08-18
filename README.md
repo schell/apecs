@@ -1,9 +1,10 @@
 # apecs
 **A**syncronous **P**arallel **E**ntity **C**omponent **S**ystem
 
+## Why
 `apecs` is an entity-component system that supports traditional syncronous systems as well as
-asyncronous systems that can evolve over time. This makes it great for quick game prototypes
-and DIY engines.
+asyncronous systems that can evolve over time. This makes it great for quick game prototypes,
+DIY engines and any simulation that has discrete, transformative stages.
 
 ## Goals
 * productivity
@@ -16,7 +17,8 @@ and DIY engines.
 - syncronous systems with early exit and failure
 - async systems, ie systems that end and/or change over time (for scenes, stories, etc)
   - fetch resources from the world asyncronously
-- support for general futures
+  - resources are acquired without lifetimes
+- support for async futures
 - fetch data (system data) derive macros
 - system scheduling
   - systems may depend on other systems running first
@@ -24,7 +26,7 @@ and DIY engines.
 - component storage
   - optimized for space and iteration time as archetypes
   - queries with "maybe" and "without" semantics
-  - queries can find a single entity without iteration and filtering
+  - queries can find a single entity without iteration or filtering
   - add and modified time tracking
   - parallel queries (inner parallelism)
 - parallel system scheduling (outer parallelism)
@@ -42,6 +44,12 @@ cargo test
 wasm-pack test --firefox crates/apecs
 ```
 
+I like firefox, but you can use different browsers for the wasm tests. For the most part they're there
+just to make sure apecs works on wasm.
+
 ## Benchmarks
+`apecs` has benchmarks for itself as well as `specs`, `bevy`, `hecs`, `legion`, `shipyard` and `planck_ecs`.
+
 ```
+cargo bench -p benchmarks
 ```
