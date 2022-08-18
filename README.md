@@ -22,12 +22,52 @@ steps.
       u32_number += 1;
       ok()
   })?;
+  world.run();
   ```
 - async systems, ie systems that end and/or change over time (for scenes, stories, etc)
   - fetch resources from the world asyncronously
   - resources are acquired without lifetimes
+  ```rust 
+  async fn demo(mut facade: Facade) -> anyhow::Result<()> {
+      loop {
+          let mut u32_number: Write<u32> = facade.fetch().await?;
+          u32_number += 1;
+          if u32_number > 6 {
+              break;
+          }
+      }
+      Ok(())
+  }
+  let mut world = World::default();
+  world
+      .with_resource(0u32)?
+      .with_async_system("demo", demo);
+  world.run();
+  ```
 - support for async futures
+  ```rust
+  let mut world = World::default();
+  world
+      .with_async(async {
+          log::trace!("hello");
+      });
+  world.run();
+  ```
 - fetch data (system data) derive macros
+  ```rust 
+  #[derive(CanFetch)]
+  struct MyData {
+      entities: Read<Entities>,
+      u32_number: Write<u32>,
+  }
+  
+  let mut world = World::default();
+  world
+      .with_resource(0u32)?;
+  
+  let mut my_data: MyData = world.fetch()?;
+  my_data.u32_number = 1;
+  ```
 - system scheduling
   - systems may depend on other systems running first
   - barriers
