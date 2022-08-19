@@ -7,6 +7,35 @@ systems as well as asyncronous systems that can evolve over time. This makes it 
 general applications, quick game prototypes, DIY engines and any simulation that has discrete
 steps.
 
+### Asyncronous systems
+Async systems are system functions that are `async`. Specifically async systems have this type
+signature:
+```rust
+use apecs::{world::Facade, anyhow};
+
+async fn my_system(mut facade: Facade) -> anyhow::Result<()> {
+    //...
+}
+```
+The `Facade` type is like a window into the world. It can `fetch` resources from the
+world asyncronously. This allows your async system to affect different parts of the
+world at different times.
+
+Syncronous systems are great for tight loops that are always iterating over the same
+data. In other words sync systems are highly optimized algorithms that run in the hot path.
+But they don't quite fit in situations where the system's focus changes over time, or when
+the system needs to wait for some condition before doing something different. Async systems are a
+good fit for situations where we're mutating different resources at different times, and
+when doing things fast (as in "as fast as possible") isn't necessary. Async systems are therefore
+a good fit for high-level orchestration.
+
+For example you might use an async system to setup your title screen, wait for user input and then
+start the main game simulation by injecting your game entities.
+
+Another example might be an app that has a dependency graph of work to complete. An Async system
+can hold the dependencies as a series of async operations that it is awaiting, while syncronous
+systems do the hot-path work that completes those async operations as fast as possible.
+
 ## Goals
 * productivity
 * flexibility
