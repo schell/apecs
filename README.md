@@ -191,7 +191,8 @@ steps.
 
   assert_eq!(
       vec![
-          vec!["create", "progress"], // <- same batch because they don't share exclusively
+          vec!["create"],
+          vec!["progress"],
           vec!["sync"],
       ],
       world.get_sync_schedule_names()

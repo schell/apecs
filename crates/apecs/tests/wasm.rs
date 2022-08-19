@@ -1,4 +1,4 @@
-use apecs::{mpsc, world::*, Write, anyhow, system::AsyncSystemFuture};
+use apecs::{mpsc, world::*, Write, system::AsyncSystemFuture};
 use wasm_bindgen_test::*;
 
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);

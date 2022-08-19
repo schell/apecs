@@ -168,9 +168,16 @@ pub trait IsSchedule: std::fmt::Debug {
                 }
                 if deps.contains(system.name()) {
                     // the new system has a dependency on this system,
-                    // so it must be added after it.
+                    // so it must be added to the next batch. We can't
+                    // add it to this batch because then they could run
+                    // in parallel.
                     deps.remove(system.name());
-                    continue 'system_loop;
+                    // also remove any other systems in this batch from
+                    // the dependencies
+                    for system in batch_systems {
+                        deps.remove(system.name());
+                    }
+                    continue 'batch_loop;
                 } else if !deps.is_empty() {
                     // there are system dependencies we haven't seen yet,
                     // so continue looking through the systems
@@ -265,9 +272,9 @@ mod test {
             .add_system_with_dependecies(SyncSystem::new("two", |()| ok()), ["one"].into_iter());
 
         let batches = schedule.batches();
-        assert_eq!(batches.len(), 1);
+        assert_eq!(batches.len(), 2);
         assert_eq!(batches[0].systems()[0].name(), "one");
-        assert_eq!(batches[0].systems()[1].name(), "two");
+        assert_eq!(batches[1].systems()[0].name(), "two");
     }
 
     #[test]
