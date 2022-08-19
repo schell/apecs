@@ -440,7 +440,22 @@ impl<'a, T: IsResource + Default> CanFetch for Write<T> {
     }
 
     fn construct(loan_mngr: &mut LoanManager) -> anyhow::Result<Self> {
-        let WriteExpect(fetched) = WriteExpect::construct(loan_mngr)?;
+        let borrow = Borrow {
+            id: ResourceId::new::<T>(),
+            is_exclusive: true,
+        };
+        let t: FetchReadyResource = loan_mngr.get_loaned_or_default::<T>("Write::construct", &borrow)?;
+        let t = t.into_owned().context("resource is not owned")?;
+        let inner: Option<Box<T>> = Some(t.downcast::<T>().map_err(|_| {
+            anyhow::anyhow!(
+                "WriteExpect::construct could not cast resource as '{}'",
+                std::any::type_name::<T>(),
+            )
+        })?);
+        let fetched = Fetched {
+            resource_return_tx: loan_mngr.resource_return_tx(),
+            inner,
+        };
         Ok(Write(fetched))
     }
 
@@ -462,7 +477,7 @@ impl<'a, T: IsResource> CanFetch for WriteExpect<T> {
             id: ResourceId::new::<T>(),
             is_exclusive: true,
         };
-        let t: FetchReadyResource = loan_mngr.get_loaned("WriteExpect::construct", &borrow)?;
+        let t: FetchReadyResource = loan_mngr.get_loaned("WriteExpect::construct", &borrow)?; //
         let t = t.into_owned().context("resource is not owned")?;
         let inner: Option<Box<T>> = Some(t.downcast::<T>().map_err(|_| {
             anyhow::anyhow!(
@@ -491,7 +506,12 @@ impl<'a, T: IsResource + Default> CanFetch for Read<T> {
     }
 
     fn construct(loan_mngr: &mut LoanManager) -> anyhow::Result<Self> {
-        let ReadExpect { inner, .. } = ReadExpect::<T>::construct(loan_mngr)?;
+        let borrow = Borrow {
+            id: ResourceId::new::<T>(),
+            is_exclusive: false,
+        };
+        let t: FetchReadyResource = loan_mngr.get_loaned_or_default::<T>("Read::construct", &borrow)?;
+        let inner = t.into_ref().context("resource is not borrowed")?;
         Ok(Read {
             inner,
             _phantom: PhantomData,

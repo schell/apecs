@@ -33,8 +33,11 @@ steps.
   assert_eq!(3, *world.resource::<u32>().unwrap());
   ```
 - async systems, ie systems that end and/or change over time (for scenes, stories, etc)
-  - fetch resources from the world asyncronously
+  - fetch resources from the world asyncronously. If they have not been added and can be
+    created by default, they will be. `Write` and `Read` will create default resources
+    during fetching, and `WriteExpect` and `ReadExpect` will not.
   - resources are acquired without lifetimes
+  - when resources are dropped they are sent back into the world
   ```rust
   use apecs::{anyhow, Write, world::*};
   async fn demo(mut facade: Facade) -> anyhow::Result<()> {
@@ -49,8 +52,6 @@ steps.
   }
   let mut world = World::default();
   world
-      .with_resource(0u32)
-      .unwrap()
       .with_async_system("demo", demo);
   world.run();
   assert_eq!(6, *world.resource::<u32>().unwrap());
@@ -76,10 +77,6 @@ steps.
   }
 
   let mut world = World::default();
-  world
-      .with_resource(0u32)
-      .unwrap();
-
   let mut my_data: MyData = world.fetch().unwrap();
   *my_data.u32_number = 1;
   ```
@@ -194,29 +191,101 @@ steps.
 
   assert_eq!(
       vec![
-          vec!["create"],
-          vec!["progress"],
+          vec!["create", "progress"], // <- same batch because they don't share exclusively
           vec!["sync"],
       ],
       world.get_sync_schedule_names()
   );
 
-  world.tick(); // entities are created
+  world.tick(); // entities are created, components applied lazily
   world.tick(); // f32s are modified, u32s and strings are synced
   world.tick(); // f32s are modified, u32s and strings are synced
 
   let q_bundle: Query<(&f32, &u32, &String)> = world.fetch().unwrap();
   assert_eq!(
-      (2.0, 2u32, "13:2.0".to_string()),
+      (2.0f32, 2u32, "13:2".to_string()),
       q_bundle.query().find_one(13).map(|(f, u, s)| (**f, **u, s.to_string())).unwrap()
   );
   ```
 - outer parallelism (running systems in parallel)
   - parallel system scheduling
   - parallel execution of async futures
+  - parallelism is configurable (can be automatic or a requested number of threads, including 1)
+  ```rust
+  use apecs::{system::*, world::*, Write, Read};
+  let mut world = World::default();
+  world
+      .with_system("one", |mut f32_number: Write<f32>| {
+          *f32_number += 1.0;
+          ok()
+      }).unwrap()
+      .with_system("two", |f32_number: Read<f32>| {
+          println!("system two reads {}", *f32_number);
+          ok()
+      }).unwrap()
+      .with_system("three", |f32_number: Read<f32>| {
+          println!("system three reads {}", *f32_number);
+          ok()
+      }).unwrap()
+      .with_parallelism(Parallelism::Automatic);
+  world.tick();
+  ```
 - plugins (groups of systems, resources and sub-plugins)
-- configurable parallelism (can be automatic or a requested number of threads, including 1)
-- fully compatible with wasm
+  ```rust
+  use apecs::{plugins::*, storage::*, system::*, world::*, CanFetch, Write};
+
+  #[derive(Default)]
+  struct MyTracker(u64);
+
+  #[derive(CanFetch)]
+  struct SyncData {
+      q_dirty_f32s: Query<(&'static f32, &'static mut String)>,
+      tracker: Write<MyTracker>,
+  }
+
+  fn create(
+      (mut entities, mut archeset): (Write<Entities>, Write<ArchetypeSet>),
+  ) -> anyhow::Result<ShouldContinue> {
+      // create a bunch of entities in bulk, which is quite fast
+      let ids = entities.create_many(1000);
+      archeset.extend::<(f32, String)>((
+          Box::new(ids.clone().into_iter().map(|id| Entry::new(id, id as f32))),
+          Box::new(
+              ids.into_iter()
+                  .map(|id| Entry::new(id, format!("{}:{}", id, id))),
+          ),
+      ));
+      end()
+  }
+
+  fn progress(q: Query<&mut f32>) -> anyhow::Result<ShouldContinue> {
+      for f32 in q.query().iter_mut() {
+          **f32 += 10.0;
+      }
+      ok()
+  }
+
+  fn sync(mut data: SyncData) -> anyhow::Result<ShouldContinue> {
+      for (f32, string) in data.q_dirty_f32s.query().iter_mut() {
+          if f32.was_modified_since(data.tracker.0) {
+              **string = format!("{}:{}", f32.id(), **f32);
+          }
+      }
+      data.tracker.0 = apecs::system::current_iteration();
+      ok()
+  }
+
+  // now we can package it all up into a plugin
+  let my_plugin = Plugin::default()
+      .with_system("create", create, &[])
+      .with_system("progress", progress, &["create"])
+      .with_system("sync", sync, &[]);
+
+  let mut world = World::default();
+  world.with_plugin(my_plugin).unwrap();
+  world.tick();
+  ```
+- fully compatible with WASM and runs in the browser
 
 ## Roadmap
 - your ideas go here
@@ -239,4 +308,4 @@ cargo bench -p benchmarks
 ```
 
 # Caveats
-`apecs` uses generic associated types. This means it can only be compiled with nightly.
+- `apecs` uses generic associated types. This means it can only be compiled with nightly.

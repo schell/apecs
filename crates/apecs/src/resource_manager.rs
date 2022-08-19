@@ -251,6 +251,22 @@ impl<'a> LoanManager<'a> {
         self.0.get_loaned(label, borrow)
     }
 
+    pub fn get_loaned_or_default<T: IsResource + Default>(
+        &mut self,
+        label: &str,
+        borrow: &Borrow,
+    ) -> anyhow::Result<FetchReadyResource> {
+        let rez_id = ResourceId::new::<T>();
+        if self.0.has_resource(&rez_id) {
+            self.0.get_loaned(label, borrow)
+        } else {
+            log::trace!("{} was missing in resources, so we create it from default", std::any::type_name::<T>());
+            let prev = self.0.insert(ResourceId::new::<T>(), Box::new(T::default()));
+            debug_assert!(prev.is_none());
+            self.0.get_loaned(label, borrow)
+        }
+    }
+
     /// Attempt to get a mutable reference to a resource.
     pub fn get_mut<T: IsResource>(&mut self) -> anyhow::Result<&mut T> {
         self.0.get_mut::<T>()

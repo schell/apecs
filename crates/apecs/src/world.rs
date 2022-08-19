@@ -311,8 +311,8 @@ impl Entities {
         }
     }
 
-    pub fn create(&mut self) -> Entity {
-        let id = if let Some(id) = self.recycle.pop() {
+    fn dequeue(&mut self) -> usize {
+        if let Some(id) = self.recycle.pop() {
             self.generations[id] += 1;
             id
         } else {
@@ -320,7 +320,33 @@ impl Entities {
             self.generations.push(0);
             self.next_k += 1;
             id
-        };
+        }
+    }
+
+    /// Create many entities at once, returning a list of their ids.
+    ///
+    /// An `Entity` can be made from its `usize` id using `Entities::hydrate`.
+    pub fn create_many(&mut self, mut how_many: usize) -> Vec<usize> {
+        let mut ids = vec![];
+        while let Some(id) = self.recycle.pop() {
+            self.generations[id] += 1;
+            ids.push(id);
+            how_many -= 1;
+            if how_many == 0 {
+                return ids;
+            }
+        }
+
+        let last_id = self.next_k + (how_many - 1);
+        self.generations.resize_with(last_id, || 0);
+        ids.extend(self.next_k..=last_id);
+        self.next_k = last_id + 1;
+        ids
+    }
+
+    /// Create one entity and return it.
+    pub fn create(&mut self) -> Entity {
+        let id = self.dequeue();
         Entity {
             id,
             gen: self.generations[id],
@@ -329,6 +355,11 @@ impl Entities {
         }
     }
 
+    /// Destroy an entity, recycling it.
+    ///
+    /// ## NOTE:
+    /// Destroyed entities will have their components removed
+    /// automatically during upkeep, which happens each `World::tick`.
     pub fn destroy(&mut self, mut entity: Entity) {
         entity.op_receivers = Default::default();
         self.deleted_cache[0].1.push(entity.id());
@@ -339,6 +370,9 @@ impl Entities {
     /// generation.
     ///
     /// Returns a vector of the entities' ids.
+    ///
+    /// ## NOTE:
+    /// You do not need to call this directly.
     pub fn recycle_dead(&mut self) -> Vec<usize> {
         self.deleted_cache
             .push_front((crate::system::current_iteration(), vec![]));
@@ -1183,4 +1217,5 @@ mod test {
             .with_parallelism(Parallelism::Automatic);
         world.run();
     }
+
 }
