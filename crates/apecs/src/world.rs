@@ -1,5 +1,6 @@
 //! The [`World`] contains resources and is responsible for ticking
 //! systems.
+use std::any::TypeId;
 use std::future::Future;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -279,20 +280,23 @@ impl Entity {
 pub struct Entities {
     pub next_k: usize,
     pub generations: Vec<usize>,
-    pub dead: Vec<usize>,
     pub recycle: Vec<usize>,
-    pub deleted_cache: VecDeque<(u64, Vec<usize>)>,
+    pub delete_tx: spsc::Sender<usize>,
+    pub delete_rx: spsc::Receiver<usize>,
+    pub deleted: VecDeque<(u64, Vec<(usize, smallvec::SmallVec<[TypeId; 4]>)>)>,
     pub lazy_op_sender: mpsc::Sender<LazyOp>,
 }
 
 impl Default for Entities {
     fn default() -> Self {
+        let (delete_tx, delete_rx) = spsc::unbounded();
         Self {
             next_k: Default::default(),
             generations: vec![],
-            dead: Default::default(),
             recycle: Default::default(),
-            deleted_cache: Default::default(),
+            delete_rx,
+            delete_tx,
+            deleted: Default::default(),
             lazy_op_sender: mpsc::unbounded().0,
         }
     }
@@ -302,11 +306,6 @@ impl Entities {
     pub fn new(lazy_op_sender: mpsc::Sender<LazyOp>) -> Self {
         Self {
             lazy_op_sender,
-            deleted_cache: {
-                let mut cache = VecDeque::default();
-                cache.push_back((crate::system::current_iteration(), vec![]));
-                cache
-            },
             ..Default::default()
         }
     }
@@ -321,6 +320,11 @@ impl Entities {
             self.next_k += 1;
             id
         }
+    }
+
+    /// Returns the number of entities that are currently alive.
+    pub fn alive_len(&self) -> usize {
+        self.generations.len() - self.recycle.len()
     }
 
     /// Create many entities at once, returning a list of their ids.
@@ -355,50 +359,50 @@ impl Entities {
         }
     }
 
-    /// Destroy an entity, recycling it.
+    /// Lazily destroy an entity, recycling it at the end of this tick.
     ///
     /// ## NOTE:
     /// Destroyed entities will have their components removed
-    /// automatically during upkeep, which happens each `World::tick`.
-    pub fn destroy(&mut self, mut entity: Entity) {
+    /// automatically during upkeep, which happens each `World::tick_lazy`.
+    pub fn destroy(&self, mut entity: Entity) {
         entity.op_receivers = Default::default();
-        self.deleted_cache[0].1.push(entity.id());
-        self.dead.push(entity.id);
-    }
-
-    /// Recycles any destroyed entities, allowing them to be re-used as a new
-    /// generation.
-    ///
-    /// Returns a vector of the entities' ids.
-    ///
-    /// ## NOTE:
-    /// You do not need to call this directly.
-    pub fn recycle_dead(&mut self) -> Vec<usize> {
-        self.deleted_cache
-            .push_front((crate::system::current_iteration(), vec![]));
-        while self.deleted_cache.len() > 2 {
-            self.deleted_cache.pop_back();
-        }
-        if !self.dead.is_empty() {
-            let dead_ids = std::mem::take(&mut self.dead);
-            self.recycle.extend(dead_ids.clone());
-            dead_ids
-        } else {
-            vec![]
-        }
+        self.delete_tx.try_send(entity.id()).unwrap();
     }
 
     /// Produce an iterator of deleted entities as entries.
     ///
     /// This iterator should be filtered at the callsite for the latest changed
     /// entries since a stored iteration timestamp.
-    pub fn deleted_iter<'a>(&'a self) -> impl Iterator<Item = Entry<()>> + 'a {
-        self.deleted_cache.iter().flat_map(|(changed, ids)| {
-            ids.iter().map(|id| Entry {
+    pub fn deleted_iter(&self) -> impl Iterator<Item = Entry<()>> + '_ {
+        self.deleted.iter().flat_map(|(changed, ids)| {
+            ids.iter().map(|(id, _)| Entry {
                 value: (),
                 key: *id,
                 changed: *changed,
-                added: false,
+                added: true,
+            })
+        })
+    }
+
+    /// Produce an iterator of deleted entities that had a component of the
+    /// given type, as entries.
+    ///
+    /// This iterator should be filtered at the callsite for the latest changed
+    /// entries since a stored iteration timestamp.
+    pub fn deleted_iter_of<T: 'static>(&self) -> impl Iterator<Item = Entry<()>> + '_ {
+        let ty = TypeId::of::<Entry<T>>();
+        self.deleted.iter().flat_map(move |(changed, ids)| {
+            ids.iter().filter_map(move |(id, tys)| {
+                if tys.contains(&ty) {
+                    Some(Entry {
+                        value: (),
+                        key: *id,
+                        changed: *changed,
+                        added: true,
+                    })
+                } else {
+                    None
+                }
             })
         })
     }
@@ -819,13 +823,31 @@ impl World {
         }
 
         self.resource_manager.unify_resources("World::tick_lazy")?;
-        let dead_ids = {
-            let entities: &mut Entities = self.resource_mut()?;
-            entities.recycle_dead()
+        let dead_ids: Vec<usize> = {
+            let entities: &Entities = self.resource()?;
+            let mut dead_ids = vec![];
+            while let Some(id) = entities.delete_rx.try_recv().ok() {
+                dead_ids.push(id);
+            }
+            dead_ids
         };
-        {
-            let archset: &mut ArchetypeSet = self.resource_mut()?;
-            archset.upkeep(&dead_ids);
+        if !dead_ids.is_empty() {
+            let ids_and_types: Vec<(usize, smallvec::SmallVec<[TypeId; 4]>)> = {
+                let archset: &mut ArchetypeSet = self.resource_mut()?;
+                let ids_and_types = archset.upkeep(&dead_ids);
+                ids_and_types
+            };
+            let entities: &mut Entities = self.resource_mut()?;
+            entities
+                .recycle
+                .extend(ids_and_types.iter().map(|(id, _)| *id));
+            entities
+                .deleted
+                .push_front((crate::system::current_iteration(), ids_and_types));
+            // listeners have 3 frames to check for deleted things
+            while entities.deleted.len() > 3 {
+                let _ = entities.deleted.pop_back();
+            }
         }
 
         Ok(())
@@ -1187,8 +1209,6 @@ mod test {
 
         let mut world = World::default();
         world
-            .with_resource(0u32)
-            .unwrap()
             .with_async_system("one", |mut facade: Facade| -> AsyncSystemFuture {
                 Box::pin(async move {
                     let mut number: Write<u32> = facade.fetch().await?;
@@ -1218,4 +1238,42 @@ mod test {
         world.run();
     }
 
+    #[test]
+    fn deleted_entities() {
+        let _ = env_logger::builder()
+            .is_test(true)
+            .filter_level(log::LevelFilter::Trace)
+            .try_init();
+
+        let mut world = World::default();
+        {
+            let entities: &mut Entities = world.resource_mut().unwrap();
+            (0..10u32).for_each(|i| {
+                entities
+                    .create()
+                    .insert_bundle(("hello".to_string(), false, i))
+            });
+            assert_eq!(10, entities.alive_len());
+        }
+        world.tick();
+        {
+            let q: Query<&u32> = world.fetch().unwrap();
+            assert_eq!(
+                9,
+                **q.query().find_one(9).unwrap()
+            );
+        }
+        {
+            let entities: &Entities = world.resource().unwrap();
+            let entity = entities.hydrate(9).unwrap();
+            entities.destroy(entity);
+        }
+        world.tick();
+        {
+            let entities: &Entities = world.resource().unwrap();
+            assert_eq!(9, entities.alive_len());
+            let deleted_strings = entities.deleted_iter_of::<String>().collect::<Vec<_>>();
+            assert_eq!(9, deleted_strings[0].id());
+        }
+    }
 }

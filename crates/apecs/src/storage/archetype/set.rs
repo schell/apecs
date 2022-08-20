@@ -290,8 +290,13 @@ impl ArchetypeSet {
         self.archetypes.iter().all(|a| a.is_empty())
     }
 
-    /// Perform upkeep on all archetypes, removing any given dead ids.
-    pub fn upkeep(&mut self, dead_ids: &[usize]) {
+    /// Perform upkeep on all archetypes, removing any given dead ids
+    /// and returning the ids and types removed.
+    ///
+    /// This does not need to be called. It is used internally during
+    /// [`World::tick_lazy`].
+    pub fn upkeep(&mut self, dead_ids: &[usize]) -> Vec<(usize, smallvec::SmallVec<[TypeId; 4]>)> {
+        let mut ids_types = vec![];
         for id in dead_ids {
             if let Some((archetype_index, component_index)) =
                 self.entity_lookup.get(*id).copied().flatten()
@@ -302,6 +307,9 @@ impl ArchetypeSet {
                     archetype_index,
                     component_index
                 );
+                let any_entry_bundle = self.remove_any_entry_bundle(*id, archetype_index, component_index);
+                ids_types.push((*id, any_entry_bundle.0));
+
                 if self.archetypes[archetype_index].index_lookup.is_empty() {
                     log::trace!("archetype {} is empty", archetype_index);
                     // remove the archetype
@@ -324,6 +332,7 @@ impl ArchetypeSet {
                 }
             }
         }
+        ids_types
     }
 }
 

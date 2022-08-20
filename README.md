@@ -15,6 +15,7 @@ use apecs::{world::Facade, anyhow};
 
 async fn my_system(mut facade: Facade) -> anyhow::Result<()> {
     //...
+    Ok(())
 }
 ```
 The `Facade` type is like a window into the world. It can `fetch` resources from the
