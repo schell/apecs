@@ -28,6 +28,7 @@ async-broadcast = "^0.4"
 async-channel = "^1.6"
 async-executor = "^1.4"
 async-oneshot = "^0.5"
+cassowary = { git = "https://github.com/schell/cassowary-rs.git" }
 itertools = "^0.10"
 log = "^0.4"
 parking_lot = "^0.12"

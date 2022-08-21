@@ -4,24 +4,30 @@ use std::future::Future;
 use crate::{
     system::{AsyncSystemFuture, ShouldContinue, SyncSystem},
     world::Facade,
-    CanFetch, IsResource, LazyResource, ResourceId, ResourceRequirement,
+    CanFetch, IsResource, LazyResource, ResourceId, ResourceRequirement, schedule::Dependency,
 };
 
-pub struct SyncSystemWithDeps(pub SyncSystem, pub Vec<String>);
+pub struct SyncSystemWithDeps(pub SyncSystem);
 
 impl SyncSystemWithDeps {
-    pub fn new<T, F>(name: &str, system: F, deps: Option<&[&str]>) -> Self
+    pub fn new<T, F>(name: &str, system: F, after_deps: Option<&[&str]>, before_deps: Option<&[&str]>) -> Self
     where
         F: FnMut(T) -> anyhow::Result<ShouldContinue> + Send + Sync + 'static,
         T: CanFetch + Send + Sync + 'static,
     {
         let mut vs = vec![];
-        if let Some(names) = deps {
+        if let Some(names) = after_deps {
             for name in names {
-                vs.push(name.to_string());
+                vs.push(Dependency::After(name.to_string()));
             }
         }
-        SyncSystemWithDeps(SyncSystem::new(name, system), vs)
+        if let Some(names) = before_deps {
+            for name in names {
+                vs.push(Dependency::Before(name.to_string()));
+            }
+        }
+
+        SyncSystemWithDeps(SyncSystem::new(name, system, vs))
     }
 }
 
@@ -92,15 +98,20 @@ impl Plugin {
         self
     }
 
+    /// Add a system to the plugin.
     pub fn with_system<T: CanFetch + Send + Sync + 'static>(
         mut self,
         name: &str,
         system: impl FnMut(T) -> anyhow::Result<ShouldContinue> + Send + Sync + 'static,
-        deps: &[&str],
+        // other systems this system must run after
+        after_deps: &[&str],
+        // other systems this system must run before
+        before_deps: &[&str],
     ) -> Self {
-        let deps = if deps.is_empty() { None } else { Some(deps) };
+        let after_deps = if after_deps.is_empty() { None } else { Some(after_deps) };
+        let before_deps = if before_deps.is_empty() { None } else { Some(before_deps) };
         self.sync_systems
-            .push(SyncSystemWithDeps::new(name, system, deps));
+            .push(SyncSystemWithDeps::new(name, system, after_deps, before_deps));
         self.with_plugin(T::plugin())
     }
 

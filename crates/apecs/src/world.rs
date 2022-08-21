@@ -10,7 +10,7 @@ use anyhow::Context;
 use async_oneshot::oneshot;
 use rustc_hash::FxHashSet;
 
-use crate::schedule::{IsBatch, IsSystem};
+use crate::schedule::Dependency;
 use crate::storage::Entry;
 use crate::{
     mpsc, oneshot,
@@ -568,8 +568,7 @@ impl World {
 
         for system in plugin.sync_systems.into_iter() {
             if !self.sync_schedule.contains_system(&system.0.name) {
-                self.sync_schedule
-                    .add_system_with_dependecies(system.0, system.1.into_iter());
+                self.sync_schedule.add_system(system.0);
             }
         }
 
@@ -604,7 +603,7 @@ impl World {
         F: FnMut(T) -> anyhow::Result<ShouldContinue> + Send + Sync + 'static,
         T: CanFetch + 'static,
     {
-        self.with_system_with_dependencies(name, sys_fn, &[])
+        self.with_system_with_dependencies(name, sys_fn, &[], &[])
     }
 
     /// Add a syncronous system that has a dependency on one or more other
@@ -616,17 +615,19 @@ impl World {
         &mut self,
         name: impl AsRef<str>,
         sys_fn: F,
-        deps: &[&str],
+        after_deps: &[&str],
+        before_deps: &[&str],
     ) -> anyhow::Result<&mut Self>
     where
         F: FnMut(T) -> anyhow::Result<ShouldContinue> + Send + Sync + 'static,
         T: CanFetch + 'static,
     {
-        let system = SyncSystem::new(name, sys_fn);
+        let mut deps = after_deps.iter().map(|dep| Dependency::After(dep.to_string())).collect::<Vec<_>>();
+        deps.extend(before_deps.iter().map(|dep| Dependency::Before(dep.to_string())));
+        let system = SyncSystem::new(name, sys_fn, deps);
 
         self.with_plugin(T::plugin())?;
-        self.sync_schedule
-            .add_system_with_dependecies(system, deps.iter());
+        self.sync_schedule.add_system(system);
         Ok(self)
     }
 
@@ -896,17 +897,7 @@ impl World {
 
     /// Returns the scheduled systems' names, collated by batch.
     pub fn get_sync_schedule_names(&self) -> Vec<Vec<&str>> {
-        self.sync_schedule
-            .batches()
-            .iter()
-            .map(|batch| {
-                batch
-                    .systems()
-                    .iter()
-                    .map(|sys| sys.name())
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>()
+        self.sync_schedule.get_schedule_names()
     }
 }
 

@@ -5,7 +5,7 @@ use rayon::prelude::*;
 
 use crate::{
     resource_manager::{LoanManager, ResourceManager},
-    schedule::{Borrow, IsBatch, IsSchedule, IsSystem, UntypedSystemData},
+    schedule::{Borrow, IsBatch, IsSchedule, IsSystem, UntypedSystemData, Dependency},
     spsc,
     world::Facade,
     CanFetch, Request, Resource,
@@ -83,6 +83,8 @@ pub type SystemFunction =
 pub struct SyncSystem {
     pub name: String,
     pub borrows: Vec<Borrow>,
+    pub dependencies: Vec<Dependency>,
+    pub barrier: usize,
     pub prepare: fn(&mut LoanManager<'_>) -> anyhow::Result<UntypedSystemData>,
     pub function: SystemFunction,
 }
@@ -106,6 +108,18 @@ impl IsSystem for SyncSystem {
         &self.borrows
     }
 
+    fn dependencies(&self) -> &[Dependency] {
+        &self.dependencies
+    }
+
+    fn barrier(&self) -> usize {
+        self.barrier
+    }
+
+    fn set_barrier(&mut self, barrier: usize) {
+        self.barrier = barrier;
+    }
+
     fn prep(&self, loan_mngr: &mut LoanManager<'_>) -> anyhow::Result<UntypedSystemData> {
         (self.prepare)(loan_mngr)
     }
@@ -116,7 +130,7 @@ impl IsSystem for SyncSystem {
 }
 
 impl SyncSystem {
-    pub fn new<T, F>(name: impl AsRef<str>, mut sys_fn: F) -> Self
+    pub fn new<T, F>(name: impl AsRef<str>, mut sys_fn: F, dependencies: Vec<Dependency>) -> Self
     where
         F: FnMut(T) -> anyhow::Result<ShouldContinue> + Send + Sync + 'static,
         T: CanFetch + Send + Sync + 'static,
@@ -124,6 +138,8 @@ impl SyncSystem {
         SyncSystem {
             name: name.as_ref().to_string(),
             borrows: T::borrows(),
+            dependencies,
+            barrier: 0,
             prepare: |loan_mngr: &mut LoanManager| {
                 let box_t: Box<T> = Box::new(T::construct(loan_mngr)?);
                 let b: UntypedSystemData = box_t;
@@ -296,6 +312,16 @@ impl<'a> IsSystem for AsyncSystemRequest<'a> {
     fn borrows(&self) -> &[Borrow] {
         &self.1.borrows
     }
+
+    fn dependencies(&self) -> &[Dependency] {
+        &[]
+    }
+
+    fn barrier(&self) -> usize {
+        0
+    }
+
+    fn set_barrier(&mut self, _:usize) {}
 
     fn prep(&self, loan_mngr: &mut LoanManager<'_>) -> anyhow::Result<UntypedSystemData> {
         (self.1.construct)(loan_mngr)

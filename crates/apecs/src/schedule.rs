@@ -3,13 +3,15 @@
 //! This module contains trait definitions. Implementations can be found in
 //! other modeluse.
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::{collections::VecDeque, iter::FlatMap, slice::Iter, sync::Arc, any::Any};
+use std::{any::Any, collections::VecDeque, iter::FlatMap, slice::Iter, sync::Arc, cmp::Ordering};
 
 use crate::{
-    resource_manager::{ResourceManager, LoanManager},
+    resource_manager::{LoanManager, ResourceManager},
     system::ShouldContinue,
     FetchReadyResource, Resource, ResourceId,
 };
+
+use self::solver::SolverSystem;
 
 pub type UntypedSystemData = Box<dyn Any + Send + Sync>;
 
@@ -18,25 +20,15 @@ pub trait IsSystem: std::fmt::Debug {
 
     fn borrows(&self) -> &[Borrow];
 
-    fn conflicts_with(&self, other: &impl IsSystem) -> bool {
-        for borrow_here in self.borrows().iter() {
-            for borrow_there in other.borrows() {
-                if borrow_here.rez_id() == borrow_there.rez_id()
-                    && (borrow_here.is_exclusive() || borrow_there.is_exclusive())
-                {
-                    return true;
-                }
-            }
-        }
-        false
-    }
+    fn dependencies(&self) -> &[Dependency];
+
+    fn set_barrier(&mut self, barrier: usize);
+
+    fn barrier(&self) -> usize;
 
     fn prep(&self, loan_mngr: &mut LoanManager<'_>) -> anyhow::Result<UntypedSystemData>;
 
-    fn run(
-        &mut self,
-        data: UntypedSystemData,
-    ) -> anyhow::Result<ShouldContinue>;
+    fn run(&mut self, data: UntypedSystemData) -> anyhow::Result<ShouldContinue>;
 }
 
 #[derive(Debug)]
@@ -97,11 +89,12 @@ pub trait IsBatch: std::fmt::Debug + Default {
 
     fn set_systems(&mut self, systems: Vec<Self::System>);
 
-    /// Run the batch (possibly in parallel) and then unify the resources and make the world
-    /// "whole".
+    /// Run the batch (possibly in parallel) and then unify the resources and
+    /// make the world "whole".
     ///
     /// ## Note
-    /// `parallelism` is roughly the number of threads to use for parallel operations.
+    /// `parallelism` is roughly the number of threads to use for parallel
+    /// operations.
     fn run(
         &mut self,
         parallelism: u32,
@@ -142,64 +135,59 @@ pub trait IsSchedule: std::fmt::Debug {
 
     fn get_parallelism(&self) -> u32;
 
-    fn add_system(&mut self, new_system: Self::System) {
-        let deps: Vec<String> = vec![];
-        self.add_system_with_dependecies(new_system, deps.into_iter())
-    }
+    fn add_system(&mut self, mut new_system: Self::System) {
+        new_system.set_barrier(self.current_barrier());
+        let batches = std::mem::take(self.batches_mut());
+        let mut systems = batches
+            .into_iter()
+            .flat_map(|mut batch| batch.take_systems())
+            .collect::<Vec<_>>();
+        systems.push(new_system);
 
-    fn add_system_with_dependecies(
-        &mut self,
-        new_system: Self::System,
-        deps: impl Iterator<Item = impl AsRef<str>>,
-    ) {
-        let mut deps = rustc_hash::FxHashSet::from_iter(deps.map(|s| s.as_ref().to_string()));
-        let current_barrier = self.current_barrier();
-        'batch_loop: for batch in self.batches_mut() {
-            if batch.get_barrier() != current_barrier {
-                continue;
-            }
-            let mut batch_systems = batch.systems().iter();
-            'system_loop: while let Some(system) = batch_systems.next() {
-                if system.conflicts_with(&new_system) {
-                    // the new system conflicts with one in
-                    // the current batch, break and check
-                    // the next batch
-                    continue 'batch_loop;
-                }
-                if deps.contains(system.name()) {
-                    // the new system has a dependency on this system,
-                    // so it must be added to the next batch. We can't
-                    // add it to this batch because then they could run
-                    // in parallel.
-                    deps.remove(system.name());
-                    // also remove any other systems in this batch from
-                    // the dependencies
-                    for system in batch_systems {
-                        deps.remove(system.name());
-                    }
-                    continue 'batch_loop;
-                } else if !deps.is_empty() {
-                    // there are system dependencies we haven't seen yet,
-                    // so continue looking through the systems
-                    continue 'system_loop;
-                }
-            }
+        let solver_systems = systems
+            .iter()
+            .map(|sys| SolverSystem {
+                name: sys.name().to_string(),
+                dependencies: sys.dependencies().to_vec(),
+                borrows: sys.borrows().to_vec(),
+                barrier: sys.barrier(),
+            })
+            .collect::<Vec<_>>();
 
-            if deps.is_empty() {
-                // the new system doesn't conflict with any existing
-                // system and doesn't have any dependency on a system
-                // running before it, so add it to the batch
-                batch.add_system(new_system);
-                return;
-            }
-        }
+        let indices = solver::solve_order(&solver_systems).unwrap();
+        debug_assert_eq!(indices.len(), systems.len());
+        let mut indexed_systems = indices
+            .into_iter()
+            .zip(systems.into_iter())
+            .collect::<Vec<_>>();
+        indexed_systems.sort_by(|a, b| match a.0.total_cmp(&b.0) {
+            Ordering::Equal => a.1.name().cmp(b.1.name()),
+            o => o,
+        });
+        log::trace!(
+            "pre-schedule: {:#?}",
+            indexed_systems
+                .iter()
+                .map(|(i, sys)| (i, sys.name()))
+                .collect::<Vec<_>>()
+        );
 
-        // if the system hasn't found a compatible batch, make a new
-        // batch and add it
         let mut batch = Self::Batch::default();
-        batch.set_barrier(self.current_barrier());
-        batch.add_system(new_system);
-        self.add_batch(batch);
+        let mut current_index = indexed_systems.first().map(|(i, _)| *i).unwrap_or(0.0);
+
+        for (index, system) in indexed_systems.into_iter() {
+            let batch_borrows = batch.borrows().cloned().collect::<Vec<_>>();
+            if index > current_index || borrows_conflict(system.borrows(), &batch_borrows) {
+                if !batch.systems().is_empty() {
+                    self.add_batch(std::mem::replace(&mut batch, Self::Batch::default()));
+                }
+                current_index = index;
+            }
+            batch.add_system(system);
+        }
+        if !batch.systems().is_empty() {
+            self.add_batch(batch);
+        }
     }
 
     /// Returns the id of the last barrier.
@@ -220,7 +208,8 @@ pub trait IsSchedule: std::fmt::Debug {
             batch.run(parallelism, extra.clone(), resource_manager)?;
             resource_manager.unify_resources("IsSchedule::run after one")?;
         }
-        self.batches_mut().retain(|batch| !batch.systems().is_empty());
+        self.batches_mut()
+            .retain(|batch| !batch.systems().is_empty());
 
         Ok(())
     }
@@ -234,6 +223,19 @@ pub trait IsSchedule: std::fmt::Debug {
                     .iter()
                     .map(IsSystem::name)
                     .chain(vec!["---"])
+            })
+            .collect::<Vec<_>>()
+    }
+
+    fn get_schedule_names(&self) -> Vec<Vec<&str>> {
+        self.batches()
+            .iter()
+            .map(|batch| {
+                batch
+                    .systems()
+                    .iter()
+                    .map(|sys| sys.name())
+                    .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>()
     }
@@ -259,6 +261,140 @@ impl Borrow {
     }
 }
 
+fn borrows_conflict<'a>(borrows_a: &[Borrow], borrows_b: &[Borrow]) -> bool {
+    for borrow_a in borrows_a {
+        for borrow_b in borrows_b {
+            if borrow_a.rez_id() == borrow_b.rez_id()
+                && (borrow_a.is_exclusive() || borrow_b.is_exclusive())
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Denotes a system's dependency on another.
+#[derive(Clone, PartialEq)]
+pub enum Dependency {
+    After(String),
+    Before(String),
+}
+
+mod solver {
+    use anyhow;
+    use cassowary::*;
+    use std::ops::*;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    struct Sys(usize);
+    cassowary::derive_syntax_for!(Sys);
+
+    pub struct SolverSystem {
+        pub name: String,
+        pub dependencies: Vec<super::Dependency>,
+        pub borrows: Vec<super::Borrow>,
+        pub barrier: usize,
+    }
+
+    impl SolverSystem {
+        fn must_run_after(&self, system_b: &SolverSystem) -> bool {
+            self.dependencies
+                .contains(&super::Dependency::After(system_b.name.clone()))
+        }
+
+        fn must_run_before(&self, system_b: &SolverSystem) -> bool {
+            self.dependencies
+                .contains(&super::Dependency::Before(system_b.name.clone()))
+        }
+    }
+
+    pub fn solve_order(systems: &[SolverSystem]) -> anyhow::Result<Vec<f64>> {
+        log::trace!("solving schedule for {} systems", systems.len());
+        let mut systems = systems.iter().collect::<Vec<_>>();
+        systems.sort_by(|a, b| a.barrier.cmp(&b.barrier));
+        let max_barrier = systems.iter().fold(0, |b, sys| sys.barrier.max(b));
+        let barriers = (0..max_barrier).map(|b| Sys(b)).collect::<Vec<_>>();
+        log::trace!("  {} barriers", barriers.len());
+        let mut solver: Solver<Sys> = cassowary::Solver::new();
+        let mut constraints = vec![];
+        for barrier_a in barriers.iter() {
+            solver.add_constraint(barrier_a.is_ge(0.0)).unwrap();
+            constraints.push(format!("barrier {} >= 0", barrier_a.0));
+            log::trace!("  {}", constraints.last().unwrap());
+            for barrier_b in barriers.iter() {
+                if barrier_a.0 > barrier_b.0 {
+                    solver.add_constraint(barrier_a.is_ge(*barrier_b + 1.0)).unwrap();
+                    constraints.push(format!("barrier {} > barrier {}", barrier_a.0, barrier_b.0));
+                    log::trace!("  {}", constraints.last().unwrap());
+                }
+            }
+        }
+        for (a, system_a) in systems.iter().enumerate() {
+            let sys_a = Sys(a + max_barrier);
+
+            if !barriers.is_empty() {
+                let barrier = Sys(system_a.barrier);
+                solver.add_constraint(sys_a.is_ge(barrier + 1.0)).unwrap();
+                constraints.push(format!("{} > barrier {}", system_a.name, barrier.0));
+                log::trace!("  {}", constraints.last().unwrap());
+            }
+
+            for (b, system_b) in systems.iter().enumerate() {
+                if system_a.name == system_b.name {
+                    continue;
+                }
+
+                let sys_b = Sys(b + max_barrier);
+                let before_constraint = sys_b.is_ge(sys_a + 1.0);
+                let before_msg = format!("{} > {}", system_b.name, system_a.name);
+                let after_constraint = sys_a.is_ge(sys_b + 1.0);
+                let after_msg = format!("{} > {}", system_a.name, system_b.name);
+
+                if system_a.must_run_before(system_b) {
+                    if !solver.has_constraint(&before_constraint) {
+                        solver.add_constraint(before_constraint).map_err(|e| {
+                            anyhow::anyhow!(
+                                "can't make {:?} < {:?}: {:?}\nconstraints: {:#?}",
+                                system_a.name,
+                                system_b.name,
+                                e,
+                                constraints
+                            )
+                        })?;
+                        log::trace!("  {}", before_msg);
+                        constraints.push(before_msg);
+                    }
+                } else if system_a.must_run_after(system_b) {
+                    if !solver.has_constraint(&after_constraint) {
+                        solver.add_constraint(after_constraint).map_err(|e| {
+                            anyhow::anyhow!(
+                                "can't make {:?} > {:?}: {:?}\nconstraints: {:#?}",
+                                system_a.name,
+                                system_b.name,
+                                e,
+                                constraints
+                            )
+                        })?;
+                        log::trace!("  {}", after_msg);
+                        constraints.push(after_msg);
+                    }
+                }
+            }
+        }
+
+        let out = systems
+            .iter()
+            .enumerate()
+            .map(|(i, _)| {
+                let sys = Sys(i);
+                solver.get_value(sys)
+            })
+            .collect::<Vec<_>>();
+        Ok(out)
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -266,56 +402,98 @@ mod test {
 
     #[test]
     fn schedule_with_dependencies() {
-        let mut schedule = SyncSchedule::default();
-        schedule.add_system(SyncSystem::new("one", |()| ok()));
-        schedule
-            .add_system_with_dependecies(SyncSystem::new("two", |()| ok()), ["one"].into_iter());
+        let _ = env_logger::builder()
+            .is_test(true)
+            .filter_level(log::LevelFilter::Trace)
+            .try_init();
 
-        let batches = schedule.batches();
-        assert_eq!(batches.len(), 2);
-        assert_eq!(batches[0].systems()[0].name(), "one");
-        assert_eq!(batches[1].systems()[0].name(), "two");
+        let mut schedule = SyncSchedule::default();
+        schedule.add_system(SyncSystem::new("one", |()| ok(), vec![]));
+        schedule.add_system(SyncSystem::new(
+            "two",
+            |()| ok(),
+            vec![Dependency::After("one".to_string())],
+        ));
+        schedule.add_system(SyncSystem::new(
+            "three",
+            |()| ok(),
+            vec![Dependency::After("two".to_string())],
+        ));
+        schedule.add_system(SyncSystem::new(
+            "three-again",
+            |()| ok(),
+            vec![
+                Dependency::After("two".to_string()),
+                Dependency::Before("four".to_string()),
+            ],
+        ));
+        schedule.add_system(SyncSystem::new(
+            "four",
+            |()| ok(),
+            vec![Dependency::After("three".to_string())],
+        ));
+        assert_eq!(
+            vec![
+                vec!["one"],
+                vec!["two"],
+                vec!["three", "three-again"],
+                vec!["four"],
+            ],
+            schedule.get_schedule_names()
+        );
+
+        schedule.add_system(SyncSystem::new(
+            "zero",
+            |()| ok(),
+            vec![Dependency::Before("one".to_string())],
+        ));
+        assert_eq!(
+            vec![
+                vec!["zero"],
+                vec!["one"],
+                vec!["two"],
+                vec!["three", "three-again"],
+                vec!["four"],
+            ],
+            schedule.get_schedule_names()
+        );
     }
 
     #[test]
     fn schedule_with_barrier() {
-        let mut schedule = SyncSchedule::default();
-        schedule.add_system(SyncSystem::new("one", |()| ok()));
-        schedule.add_barrier();
-        schedule.add_system(SyncSystem::new("two", |()| ok()));
-        schedule.add_system(SyncSystem::new("three", |()| ok()));
-        schedule.add_barrier();
-        schedule.add_system(SyncSystem::new("four", |()| ok()));
+        let _ = env_logger::builder()
+            .is_test(true)
+            .filter_level(log::LevelFilter::Trace)
+            .try_init();
 
-        let batches = schedule.batches();
-        assert_eq!(batches.len(), 3);
-        assert_eq!(batches[0].systems()[0].name(), "one");
-        assert_eq!(batches[1].systems()[0].name(), "two");
-        assert_eq!(batches[1].systems()[1].name(), "three");
-        assert_eq!(batches[2].systems()[0].name(), "four");
+        let mut schedule = SyncSchedule::default();
+        schedule.add_system(SyncSystem::new("one", |()| ok(), vec![]));
+        schedule.add_barrier();
+        schedule.add_system(SyncSystem::new("two", |()| ok(), vec![]));
+        schedule.add_system(SyncSystem::new("three", |()| ok(), vec![]));
+        schedule.add_barrier();
+        schedule.add_system(SyncSystem::new("four", |()| ok(), vec![]));
+
+        assert_eq!(
+            vec![vec!["one"], vec!["two", "three"], vec!["four"]],
+            schedule.get_schedule_names()
+        );
     }
 
     #[test]
     fn schedule_with_ephemeral() {
         let mut schedule = SyncSchedule::default();
-        schedule.add_system(SyncSystem::new("one", |()| end()));
-        schedule.add_system(SyncSystem::new("two", |()| ok()));
-        schedule.add_system(SyncSystem::new("three", |()| ok()));
+        schedule.add_system(SyncSystem::new("one", |()| end(), vec![]));
+        schedule.add_system(SyncSystem::new("two", |()| ok(), vec![]));
+        schedule.add_system(SyncSystem::new("three", |()| ok(), vec![]));
 
-        let batches = schedule.batches();
-        assert_eq!(batches.len(), 1);
-        assert_eq!(batches[0].systems().len(), 3);
-        assert_eq!(batches[0].systems()[0].name(), "one");
-        assert_eq!(batches[0].systems()[1].name(), "two");
-        assert_eq!(batches[0].systems()[2].name(), "three");
+        assert_eq!(
+            vec![vec!["one", "two", "three"]],
+            schedule.get_schedule_names()
+        );
 
         let mut manager = ResourceManager::default();
         schedule.run((), &mut manager).unwrap();
-
-        let batches = schedule.batches();
-        assert_eq!(batches.len(), 1);
-        assert_eq!(batches[0].systems().len(), 2);
-        assert_eq!(batches[0].systems()[0].name(), "two");
-        assert_eq!(batches[0].systems()[1].name(), "three");
+        assert_eq!(vec![vec!["two", "three"]], schedule.get_schedule_names());
     }
 }
