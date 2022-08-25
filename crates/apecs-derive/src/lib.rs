@@ -1,105 +1,12 @@
 use proc_macro2::Span;
 use quote::quote;
-use syn::{
-    parse_macro_input, punctuated::Punctuated, token::Comma, Data, DataStruct, DeriveInput, Field,
-    Fields, FieldsNamed, FieldsUnnamed, Ident, Type, TypeTuple, WhereClause, WherePredicate,
-};
-
-fn collect_field_types(fields: &Punctuated<Field, Comma>) -> Vec<Type> {
-    fields.iter().map(|x| x.ty.clone()).collect()
-}
-
-fn gen_identifiers(fields: &Punctuated<Field, Comma>) -> Vec<Ident> {
-    fields.iter().map(|x| x.ident.clone().unwrap()).collect()
-}
-
-/// Adds a `CanFetch<'lt>` bound on each of the system data types.
-fn constrain_system_data_types(clause: &mut WhereClause, tys: &[Type]) {
-    for ty in tys.iter() {
-        let where_predicate: WherePredicate = syn::parse_quote!(#ty : CanFetch);
-        clause.predicates.push(where_predicate);
-    }
-}
-
-fn gen_from_body(ast: &Data, name: &Ident) -> (proc_macro2::TokenStream, Vec<Type>) {
-    enum DataType {
-        Struct,
-        Tuple,
-    }
-
-    let (body, fields) = match *ast {
-        Data::Struct(DataStruct {
-            fields: Fields::Named(FieldsNamed { named: ref x, .. }),
-            ..
-        }) => (DataType::Struct, x),
-        Data::Struct(DataStruct {
-            fields: Fields::Unnamed(FieldsUnnamed { unnamed: ref x, .. }),
-            ..
-        }) => (DataType::Tuple, x),
-        _ => panic!("Enums are not supported"),
-    };
-
-    let tys = collect_field_types(fields);
-
-    let fetch_return = match body {
-        DataType::Struct => {
-            let identifiers = gen_identifiers(fields);
-
-            quote! {
-                #name {
-                    #( #identifiers: apecs::CanFetch::construct(loan_mngr)? ),*
-                }
-            }
-        }
-        DataType::Tuple => {
-            let count = tys.len();
-            let fetch = vec![quote! { apecs::CanFetch::construct(loan_mngr)? }; count];
-
-            quote! {
-                #name ( #( #fetch ),* )
-            }
-        }
-    };
-
-    (fetch_return, tys)
-}
+use syn::{parse_macro_input, DeriveInput, Ident, TypeTuple};
 
 #[proc_macro_derive(CanFetch)]
 pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input: DeriveInput = parse_macro_input!(input);
-
-    let name = input.ident;
-    let (construct_return, tys) = gen_from_body(&input.data, &name);
-    let mut generics = input.generics;
-    {
-        let where_clause = generics.make_where_clause();
-        constrain_system_data_types(where_clause, &tys)
-    }
-
-    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
-
-    let output = quote! {
-        impl #impl_generics apecs::CanFetch for #name #ty_generics #where_clause {
-            fn borrows() -> Vec<apecs::schedule::Borrow> {
-                let mut r = Vec::new();
-                #({
-                    r.extend(<#tys as apecs::CanFetch>::borrows());
-                })*
-                r
-            }
-
-            fn construct(loan_mngr: &mut apecs::resource_manager::LoanManager) -> apecs::anyhow::Result<Self> {
-                Ok(#construct_return)
-            }
-
-            fn plugin() -> apecs::plugins::Plugin {
-                apecs::plugins::Plugin::default()
-                    #(.with_plugin(<#tys as apecs::CanFetch>::plugin()))*
-            }
-        }
-    };
-
-    output.into()
+    let path = quote::format_ident!("apecs");
+    apecs_derive_canfetch::derive_canfetch(path, input).into()
 }
 
 #[proc_macro]
@@ -108,20 +15,20 @@ pub fn impl_canfetch_tuple(input: proc_macro::TokenStream) -> proc_macro::TokenS
     let tys = tuple.elems.iter().collect::<Vec<_>>();
     let output = quote! {
         impl <#(#tys:apecs::CanFetch),*> apecs::CanFetch for #tuple {
-            fn borrows() -> Vec<apecs::schedule::Borrow> {
+            fn borrows() -> Vec<apecs::internal::Borrow> {
                 let mut bs = Vec::new();
                 #(bs.extend(<#tys as apecs::CanFetch>::borrows());)*
                 bs
             }
 
-            fn construct(loan_mngr: &mut apecs::resource_manager::LoanManager) -> apecs::anyhow::Result<Self> {
+            fn construct(loan_mngr: &mut apecs::internal::LoanManager) -> apecs::anyhow::Result<Self> {
                 Ok((
                     #(#tys::construct(loan_mngr)?),*
                 ))
             }
 
-            fn plugin() -> apecs::plugins::Plugin {
-                apecs::plugins::Plugin::default()
+            fn plugin() -> apecs::Plugin {
+                apecs::Plugin::default()
                     #(.with_plugin(<#tys as apecs::CanFetch>::plugin()))*
             }
         }

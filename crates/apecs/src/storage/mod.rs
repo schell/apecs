@@ -5,5 +5,3 @@
 //! check out [this article](https://csherratt.github.io/blog/posts/specs-and-legion/).
 mod archetype;
 pub use archetype::*;
-
-pub type Components = ArchetypeSet;

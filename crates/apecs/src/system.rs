@@ -3,28 +3,24 @@ use std::{collections::VecDeque, future::Future, pin::Pin, sync::atomic::AtomicU
 use anyhow::Context;
 use rayon::prelude::*;
 
-use crate::{
+use super::{
     resource_manager::{LoanManager, ResourceManager},
     schedule::{Borrow, IsBatch, IsSchedule, IsSystem, UntypedSystemData, Dependency},
-    spsc,
-    world::Facade,
+    chan::spsc,
     CanFetch, Request, Resource,
 };
 
 static SYSTEM_ITERATION: AtomicU64 = AtomicU64::new(0);
 
-pub fn clear_iteration() {
-    SYSTEM_ITERATION.store(0, std::sync::atomic::Ordering::Relaxed)
-}
-
 #[inline]
+/// Get the current system iteration timestamp.
 pub fn current_iteration() -> u64 {
     SYSTEM_ITERATION.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Increment the system iteration counter, returning the previous value.
 #[inline]
-pub fn increment_current_iteration() -> u64 {
+pub(crate) fn increment_current_iteration() -> u64 {
     SYSTEM_ITERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
@@ -32,21 +28,8 @@ pub fn increment_current_iteration() -> u64 {
 pub type AsyncSystemFuture =
     Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + Sync + 'static>>;
 
-/// A helper for creating async systems that take an initial state.
-pub fn make_stateful_async_system<T, F, Fut>(
-    state: T,
-    f: F,
-) -> impl FnOnce(Facade) -> AsyncSystemFuture
-where
-    T: Send + Sync + 'static,
-    F: FnOnce(T, Facade) -> Fut,
-    Fut: Future<Output = anyhow::Result<()>> + Send + Sync + 'static,
-{
-    move |facade: Facade| Box::pin((f)(state, facade))
-}
-
 #[derive(Debug)]
-pub struct AsyncSystem {
+pub(crate) struct AsyncSystem {
     pub name: String,
     // The system logic as a future.
     // pub future: AsyncSystemFuture,
@@ -67,7 +50,7 @@ pub fn ok() -> anyhow::Result<ShouldContinue> {
     Ok(ShouldContinue::Yes)
 }
 
-/// Everything is ok, the system should not be run again.
+/// Everything is ok, but the system should not be run again.
 pub fn end() -> anyhow::Result<ShouldContinue> {
     Ok(ShouldContinue::No)
 }
@@ -301,7 +284,7 @@ impl IsSchedule for SyncSchedule {
 }
 
 #[derive(Debug)]
-pub struct AsyncSystemRequest<'a>(pub &'a AsyncSystem, pub Request);
+pub(crate) struct AsyncSystemRequest<'a>(pub &'a AsyncSystem, pub Request);
 
 /// In terms of system resource scheduling a request is a system.
 impl<'a> IsSystem for AsyncSystemRequest<'a> {

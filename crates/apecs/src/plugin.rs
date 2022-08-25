@@ -1,16 +1,25 @@
-//! Plugins are collections of complimentary systems and resources.
+//! Collections of complimentary systems and resources.
+//!
+//! Systems and resources can be composed together using the [`Plugin`] builder.
+//! The resulting plugin can then be instantiated with [`crate::World::with_plugin`].
 use std::future::Future;
 
 use crate::{
+    schedule::Dependency,
     system::{AsyncSystemFuture, ShouldContinue, SyncSystem},
     world::Facade,
-    CanFetch, IsResource, LazyResource, ResourceId, ResourceRequirement, schedule::Dependency,
+    CanFetch, IsResource, LazyResource, ResourceId, ResourceRequirement,
 };
 
 pub struct SyncSystemWithDeps(pub SyncSystem);
 
 impl SyncSystemWithDeps {
-    pub fn new<T, F>(name: &str, system: F, after_deps: Option<&[&str]>, before_deps: Option<&[&str]>) -> Self
+    pub fn new<T, F>(
+        name: &str,
+        system: F,
+        after_deps: Option<&[&str]>,
+        before_deps: Option<&[&str]>,
+    ) -> Self
     where
         F: FnMut(T) -> anyhow::Result<ShouldContinue> + Send + Sync + 'static,
         T: CanFetch + Send + Sync + 'static,
@@ -43,11 +52,17 @@ where
     }
 }
 
+/// A composition of resource requirements and lazy systems.
+///
+/// A plugin can contain duplicate entries of resources and systems. At the time
+/// when the plugin is loaded into the world with
+/// [`World::with_plugin`](crate::World::with_plugin), all resources and systems
+/// will be created and will be unique.
 #[derive(Default)]
 pub struct Plugin {
-    pub resources: Vec<ResourceRequirement>,
-    pub sync_systems: Vec<SyncSystemWithDeps>,
-    pub async_systems: Vec<LazyAsyncSystem>,
+    pub(crate) resources: Vec<ResourceRequirement>,
+    pub(crate) sync_systems: Vec<SyncSystemWithDeps>,
+    pub(crate) async_systems: Vec<LazyAsyncSystem>,
 }
 
 impl Plugin {
@@ -63,7 +78,7 @@ impl Plugin {
     /// [`Default::default()`].
     ///
     /// If this resource does not already exist in the world at the time this
-    /// plugin is instantiated, it will be inserted into the [`World`].
+    /// plugin is instantiated, it will be inserted into the [`World`](crate::World).
     pub fn with_default_resource<T: IsResource + Default>(mut self) -> Self {
         self.resources
             .push(ResourceRequirement::LazyDefault(LazyResource::new(|| {
@@ -77,7 +92,7 @@ impl Plugin {
     ///
     /// If a resource of this type does not already exist in the world at the
     /// time the plugin is instantiated, it will be inserted into the
-    /// [`World`].
+    /// [`World`](crate::World).
     pub fn with_lazy_resource<T: IsResource>(
         mut self,
         create: impl FnOnce() -> T + 'static,
@@ -87,7 +102,7 @@ impl Plugin {
         self
     }
 
-    /// Add a dependency on a resource that must already exist in the [`World`]
+    /// Add a dependency on a resource that must already exist in the [`World`](crate::World)
     /// at the time of plugin instantiation.
     ///
     /// If this resource does not already exist in the world at the time this
@@ -108,10 +123,22 @@ impl Plugin {
         // other systems this system must run before
         before_deps: &[&str],
     ) -> Self {
-        let after_deps = if after_deps.is_empty() { None } else { Some(after_deps) };
-        let before_deps = if before_deps.is_empty() { None } else { Some(before_deps) };
-        self.sync_systems
-            .push(SyncSystemWithDeps::new(name, system, after_deps, before_deps));
+        let after_deps = if after_deps.is_empty() {
+            None
+        } else {
+            Some(after_deps)
+        };
+        let before_deps = if before_deps.is_empty() {
+            None
+        } else {
+            Some(before_deps)
+        };
+        self.sync_systems.push(SyncSystemWithDeps::new(
+            name,
+            system,
+            after_deps,
+            before_deps,
+        ));
         self.with_plugin(T::plugin())
     }
 
@@ -134,10 +161,10 @@ impl Plugin {
 #[cfg(test)]
 mod test {
     use crate as apecs;
-    use apecs::{system::*, storage::*, world::World, CanFetch};
+    use apecs::{storage::*, system::*, world::World, CanFetch};
 
     #[test]
-     fn sanity() {
+    fn sanity() {
         let _ = env_logger::builder()
             .is_test(true)
             .filter_level(log::LevelFilter::Trace)

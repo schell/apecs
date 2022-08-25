@@ -2,6 +2,7 @@
 members = [
     "crates/apecs",
     "crates/apecs-derive",
+    "crates/apecs-derive-canfetch",
     "crates/benchmarks",
     "crates/xtask",
 ]

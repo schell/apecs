@@ -1,10 +1,15 @@
-//! Wrangles the complexity of managing system resources.
+//! Manages system resources.
+//!
+//! This module should not need to be used by most users of this library.
 use std::sync::Arc;
 
 use anyhow::Context;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::{mpsc, schedule::Borrow, FetchReadyResource, IsResource, Resource, ResourceId};
+use super::{
+    chan::mpsc, internal::{FetchReadyResource, Resource}, schedule::Borrow, IsResource,
+    ResourceId,
+};
 
 /// Systems use this to return resources borrowed exclusively.
 pub struct ExclusiveResourceReturnChan(
@@ -13,7 +18,7 @@ pub struct ExclusiveResourceReturnChan(
 );
 
 /// Performs loans on behalf of the world.
-pub struct ResourceManager {
+pub(crate) struct ResourceManager {
     // Resources held for the world's systems
     pub world_resources: FxHashMap<ResourceId, Resource>,
     // Resources currently on loan from this struct to the world's systems
@@ -91,27 +96,6 @@ impl ResourceManager {
             borrow.rez_id().name,
             extra
         )
-    }
-
-    /// Attempt to loan the requested resources by adding them to the given
-    /// mutable hash map.
-    pub fn try_loan_resources<'a>(
-        &mut self,
-        label: &str,
-        additive_map: &mut FxHashMap<ResourceId, FetchReadyResource>,
-        borrows: impl Iterator<Item = &'a Borrow>,
-    ) -> anyhow::Result<()> {
-        for borrow in borrows {
-            let ready_rez = self.get_loaned(label, borrow)?;
-            let prev_inserted_rez = additive_map.insert(borrow.rez_id(), ready_rez);
-            anyhow::ensure!(
-                prev_inserted_rez.is_none(),
-                "cannot request multiple resources of the same type: '{:?}'",
-                borrow.rez_id()
-            );
-        }
-
-        Ok(())
     }
 
     pub fn get_loaned(
@@ -233,12 +217,9 @@ impl ResourceManager {
             .collect::<Vec<_>>()
             .join("\n")
     }
-
-    pub fn loan_manager(&mut self) -> LoanManager<'_> {
-        LoanManager(self)
-    }
 }
 
+/// Manages resources requested by systems. For internal use, mostly.
 pub struct LoanManager<'a>(pub(crate) &'a mut ResourceManager);
 
 impl<'a> LoanManager<'a> {
@@ -260,8 +241,13 @@ impl<'a> LoanManager<'a> {
         if self.0.has_resource(&rez_id) {
             self.0.get_loaned(label, borrow)
         } else {
-            log::trace!("{} was missing in resources, so we create it from default", std::any::type_name::<T>());
-            let prev = self.0.insert(ResourceId::new::<T>(), Box::new(T::default()));
+            log::trace!(
+                "{} was missing in resources, so we create it from default",
+                std::any::type_name::<T>()
+            );
+            let prev = self
+                .0
+                .insert(ResourceId::new::<T>(), Box::new(T::default()));
             debug_assert!(prev.is_none());
             self.0.get_loaned(label, borrow)
         }

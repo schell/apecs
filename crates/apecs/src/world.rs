@@ -7,18 +7,14 @@ use std::sync::Arc;
 use std::{any::Any, collections::VecDeque};
 
 use anyhow::Context;
-use async_oneshot::oneshot;
 use rustc_hash::FxHashSet;
 
-use crate::schedule::Dependency;
-use crate::storage::Entry;
 use crate::{
-    mpsc, oneshot,
-    plugins::Plugin,
+    chan::{self, mpsc, oneshot::oneshot, spsc},
+    plugin::Plugin,
     resource_manager::{LoanManager, ResourceManager},
-    schedule::{IsSchedule, UntypedSystemData},
-    spsc,
-    storage::{ArchetypeSet, IsBundle, IsQuery},
+    schedule::{Dependency, IsSchedule, UntypedSystemData},
+    storage::{Components, Entry, IsBundle, IsQuery},
     system::{
         AsyncSchedule, AsyncSystem, AsyncSystemFuture, AsyncSystemRequest, ShouldContinue,
         SyncSchedule, SyncSystem,
@@ -65,37 +61,6 @@ impl Facade {
     }
 }
 
-pub struct Lazy(mpsc::Sender<LazyOp>);
-
-impl Lazy {
-    pub fn exec_mut<T: Any + Send + Sync>(
-        &self,
-        op: impl FnOnce(&mut World) -> anyhow::Result<T> + Send + Sync + 'static,
-    ) -> anyhow::Result<impl Future<Output = anyhow::Result<T>>> {
-        let (tx, rx) = oneshot();
-        self.0
-            .try_send(LazyOp {
-                op: Box::new(|world| {
-                    let t = op(world)?;
-                    let arc_t = Arc::new(t);
-                    Ok(arc_t)
-                }),
-                tx,
-            })
-            .context("could not send lazy op")?;
-        Ok(async move {
-            let arc: Arc<dyn Any + Send + Sync> = rx
-                .await
-                .map_err(|_| anyhow::anyhow!("lazy exec_mut oneshot is closed"))?;
-            let t: Arc<T> = arc.downcast::<T>().map_err(|_| {
-                anyhow::anyhow!("could not downcast to {}", std::any::type_name::<T>())
-            })?;
-
-            Arc::try_unwrap(t).map_err(|_| anyhow::anyhow!("could not unwrap arc"))
-        })
-    }
-}
-
 pub struct LazyOp {
     op: Box<
         dyn FnOnce(&mut World) -> anyhow::Result<Arc<dyn Any + Send + Sync>>
@@ -103,14 +68,17 @@ pub struct LazyOp {
             + Sync
             + 'static,
     >,
-    tx: oneshot::Sender<Arc<dyn Any + Send + Sync>>,
+    tx: chan::oneshot::Sender<Arc<dyn Any + Send + Sync>>,
 }
 
+/// Used to associate a discrete group of components within the world.
+///
+/// `Entity` can be used to add and remove components lazily.
 pub struct Entity {
     id: usize,
     gen: usize,
     op_sender: mpsc::Sender<LazyOp>,
-    op_receivers: Vec<oneshot::Receiver<Arc<dyn Any + Send + Sync>>>,
+    op_receivers: Vec<chan::oneshot::Receiver<Arc<dyn Any + Send + Sync>>>,
 }
 
 impl std::fmt::Debug for Entity {
@@ -164,10 +132,10 @@ impl Entity {
         let (tx, rx) = oneshot();
         let op = LazyOp {
             op: Box::new(move |world: &mut World| {
-                if !world.has_resource::<ArchetypeSet>() {
-                    world.with_resource(ArchetypeSet::default()).unwrap();
+                if !world.has_resource::<Components>() {
+                    world.with_resource(Components::default()).unwrap();
                 }
-                let all: &mut ArchetypeSet = world.resource_mut()?;
+                let all: &mut Components = world.resource_mut()?;
                 let _ = all.insert_bundle(id, bundle);
                 Ok(Arc::new(()) as Arc<dyn Any + Send + Sync>)
             }),
@@ -187,10 +155,10 @@ impl Entity {
         let (tx, rx) = oneshot();
         let op = LazyOp {
             op: Box::new(move |world: &mut World| {
-                if !world.has_resource::<ArchetypeSet>() {
-                    world.with_resource(ArchetypeSet::default()).unwrap();
+                if !world.has_resource::<Components>() {
+                    world.with_resource(Components::default()).unwrap();
                 }
-                let all: &mut ArchetypeSet = world.resource_mut()?;
+                let all: &mut Components = world.resource_mut()?;
                 let _ = all.insert_component(id, component);
                 Ok(Arc::new(()) as Arc<dyn Any + Send + Sync>)
             }),
@@ -210,10 +178,10 @@ impl Entity {
         let (tx, rx) = oneshot();
         let op = LazyOp {
             op: Box::new(move |world: &mut World| {
-                if !world.has_resource::<ArchetypeSet>() {
-                    world.with_resource(ArchetypeSet::default()).unwrap();
+                if !world.has_resource::<Components>() {
+                    world.with_resource(Components::default()).unwrap();
                 }
-                let all: &mut ArchetypeSet = world.resource_mut()?;
+                let all: &mut Components = world.resource_mut()?;
                 let _ = all.remove_component::<T>(id);
                 Ok(Arc::new(()) as Arc<dyn Any + Send + Sync>)
             }),
@@ -228,7 +196,7 @@ impl Entity {
     /// Await a future that completes after all lazy updates have been
     /// performed.
     pub async fn updates(&mut self) {
-        let updates: Vec<oneshot::Receiver<Arc<dyn Any + Send + Sync>>> =
+        let updates: Vec<chan::oneshot::Receiver<Arc<dyn Any + Send + Sync>>> =
             std::mem::take(&mut self.op_receivers);
         for update in updates.into_iter() {
             let _ = update
@@ -251,10 +219,10 @@ impl Entity {
         self.op_sender
             .try_send(LazyOp {
                 op: Box::new(move |world: &mut World| {
-                    if !world.has_resource::<ArchetypeSet>() {
-                        world.with_resource(ArchetypeSet::default())?;
+                    if !world.has_resource::<Components>() {
+                        world.with_resource(Components::default())?;
                     }
-                    let mut storage: Write<ArchetypeSet> = world.fetch()?;
+                    let mut storage: Write<Components> = world.fetch()?;
                     let mut q = storage.query::<Q>();
                     Ok(Arc::new(q.find_one(id).map(f)) as Arc<dyn Any + Send + Sync>)
                 }),
@@ -277,14 +245,17 @@ impl Entity {
     }
 }
 
+/// Creates and destroys entities.
+///
+/// Exists in [`World`](crate::World) by default.
 pub struct Entities {
-    pub next_k: usize,
-    pub generations: Vec<usize>,
-    pub recycle: Vec<usize>,
-    pub delete_tx: spsc::Sender<usize>,
-    pub delete_rx: spsc::Receiver<usize>,
-    pub deleted: VecDeque<(u64, Vec<(usize, smallvec::SmallVec<[TypeId; 4]>)>)>,
-    pub lazy_op_sender: mpsc::Sender<LazyOp>,
+    pub(crate) next_k: usize,
+    pub(crate) generations: Vec<usize>,
+    pub(crate) recycle: Vec<usize>,
+    pub(crate) delete_tx: spsc::Sender<usize>,
+    pub(crate) delete_rx: spsc::Receiver<usize>,
+    pub(crate) deleted: VecDeque<(u64, Vec<(usize, smallvec::SmallVec<[TypeId; 4]>)>)>,
+    pub(crate) lazy_op_sender: mpsc::Sender<LazyOp>,
 }
 
 impl Default for Entities {
@@ -329,7 +300,7 @@ impl Entities {
 
     /// Create many entities at once, returning a list of their ids.
     ///
-    /// An `Entity` can be made from its `usize` id using `Entities::hydrate`.
+    /// An [`Entity`] can be made from its `usize` id using `Entities::hydrate`.
     pub fn create_many(&mut self, mut how_many: usize) -> Vec<usize> {
         let mut ids = vec![];
         while let Some(id) = self.recycle.pop() {
@@ -478,20 +449,24 @@ pub enum Parallelism {
     Explicit(u32),
 }
 
+/// A collection of resources and systems.
+///
+/// The `World` is the executor of your systems and async computations.
+///
+/// Contains [`Entities`] and [`Components`] as resources, by default.
 pub struct World {
-    pub resource_manager: ResourceManager,
-    pub sync_schedule: SyncSchedule,
-    pub async_systems: Vec<AsyncSystem>,
-    pub async_system_executor: async_executor::Executor<'static>,
+    pub(crate) resource_manager: ResourceManager,
+    pub(crate) sync_schedule: SyncSchedule,
+    pub(crate) async_systems: Vec<AsyncSystem>,
+    pub(crate) async_system_executor: async_executor::Executor<'static>,
     // executor for non-system futures
-    pub async_task_executor: async_executor::Executor<'static>,
-    pub lazy_ops: (mpsc::Sender<LazyOp>, mpsc::Receiver<LazyOp>),
+    pub(crate) async_task_executor: async_executor::Executor<'static>,
+    pub(crate) lazy_ops: (mpsc::Sender<LazyOp>, mpsc::Receiver<LazyOp>),
 }
 
 impl Default for World {
     fn default() -> Self {
         let lazy_ops = mpsc::unbounded();
-        let lazy = Lazy(lazy_ops.0.clone());
         let entities = Entities::new(lazy_ops.0.clone());
         let mut world = Self {
             resource_manager: ResourceManager::default(),
@@ -502,11 +477,9 @@ impl Default for World {
             lazy_ops,
         };
         world
-            .with_resource(lazy)
-            .unwrap()
             .with_resource(entities)
             .unwrap()
-            .with_resource(ArchetypeSet::default())
+            .with_resource(Components::default())
             .unwrap();
         world
     }
@@ -537,6 +510,10 @@ impl World {
         }
     }
 
+    /// Add a plugin to the world, instantiating any missing resources or systems.
+    ///
+    /// ## Errs
+    /// Errs if the plugin requires resources that cannot be created by default.
     pub fn with_plugin(&mut self, plugin: impl Into<Plugin>) -> anyhow::Result<&mut Self> {
         let plugin = plugin.into();
 
@@ -622,8 +599,15 @@ impl World {
         F: FnMut(T) -> anyhow::Result<ShouldContinue> + Send + Sync + 'static,
         T: CanFetch + 'static,
     {
-        let mut deps = after_deps.iter().map(|dep| Dependency::After(dep.to_string())).collect::<Vec<_>>();
-        deps.extend(before_deps.iter().map(|dep| Dependency::Before(dep.to_string())));
+        let mut deps = after_deps
+            .iter()
+            .map(|dep| Dependency::After(dep.to_string()))
+            .collect::<Vec<_>>();
+        deps.extend(
+            before_deps
+                .iter()
+                .map(|dep| Dependency::Before(dep.to_string())),
+        );
         let system = SyncSystem::new(name, sys_fn, deps);
 
         self.with_plugin(T::plugin())?;
@@ -834,7 +818,7 @@ impl World {
         };
         if !dead_ids.is_empty() {
             let ids_and_types: Vec<(usize, smallvec::SmallVec<[TypeId; 4]>)> = {
-                let archset: &mut ArchetypeSet = self.resource_mut()?;
+                let archset: &mut Components = self.resource_mut()?;
                 let ids_and_types = archset.upkeep(&dead_ids);
                 ids_and_types
             };
@@ -906,8 +890,8 @@ mod test {
     use std::{ops::DerefMut, sync::Mutex};
 
     use crate::{
-        self as apecs, anyhow, spsc,
-        storage::{ArchetypeSet, Query},
+        self as apecs, anyhow, chan::spsc,
+        storage::{Components, Query},
         system::*,
         world::*,
         Read, Write, WriteExpect,
@@ -953,7 +937,7 @@ mod test {
             .with_system("stateful", mk_stateful_system(tx))
             .unwrap();
         {
-            let mut archset: Write<ArchetypeSet> = world.fetch().unwrap();
+            let mut archset: Write<Components> = world.fetch().unwrap();
             archset.insert_component(0, F32s(20.0, 30.0));
             archset.insert_component(1, F32s(0.0, 0.0));
             archset.insert_component(2, F32s(100.0, 100.0));
@@ -975,7 +959,7 @@ mod test {
         async fn create(tx: spsc::Sender<()>, mut facade: Facade) -> anyhow::Result<()> {
             log::info!("create running");
             tx.try_send(()).unwrap();
-            let (mut entities, mut archset): (WriteExpect<Entities>, Write<ArchetypeSet>) =
+            let (mut entities, mut archset): (WriteExpect<Entities>, Write<Components>) =
                 facade.fetch().await?;
             for n in 0..100u32 {
                 let e = entities.create();
@@ -1249,10 +1233,7 @@ mod test {
         world.tick();
         {
             let q: Query<&u32> = world.fetch().unwrap();
-            assert_eq!(
-                9,
-                **q.query().find_one(9).unwrap()
-            );
+            assert_eq!(9, **q.query().find_one(9).unwrap());
         }
         {
             let entities: &Entities = world.resource().unwrap();

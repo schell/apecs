@@ -7,7 +7,7 @@ use smallvec::SmallVec;
 
 use super::bundle::*;
 
-/// Component entries.
+/// A component value along with its entity's id and change tracking information.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Entry<T> {
     pub(crate) value: T,

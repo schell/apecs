@@ -1,22 +1,20 @@
 [package]
-name = "apecs-derive"
-version = "0.1.4"
+name = "apecs-derive-canfetch"
+version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 keywords = ["gamedev", "ecs", "async"]
 documentation = "https://docs.rs/apecs/"
 repository = "https://github.com/schell/apecs"
 categories = ["concurrency", "game-engines"]
-description = "derive and other macros for the apecs library"
+description = "helper for writing apecs procedural macros"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [lib]
-proc-macro = true
 bench = false
 
 [dependencies]
-apecs-derive-canfetch = { path = "../apecs-derive-canfetch", version = "^0.1" }
 proc-macro2 = "^1.0"
 quote = "^1.0"
 syn = "^1.0"

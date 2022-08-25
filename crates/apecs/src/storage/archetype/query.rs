@@ -12,7 +12,7 @@ use crate::{
     resource_manager::LoanManager,
     schedule::Borrow,
     storage::{
-        archetype::{Archetype, ArchetypeSet},
+        archetype::{Archetype, Components},
         Entry,
     },
     CanFetch, Read, ResourceId,
@@ -24,6 +24,7 @@ use super::IsBundle;
 /// the world.
 pub struct ComponentColumn<T>(PhantomData<T>);
 
+/// Denotes the shape of a query that can be used to iterate over bundles of components.
 pub trait IsQuery {
     /// Data that is read or write locked by performing this query.
     type LockedColumns<'a>;
@@ -239,6 +240,10 @@ impl<'s, T: Send + Sync + 'static> IsQuery for &'s mut T {
     }
 }
 
+/// Query type used to denote an optional column.
+///
+/// Use `Maybe` in queries to return bundles of components that may or may not
+/// contain a component of the wrapped type `T`.
 pub struct Maybe<T>(PhantomData<T>);
 
 impl<'s, T: Send + Sync + 'static> IsQuery for Maybe<&'s T> {
@@ -441,6 +446,7 @@ impl<'s, T: Send + Sync + 'static> IsQuery for Maybe<&'s mut T> {
     }
 }
 
+/// Query type used to denote the absence of the wrapped type.
 pub struct Without<T>(PhantomData<T>);
 
 impl<T: Send + Sync + 'static> IsQuery for Without<T> {
@@ -605,7 +611,7 @@ apecs_derive::impl_isquery_tuple!((A, B, C, D, E, F, G, H, I, J));
 apecs_derive::impl_isquery_tuple!((A, B, C, D, E, F, G, H, I, J, K));
 apecs_derive::impl_isquery_tuple!((A, B, C, D, E, F, G, H, I, J, K, L));
 
-impl ArchetypeSet {
+impl Components {
     /// Append to the existing set of archetypes in bulk.
     ///
     /// This assumes the entries being inserted have unique ids and don't
@@ -672,8 +678,8 @@ pub type QueryIter<'a, 'b, Q> = std::iter::FlatMap<
     for<'r> fn(&'r mut <Q as IsQuery>::LockedColumns<'a>) -> <Q as IsQuery>::QueryResult<'r>,
 >;
 
-/// A query that is active.
-pub struct QueryGuard<'a, Q: IsQuery + ?Sized>(Vec<Q::LockedColumns<'a>>, &'a ArchetypeSet);
+/// A prepared and active query.
+pub struct QueryGuard<'a, Q: IsQuery + ?Sized>(Vec<Q::LockedColumns<'a>>, &'a Components);
 
 impl<'a, Q> QueryGuard<'a, Q>
 where
@@ -706,9 +712,9 @@ where
     }
 }
 
-/// A query that has been prepared over all archetypes.
+/// A query that can be run over matching bundles of components.
 pub struct Query<T>(
-    Box<dyn Deref<Target = ArchetypeSet> + Send + Sync + 'static>,
+    Box<dyn Deref<Target = Components> + Send + Sync + 'static>,
     PhantomData<T>,
 )
 where
@@ -720,17 +726,17 @@ where
 {
     fn borrows() -> Vec<Borrow> {
         let mut bs = <T as IsQuery>::borrows();
-        bs.extend(Read::<ArchetypeSet>::borrows());
+        bs.extend(Read::<Components>::borrows());
         bs
     }
 
     fn construct(loan_mngr: &mut LoanManager) -> anyhow::Result<Self> {
-        let all = Read::<ArchetypeSet>::construct(loan_mngr)?;
+        let all = Read::<Components>::construct(loan_mngr)?;
         Ok(Query(Box::new(all), PhantomData))
     }
 
-    fn plugin() -> apecs::plugins::Plugin {
-        apecs::plugins::Plugin::default().with_default_resource::<ArchetypeSet>()
+    fn plugin() -> apecs::Plugin {
+        apecs::Plugin::default().with_default_resource::<Components>()
     }
 }
 
@@ -769,7 +775,7 @@ mod test {
             .filter_level(log::LevelFilter::Trace)
             .try_init();
 
-        let mut all = ArchetypeSet::default();
+        let mut all = Components::default();
         all.insert_bundle(0, (0.0f32, true));
         all.insert_bundle(1, (1.0f32, false, "hello"));
         all.insert_bundle(2, (2.0f32, true, ()));
@@ -788,7 +794,7 @@ mod test {
             .try_init();
 
         println!("insert");
-        let mut store = ArchetypeSet::default();
+        let mut store = Components::default();
         store.insert_bundle(0, (0.0f32, "zero".to_string(), false));
         store.insert_bundle(1, (1.0f32, "one".to_string(), false));
         store.insert_bundle(2, (2.0f32, "two".to_string(), false));
@@ -837,7 +843,7 @@ mod test {
 
     #[test]
     fn query_one() {
-        let mut store = ArchetypeSet::default();
+        let mut store = Components::default();
         store.insert_bundle(0, (0.0f32, "zero".to_string(), false));
         store.insert_bundle(1, (1.0f32, "one".to_string(), false));
         store.insert_bundle(2, (2.0f32, "two".to_string(), false));
@@ -866,7 +872,7 @@ mod test {
 
     #[test]
     fn sanity_query_iter() {
-        let mut store = ArchetypeSet::default();
+        let mut store = Components::default();
         store.insert_bundle(0, (0.0f32, "zero".to_string(), false));
         store.insert_bundle(1, (1.0f32, "one".to_string(), false));
         store.insert_bundle(2, (2.0f32, "two".to_string(), false));
@@ -888,7 +894,7 @@ mod test {
 
     #[test]
     fn can_query_maybe() {
-        let mut archset = ArchetypeSet::default();
+        let mut archset = Components::default();
         archset.insert_bundle(0, (0.0f32, "zero".to_string()));
         archset.insert_bundle(1, (1.0f32, "one".to_string(), false));
         archset.insert_bundle(2, (2.0f32, "two".to_string()));
@@ -918,7 +924,7 @@ mod test {
 
     #[test]
     fn can_query_without() {
-        let mut archset = ArchetypeSet::default();
+        let mut archset = Components::default();
         archset.insert_bundle(0, (0.0f32, "zero".to_string()));
         archset.insert_bundle(1, (1.0f32, "one".to_string(), false));
         archset.insert_bundle(2, (2.0f32, "two".to_string()));

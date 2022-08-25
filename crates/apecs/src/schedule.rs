@@ -2,13 +2,13 @@
 //!
 //! This module contains trait definitions. Implementations can be found in
 //! other modeluse.
-use rustc_hash::{FxHashMap, FxHashSet};
-use std::{any::Any, collections::VecDeque, iter::FlatMap, slice::Iter, sync::Arc, cmp::Ordering};
+use rustc_hash::FxHashSet;
+use std::{any::Any, cmp::Ordering, iter::FlatMap, slice::Iter};
 
-use crate::{
+use super::{
     resource_manager::{LoanManager, ResourceManager},
     system::ShouldContinue,
-    FetchReadyResource, Resource, ResourceId,
+    ResourceId,
 };
 
 use self::solver::SolverSystem;
@@ -31,29 +31,9 @@ pub trait IsSystem: std::fmt::Debug {
     fn run(&mut self, data: UntypedSystemData) -> anyhow::Result<ShouldContinue>;
 }
 
-#[derive(Debug)]
-pub struct BatchData<T> {
-    // exclusive resources borrowed by at most one system in the batch
-    pub resources: VecDeque<FxHashMap<ResourceId, FetchReadyResource>>,
-    // unexclusive resources borrowed by at least one system in the batch
-    pub borrowed_resources: FxHashMap<ResourceId, Arc<Resource>>,
-    // any extra data needed by the batch to run
-    pub extra: T,
-}
-
-impl<T> BatchData<T> {
-    pub fn new(extra: T) -> Self {
-        BatchData {
-            resources: Default::default(),
-            borrowed_resources: Default::default(),
-            extra,
-        }
-    }
-}
-
 /// A batch of systems that can run in parallel (because their borrows
 /// don't conflict).
-pub trait IsBatch: std::fmt::Debug + Default {
+pub(crate) trait IsBatch: std::fmt::Debug + Default {
     type System: IsSystem + Send + Sync;
     type ExtraRunData: Send + Sync + Clone;
 
@@ -103,7 +83,7 @@ pub trait IsBatch: std::fmt::Debug + Default {
     ) -> anyhow::Result<()>;
 }
 
-pub trait IsSchedule: std::fmt::Debug {
+pub(crate) trait IsSchedule: std::fmt::Debug {
     type System: IsSystem;
     type Batch: IsBatch<System = Self::System>;
 
@@ -241,6 +221,8 @@ pub trait IsSchedule: std::fmt::Debug {
     }
 }
 
+/// Describes borrowing of system resources at runtime. For internal use,
+/// mostly.
 #[derive(Clone, Debug)]
 pub struct Borrow {
     pub id: ResourceId,
@@ -248,14 +230,17 @@ pub struct Borrow {
 }
 
 impl Borrow {
+    /// The resource id
     pub fn rez_id(&self) -> ResourceId {
         self.id.clone()
     }
 
+    /// The type name of the resource
     pub fn name(&self) -> &str {
         self.id.name
     }
 
+    /// Whether this borrow is mutable (`true`) or immutable (`false`).
     pub fn is_exclusive(&self) -> bool {
         self.is_exclusive
     }
@@ -324,7 +309,9 @@ mod solver {
             log::trace!("  {}", constraints.last().unwrap());
             for barrier_b in barriers.iter() {
                 if barrier_a.0 > barrier_b.0 {
-                    solver.add_constraint(barrier_a.is_ge(*barrier_b + 1.0)).unwrap();
+                    solver
+                        .add_constraint(barrier_a.is_ge(*barrier_b + 1.0))
+                        .unwrap();
                     constraints.push(format!("barrier {} > barrier {}", barrier_a.0, barrier_b.0));
                     log::trace!("  {}", constraints.last().unwrap());
                 }

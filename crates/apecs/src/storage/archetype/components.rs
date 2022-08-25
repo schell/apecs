@@ -8,14 +8,17 @@ use crate::storage::Entry;
 
 use super::{bundle::*, Archetype};
 
+/// The set of all entities' components.
+///
+/// Exists in [`World`](crate::World) by default.
 #[derive(Debug)]
-pub struct ArchetypeSet {
-    pub archetypes: Vec<Archetype>,
+pub struct Components {
+    pub(crate) archetypes: Vec<Archetype>,
     // cache of entity_id to (archetype_index, component_index)
     pub(crate) entity_lookup: Vec<Option<(usize, usize)>>,
 }
 
-impl Default for ArchetypeSet {
+impl Default for Components {
     fn default() -> Self {
         let mut set = Self {
             archetypes: Default::default(),
@@ -26,7 +29,7 @@ impl Default for ArchetypeSet {
     }
 }
 
-impl ArchetypeSet {
+impl Components {
     pub fn get_column<T: 'static>(&self) -> Vec<Arc<RwLock<AnyVec<dyn Send + Sync + 'static>>>> {
         let ty = TypeId::of::<T>();
         self.archetypes
@@ -294,7 +297,7 @@ impl ArchetypeSet {
     /// and returning the ids and types removed.
     ///
     /// This does not need to be called. It is used internally during
-    /// [`World::tick_lazy`].
+    /// [`World::tick_lazy`](crate::World::tick_lazy).
     pub fn upkeep(&mut self, dead_ids: &[usize]) -> Vec<(usize, smallvec::SmallVec<[TypeId; 4]>)> {
         let mut ids_types = vec![];
         for id in dead_ids {
@@ -338,10 +341,10 @@ impl ArchetypeSet {
 
 #[cfg(test)]
 mod test {
-    use crate::storage::archetype::ArchetypeSet;
+    use crate::storage::archetype::Components;
     #[test]
     fn all_archetypes_send_sync() {
-        let _: Box<dyn Send + Sync + 'static> = Box::new(ArchetypeSet::default());
+        let _: Box<dyn Send + Sync + 'static> = Box::new(Components::default());
     }
 
     #[test]
@@ -351,7 +354,7 @@ mod test {
             .filter_level(log::LevelFilter::Trace)
             .try_init();
 
-        let mut arch = ArchetypeSet::default();
+        let mut arch = Components::default();
         assert!(arch.insert_component(0, 0.0f32).is_none());
         assert!(arch.insert_component(1, 1.0f32).is_none());
         assert!(arch.insert_component(2, 2.0f32).is_none());
@@ -360,7 +363,7 @@ mod test {
         assert!(arch.insert_component(2, "two".to_string()).is_none());
         assert_eq!(arch.insert_component(3, 3.33f32).unwrap(), 3.00);
 
-        let mut arch = ArchetypeSet::default();
+        let mut arch = Components::default();
         arch.insert_bundle(0, (0.0f32, "zero", 0u32));
         arch.insert_bundle(1, (1.0f32, "one", 1u32));
         arch.insert_bundle(2, (2.0f32, "two", 2u32));
@@ -371,7 +374,7 @@ mod test {
 
     #[test]
     fn all_archetypes_can_remove() {
-        let mut all = ArchetypeSet::default();
+        let mut all = Components::default();
 
         for id in 0..10000 {
             all.insert_component(id, id);
