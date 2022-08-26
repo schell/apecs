@@ -269,12 +269,12 @@ pub enum Dependency {
 
 mod solver {
     use anyhow;
-    use cassowary::*;
+    use casuarius::*;
     use std::ops::*;
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     struct Sys(usize);
-    cassowary::derive_syntax_for!(Sys);
+    casuarius::derive_syntax_for!(Sys);
 
     pub struct SolverSystem {
         pub name: String,
@@ -302,7 +302,7 @@ mod solver {
         let max_barrier = systems.iter().fold(0, |b, sys| sys.barrier.max(b));
         let barriers = (0..max_barrier).map(|b| Sys(b)).collect::<Vec<_>>();
         log::trace!("  {} barriers", barriers.len());
-        let mut solver: Solver<Sys> = cassowary::Solver::new();
+        let mut solver: Solver<Sys> = casuarius::Solver::new();
         let mut constraints = vec![];
         for barrier_a in barriers.iter() {
             solver.add_constraint(barrier_a.is_ge(0.0)).unwrap();
