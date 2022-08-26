@@ -11,7 +11,7 @@ steps.
 Async systems are system functions that are `async`. Specifically async systems have this type
 signature:
 ```rust
-use apecs::{world::Facade, anyhow};
+use apecs::{Facade, anyhow};
 
 async fn my_system(mut facade: Facade) -> anyhow::Result<()> {
     //...
@@ -47,7 +47,7 @@ systems do the hot-path work that completes those async operations as fast as po
 ## Features
 - syncronous systems with early exit and failure
   ```rust
-  use apecs::{anyhow, Write, world::*, system::*};
+  use apecs::*;
   let mut world = World::default();
   world
       .with_system("demo", |mut u32_number: Write<u32>| -> anyhow::Result<ShouldContinue> {
@@ -69,7 +69,7 @@ systems do the hot-path work that completes those async operations as fast as po
   - resources are acquired without lifetimes
   - when resources are dropped they are sent back into the world
   ```rust
-  use apecs::{anyhow, Write, world::*};
+  use apecs::*;
   async fn demo(mut facade: Facade) -> anyhow::Result<()> {
       loop {
           let mut u32_number: Write<u32> = facade.fetch().await?;
@@ -88,7 +88,7 @@ systems do the hot-path work that completes those async operations as fast as po
   ```
 - support for async futures
   ```rust
-  use apecs::world::World;
+  use apecs::*;
   let mut world = World::default();
   world
       .with_async(async {
@@ -98,7 +98,7 @@ systems do the hot-path work that completes those async operations as fast as po
   ```
 - fetch data (system data) derive macros
   ```rust
-  use apecs::{CanFetch, Read, Write, world::*};
+  use apecs::*;
 
   #[derive(CanFetch)]
   struct MyData {
@@ -113,10 +113,10 @@ systems do the hot-path work that completes those async operations as fast as po
 - system scheduling
   - compatible systems are placed in parallel batches (a batch is a group of systems
     that can run in parallel, ie they don't have conflicting borrows)
-  - systems may depend on other systems running first
+  - systems may depend on other systems running before or after
   - barriers
   ```rust
-  use apecs::{Read, Write, system::*, world::*};
+  use apecs::*;
 
   fn one(mut u32_number: Write<u32>) -> anyhow::Result<ShouldContinue> {
       *u32_number += 1;
@@ -128,7 +128,7 @@ systems do the hot-path work that completes those async operations as fast as po
       end()
   }
 
-  fn thrice(mut f32_number: Write<f32>) -> anyhow::Result<ShouldContinue> {
+  fn exit_on_three(mut f32_number: Write<f32>) -> anyhow::Result<ShouldContinue> {
       *f32_number += 1.0;
       if *f32_number == 3.0 {
           end()
@@ -147,16 +147,20 @@ systems do the hot-path work that completes those async operations as fast as po
 
   let mut world = World::default();
   world
-      .with_system("one", one).unwrap()
-      .with_system_with_dependencies("two", two, &["one"]).unwrap()
-      .with_system("thrice", thrice).unwrap()
+      // one should run before two
+      .with_system_with_dependencies("one", one, &[], &["two"]).unwrap()
+      // two should run after one - this is redundant but good for illustration
+      .with_system_with_dependencies("two", two, &["one"], &[]).unwrap()
+      // exit_on_three has no dependencies
+      .with_system("run_thrice_and_leave", exit_on_three).unwrap()
+      // all systems after a barrier run after the systems before a barrier
       .with_system_barrier()
       .with_system("lastly", lastly).unwrap();
 
   assert_eq!(
       vec![
-          vec!["one", "thrice"],
-          vec!["two"],
+          vec!["one"],
+          vec!["run_thrice_and_leave", "two"],
           vec!["lastly"],
       ],
       world.get_sync_schedule_names()
@@ -165,7 +169,7 @@ systems do the hot-path work that completes those async operations as fast as po
   world.tick();
   assert_eq!(
       vec![
-          vec!["thrice"],
+          vec!["run_thrice_and_leave"],
           vec!["lastly"],
       ],
       world.get_sync_schedule_names()
@@ -182,13 +186,13 @@ systems do the hot-path work that completes those async operations as fast as po
   - add and modified time tracking
   - parallel queries (inner parallelism)
   ```rust
-  use apecs::{world::*, storage::*, system::*, Read, Write};
+  use apecs::*;
 
   // Make a type for tracking changes
   #[derive(Default)]
   struct MyTracker(u64);
 
-  // Entities and ArchetypeSet (which stores components) are default
+  // Entities and Components (which stores components) are default
   // resources
   let mut world = World::default();
   world
@@ -203,7 +207,7 @@ systems do the hot-path work that completes those async operations as fast as po
               **f32 += 1.0;
           }
           ok()
-      }, &["create"]).unwrap()
+      }, &["create"], &[]).unwrap()
       .with_system_with_dependencies(
           "sync",
           |(q_others, mut tracker): (Query<(&f32, &mut String, &mut u32)>, Write<MyTracker>)| {
@@ -213,10 +217,11 @@ systems do the hot-path work that completes those async operations as fast as po
                       **string = format!("{}:{}", f32.id(), **u32);
                   }
               }
-              tracker.0 = apecs::system::current_iteration();
+              tracker.0 = apecs::current_iteration();
               ok()
           },
-          &["progress"]
+          &["progress"],
+          &[]
       ).unwrap();
 
   assert_eq!(
@@ -243,7 +248,7 @@ systems do the hot-path work that completes those async operations as fast as po
   - parallel execution of async futures
   - parallelism is configurable (can be automatic or a requested number of threads, including 1)
   ```rust
-  use apecs::{system::*, world::*, Write, Read};
+  use apecs::*;
   let mut world = World::default();
   world
       .with_system("one", |mut f32_number: Write<f32>| {
@@ -263,7 +268,7 @@ systems do the hot-path work that completes those async operations as fast as po
   ```
 - plugins (groups of systems, resources and sub-plugins)
   ```rust
-  use apecs::{plugins::*, storage::*, system::*, world::*, CanFetch, Write};
+  use apecs::*;
 
   #[derive(Default)]
   struct MyTracker(u64);
@@ -275,11 +280,11 @@ systems do the hot-path work that completes those async operations as fast as po
   }
 
   fn create(
-      (mut entities, mut archeset): (Write<Entities>, Write<ArchetypeSet>),
+      (mut entities, mut components): (Write<Entities>, Write<Components>),
   ) -> anyhow::Result<ShouldContinue> {
       // create a bunch of entities in bulk, which is quite fast
       let ids = entities.create_many(1000);
-      archeset.extend::<(f32, String)>((
+      components.extend::<(f32, String)>((
           Box::new(ids.clone().into_iter().map(|id| Entry::new(id, id as f32))),
           Box::new(
               ids.into_iter()
@@ -302,15 +307,15 @@ systems do the hot-path work that completes those async operations as fast as po
               **string = format!("{}:{}", f32.id(), **f32);
           }
       }
-      data.tracker.0 = apecs::system::current_iteration();
+      data.tracker.0 = apecs::current_iteration();
       ok()
   }
 
   // now we can package it all up into a plugin
   let my_plugin = Plugin::default()
-      .with_system("create", create, &[])
-      .with_system("progress", progress, &["create"])
-      .with_system("sync", sync, &[]);
+      .with_system("create", create, &[], &[])
+      .with_system("progress", progress, &["create"], &[])
+      .with_system("sync", sync, &[], &[]);
 
   let mut world = World::default();
   world.with_plugin(my_plugin).unwrap();

@@ -1,7 +1,8 @@
 //! Collections of complimentary systems and resources.
 //!
 //! Systems and resources can be composed together using the [`Plugin`] builder.
-//! The resulting plugin can then be instantiated with [`crate::World::with_plugin`].
+//! The resulting plugin can then be instantiated with
+//! [`crate::World::with_plugin`].
 use std::future::Future;
 
 use crate::{
@@ -52,7 +53,7 @@ where
     }
 }
 
-/// A composition of resource requirements and lazy systems.
+/// A composition of resource requirements and systems.
 ///
 /// A plugin can contain duplicate entries of resources and systems. At the time
 /// when the plugin is loaded into the world with
@@ -78,7 +79,8 @@ impl Plugin {
     /// [`Default::default()`].
     ///
     /// If this resource does not already exist in the world at the time this
-    /// plugin is instantiated, it will be inserted into the [`World`](crate::World).
+    /// plugin is instantiated, it will be inserted into the
+    /// [`World`](crate::World).
     pub fn with_default_resource<T: IsResource + Default>(mut self) -> Self {
         self.resources
             .push(ResourceRequirement::LazyDefault(LazyResource::new(|| {
@@ -102,8 +104,8 @@ impl Plugin {
         self
     }
 
-    /// Add a dependency on a resource that must already exist in the [`World`](crate::World)
-    /// at the time of plugin instantiation.
+    /// Add a dependency on a resource that must already exist in the
+    /// [`World`](crate::World) at the time of plugin instantiation.
     ///
     /// If this resource does not already exist in the world at the time this
     /// plugin is instantiated, adding the plugin will err.

@@ -1,12 +1,9 @@
 //! Operate on all archetypes.
-use std::{any::TypeId, ops::DerefMut, sync::Arc};
+use std::{any::TypeId, ops::DerefMut};
 
 use any_vec::{any_value::AnyValueMut, AnyVec};
-use parking_lot::RwLock;
 
-use crate::storage::Entry;
-
-use super::{bundle::*, Archetype};
+use super::{bundle::*, Archetype, Entry};
 
 /// The set of all entities' components.
 ///
@@ -30,34 +27,21 @@ impl Default for Components {
 }
 
 impl Components {
-    pub fn get_column<T: 'static>(&self) -> Vec<Arc<RwLock<AnyVec<dyn Send + Sync + 'static>>>> {
-        let ty = TypeId::of::<T>();
-        self.archetypes
-            .iter()
-            .filter_map(|arch| arch.column_clone(&ty))
-            .collect()
-    }
-
     /// Attempts to obtain a mutable reference to an archetype that exactly
     /// matches the given types.
     ///
     /// ## NOTE:
     /// The types given must be ordered, ascending.
-    pub fn get_archetype_mut(&mut self, types: &[TypeId]) -> Option<(usize, &mut Archetype)> {
+    pub(crate) fn get_archetype_mut(
+        &mut self,
+        types: &[TypeId],
+    ) -> Option<(usize, &mut Archetype)> {
         for (i, arch) in self.archetypes.iter_mut().enumerate() {
             if arch.entry_types.as_slice() == types {
                 return Some((i, arch));
             }
         }
         None
-    }
-
-    pub fn insert_archetype(&mut self, archetype: Archetype) {
-        if let Some(_) = self.get_archetype_mut(&archetype.entry_types) {
-            panic!("archetype already exists");
-        } else {
-            self.archetypes.push(archetype);
-        }
     }
 
     /// Remove the entity without knowledge of the bundle type and return its
@@ -154,10 +138,17 @@ impl Components {
         }
     }
 
-    /// Inserts the bundle components for the given entity.
+    /// Inserts the bundled components for the given entity.
     ///
     /// ## Panics
     /// * if the bundle's types are not unique
+    ///
+    /// ```rust
+    /// use apecs::*;
+    ///
+    /// let mut components = Components::default();
+    /// components.insert_bundle(0, ("zero", 0u32, 0.0f32));
+    /// ```
     pub fn insert_bundle<B: IsBundle>(&mut self, entity_id: usize, bundle: B) {
         // determine if the entity already exists
         if let Some((archetype_index, component_index)) = self
@@ -200,9 +191,19 @@ impl Components {
         }
     }
 
-    /// Insert a single component.
+    /// Insert a single component for the given entity.
     ///
-    /// Returns the previous component, if possible.
+    /// Returns the previous component, if available.
+    /// ```rust
+    /// use apecs::*;
+    ///
+    /// let mut components = Components::default();
+    /// components.insert_component(0, "zero");
+    /// components.insert_component(0, 0u32);
+    /// components.insert_component(0, 0.0f32);
+    /// let prev = components.insert_component(0, "none");
+    /// assert_eq!(Some("zero"), prev);
+    /// ```
     pub fn insert_component<T: Send + Sync + 'static>(
         &mut self,
         entity_id: usize,
@@ -252,6 +253,14 @@ impl Components {
     ///
     /// ## Panics
     /// Panics if the component types are not unique.
+    /// ```rust
+    /// use apecs::*;
+    ///
+    /// let mut components = Components::default();
+    /// components.insert_bundle(0, ("zero", 0u32, 0.0f32));
+    /// let prev = components.remove::<(u32, f32)>(0);
+    /// assert_eq!(Some((0, 0.0)), prev);
+    /// ```
     pub fn remove<B: IsBundle>(&mut self, entity_id: usize) -> Option<B> {
         self.entity_lookup.get(entity_id).copied().flatten().map(
             |(archetype_index, component_index)| {
@@ -264,7 +273,19 @@ impl Components {
         )
     }
 
-    /// Remove a single component from the given entity.
+    /// Remove a single component from the given entity, returning it if the
+    /// entity had a component of that type.
+    ///
+    /// ```rust
+    /// use apecs::*;
+    ///
+    /// let mut components = Components::default();
+    /// components.insert_bundle(0, ("zero", 0u32, 0.0f32));
+    /// let prev = components.remove_component::<&str>(0);
+    /// assert_eq!(Some("zero"), prev);
+    /// let dne = components.remove_component::<bool>(0);
+    /// assert_eq!(None, dne);
+    /// ```
     pub fn remove_component<T: Send + Sync + 'static>(&mut self, entity_id: usize) -> Option<T> {
         let (archetype_index, component_index) = self
             .entity_lookup
@@ -298,7 +319,10 @@ impl Components {
     ///
     /// This does not need to be called. It is used internally during
     /// [`World::tick_lazy`](crate::World::tick_lazy).
-    pub fn upkeep(&mut self, dead_ids: &[usize]) -> Vec<(usize, smallvec::SmallVec<[TypeId; 4]>)> {
+    pub(crate) fn upkeep(
+        &mut self,
+        dead_ids: &[usize],
+    ) -> Vec<(usize, smallvec::SmallVec<[TypeId; 4]>)> {
         let mut ids_types = vec![];
         for id in dead_ids {
             if let Some((archetype_index, component_index)) =
@@ -310,7 +334,8 @@ impl Components {
                     archetype_index,
                     component_index
                 );
-                let any_entry_bundle = self.remove_any_entry_bundle(*id, archetype_index, component_index);
+                let any_entry_bundle =
+                    self.remove_any_entry_bundle(*id, archetype_index, component_index);
                 ids_types.push((*id, any_entry_bundle.0));
 
                 if self.archetypes[archetype_index].index_lookup.is_empty() {

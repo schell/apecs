@@ -1,7 +1,4 @@
-use apecs::{
-    anyhow,
-    storage::*,
-};
+use apecs::*;
 use cgmath::*;
 
 #[derive(Copy, Clone, Debug)]
@@ -17,7 +14,7 @@ pub struct Rotation(Vector3<f32>);
 pub struct Velocity(Vector3<f32>);
 
 
-pub struct Benchmark(ArchetypeSet);
+pub struct Benchmark(Components);
 
 impl Benchmark {
     pub fn new() -> anyhow::Result<Self> {
@@ -25,7 +22,7 @@ impl Benchmark {
         let ps = Box::new((0..10000).map(|id| Entry::new(id, Position(Vector3::unit_x()))));
         let rs = Box::new((0..10000).map(|id| Entry::new(id, Rotation(Vector3::unit_x()))));
         let vs = Box::new((0..10000).map(|id| Entry::new(id, Velocity(Vector3::unit_x()))));
-        let mut archs = ArchetypeSet::default();
+        let mut archs = Components::default();
         archs.extend::<(Transform, Position, Rotation, Velocity)>((ts, ps, rs, vs));
         Ok(Self(archs))
     }

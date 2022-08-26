@@ -34,7 +34,7 @@ pub use storage::{
     Without,
 };
 pub use system::{current_iteration, end, err, ok, ShouldContinue};
-pub use world::{Entities, Entity, Parallelism, World};
+pub use world::{Entities, Entity, Facade, Parallelism, World};
 
 #[cfg(doctest)]
 pub mod doctest {

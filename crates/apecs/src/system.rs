@@ -4,9 +4,9 @@ use anyhow::Context;
 use rayon::prelude::*;
 
 use super::{
-    resource_manager::{LoanManager, ResourceManager},
-    schedule::{Borrow, IsBatch, IsSchedule, IsSystem, UntypedSystemData, Dependency},
     chan::spsc,
+    resource_manager::{LoanManager, ResourceManager},
+    schedule::{Borrow, Dependency, IsBatch, IsSchedule, IsSystem, UntypedSystemData},
     CanFetch, Request, Resource,
 };
 
@@ -14,6 +14,10 @@ static SYSTEM_ITERATION: AtomicU64 = AtomicU64::new(0);
 
 #[inline]
 /// Get the current system iteration timestamp.
+///
+/// This can be used to track changes in components over time with
+/// [`Entry::has_changed_since`](crate::Entry::has_changed_since) and similar
+/// functions.
 pub fn current_iteration() -> u64 {
     SYSTEM_ITERATION.load(std::sync::atomic::Ordering::Relaxed)
 }
@@ -45,17 +49,20 @@ pub enum ShouldContinue {
     No,
 }
 
-/// Everything is ok, the system should continue.
+/// Returns a syncronous system result meaning everything is ok and the system
+/// should run again next frame.
 pub fn ok() -> anyhow::Result<ShouldContinue> {
     Ok(ShouldContinue::Yes)
 }
 
-/// Everything is ok, but the system should not be run again.
+/// Returns a syncronous system result meaning everything is ok, but the system
+/// should not be run again.
 pub fn end() -> anyhow::Result<ShouldContinue> {
     Ok(ShouldContinue::No)
 }
 
-/// An error occured.
+/// Returns a syncronous system result meaning an error occured and the system
+/// should not run again.
 pub fn err(err: anyhow::Error) -> anyhow::Result<ShouldContinue> {
     Err(err)
 }
@@ -304,7 +311,7 @@ impl<'a> IsSystem for AsyncSystemRequest<'a> {
         0
     }
 
-    fn set_barrier(&mut self, _:usize) {}
+    fn set_barrier(&mut self, _: usize) {}
 
     fn prep(&self, loan_mngr: &mut LoanManager<'_>) -> anyhow::Result<UntypedSystemData> {
         (self.1.construct)(loan_mngr)
@@ -394,7 +401,9 @@ impl<'a> IsBatch for AsyncBatch<'a> {
         // tick the executor until the loaned resources have been returned
         loop {
             if parallelism > 1 {
-                (0..parallelism as u32).into_par_iter().for_each(|_| tick(extra));
+                (0..parallelism as u32)
+                    .into_par_iter()
+                    .for_each(|_| tick(extra));
             } else {
                 tick(extra);
             }
@@ -420,7 +429,7 @@ impl<'a> IsBatch for AsyncBatch<'a> {
 #[derive(Debug, Default)]
 pub struct AsyncSchedule<'a> {
     batches: Vec<AsyncBatch<'a>>,
-    num_threads: u32
+    num_threads: u32,
 }
 
 impl<'a> IsSchedule for AsyncSchedule<'a> {

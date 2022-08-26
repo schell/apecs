@@ -1,9 +1,4 @@
-use apecs::{
-    anyhow,
-    storage::*,
-    system::*,
-    world::*, Write,
-};
+use apecs::*;
 
 struct A(f32);
 struct B(f32);
@@ -41,28 +36,32 @@ impl Benchmark {
     pub fn new() -> Self {
         let mut world = World::default();
         {
-            let mut archs = world.fetch::<Write<ArchetypeSet>>().unwrap();
-            archs.extend::<(A, B)>((
-                Box::new((0..10_000).map(|id| Entry::new(id, A(0.0)))),
-                Box::new((0..10_000).map(|id| Entry::new(id, B(0.0)))),
+            let (mut comps, mut entities): (Write<Components>, Write<Entities>) = world.fetch().unwrap();
+            let ids = entities.create_many(10_000);
+            comps.extend::<(A, B)>((
+                Box::new(ids.clone().into_iter().map(|id| Entry::new(id, A(0.0)))),
+                Box::new(ids.into_iter().map(|id| Entry::new(id, B(0.0)))),
             ));
-            archs.extend::<(A, B, C)>((
-                Box::new((0..10_000).map(|id| Entry::new(id, A(0.0)))),
-                Box::new((0..10_000).map(|id| Entry::new(id, B(0.0)))),
-                Box::new((0..10_000).map(|id| Entry::new(id, C(0.0)))),
+            let ids = entities.create_many(10_000);
+            comps.extend::<(A, B, C)>((
+                Box::new(ids.clone().into_iter().map(|id| Entry::new(id, A(0.0)))),
+                Box::new(ids.clone().into_iter().map(|id| Entry::new(id, B(0.0)))),
+                Box::new(ids.into_iter().map(|id| Entry::new(id, C(0.0)))),
             ));
-            archs.extend::<(A, B, C, D)>((
-                Box::new((0..10_000).map(|id| Entry::new(id, A(0.0)))),
-                Box::new((0..10_000).map(|id| Entry::new(id, B(0.0)))),
-                Box::new((0..10_000).map(|id| Entry::new(id, C(0.0)))),
-                Box::new((0..10_000).map(|id| Entry::new(id, D(0.0)))),
+            let ids = entities.create_many(10_000);
+            comps.extend::<(A, B, C, D)>((
+                Box::new(ids.clone().into_iter().map(|id| Entry::new(id, A(0.0)))),
+                Box::new(ids.clone().into_iter().map(|id| Entry::new(id, B(0.0)))),
+                Box::new(ids.clone().into_iter().map(|id| Entry::new(id, C(0.0)))),
+                Box::new(ids.into_iter().map(|id| Entry::new(id, D(0.0)))),
             ));
-            archs.extend::<(A, B, C, D, E)>((
-                Box::new((0..10_000).map(|id| Entry::new(id, A(0.0)))),
-                Box::new((0..10_000).map(|id| Entry::new(id, B(0.0)))),
-                Box::new((0..10_000).map(|id| Entry::new(id, C(0.0)))),
-                Box::new((0..10_000).map(|id| Entry::new(id, D(0.0)))),
-                Box::new((0..10_000).map(|id| Entry::new(id, E(0.0)))),
+            let ids = entities.create_many(10_000);
+            comps.extend::<(A, B, C, D, E)>((
+                Box::new(ids.clone().into_iter().map(|id| Entry::new(id, A(0.0)))),
+                Box::new(ids.clone().into_iter().map(|id| Entry::new(id, B(0.0)))),
+                Box::new(ids.clone().into_iter().map(|id| Entry::new(id, C(0.0)))),
+                Box::new(ids.clone().into_iter().map(|id| Entry::new(id, D(0.0)))),
+                Box::new(ids.into_iter().map(|id| Entry::new(id, E(0.0)))),
             ));
         }
 

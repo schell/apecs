@@ -1,8 +1,8 @@
-use apecs::storage::*;
+use apecs::*;
 
 pub struct Data(f32);
 
-macro_rules! create_entities_arch {
+macro_rules! create_entities {
     ($all:ident; $ent:ident; $( $variants:ident ),*) => {
         $(
             struct $variants(f32);
@@ -15,14 +15,14 @@ macro_rules! create_entities_arch {
     };
 }
 
-pub fn arch() -> ArchetypeSet {
-    let mut all: ArchetypeSet = ArchetypeSet::default();
+pub fn arch() -> Components {
+    let mut all: Components = Components::default();
     let mut id = 0;
-    create_entities_arch!(all; id; A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z);
+    create_entities!(all; id; A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z);
     all
 }
 
-pub fn tick_arch(all: &mut ArchetypeSet) {
+pub fn tick_arch(all: &mut Components) {
     let mut q = all.query::<&mut Data>();
     q.iter_mut().for_each(|data| data.0 *= 2.0);
 }

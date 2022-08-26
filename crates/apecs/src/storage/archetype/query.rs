@@ -1,4 +1,4 @@
-//! Archetype queries.
+//! Component queries.
 use std::ops::Deref;
 use std::{any::TypeId, marker::PhantomData};
 
@@ -24,7 +24,8 @@ use super::IsBundle;
 /// the world.
 pub struct ComponentColumn<T>(PhantomData<T>);
 
-/// Denotes the shape of a query that can be used to iterate over bundles of components.
+/// Denotes the shape of a query that can be used to iterate over bundles of
+/// components.
 pub trait IsQuery {
     /// Data that is read or write locked by performing this query.
     type LockedColumns<'a>;
@@ -618,14 +619,14 @@ impl Components {
     /// already exist in the set.
     ///
     /// ```rust
-    /// use apecs::storage::*;
-    /// let mut archset = ArchetypeSet::default();
+    /// use apecs::*;
+    /// let mut components = Components::default();
     /// let a = Box::new((0..10_000).map(|id| Entry::new(id, id as u32)));
     /// let b = Box::new((0..10_000).map(|id| Entry::new(id, id as f32)));
     /// let c = Box::new((0..10_000).map(|id| Entry::new(id, format!("string{}", id))));
     /// let d = Box::new((0..10_000).map(|id| Entry::new(id, id % 2 == 0)));
-    /// archset.extend::<(u32, f32, String, bool)>((a, b, c, d));
-    /// assert_eq!(10_000, archset.len());
+    /// components.extend::<(u32, f32, String, bool)>((a, b, c, d));
+    /// assert_eq!(10_000, components.len());
     /// ```
     pub fn extend<B: IsBundle>(&mut self, extension: <B::MutBundle as IsQuery>::ExtensionColumns)
     where
@@ -664,6 +665,19 @@ impl Components {
         });
     }
 
+    /// Prepare a query.
+    /// ```rust
+    /// use apecs::*;
+    ///
+    /// let mut components = Components::default();
+    /// components.insert_bundle(0, ("zero", 0.0f32, 0u32));
+    /// components.insert_bundle(1, ("zero", 0.0f32, 0u32));
+    /// components.insert_bundle(2, ("zero", 0.0f32, 0u32));
+    ///
+    /// for (f, u) in components.query::<(&f32, &u32)>().iter_mut() {
+    ///     assert_eq!(**f, **u as f32);
+    /// }
+    /// ```
     pub fn query<Q: IsQuery + 'static>(&mut self) -> QueryGuard<'_, Q> {
         QueryGuard(
             self.archetypes.iter().map(|a| Q::lock_columns(a)).collect(),
@@ -672,6 +686,7 @@ impl Components {
     }
 }
 
+/// Iterator returned by [`QueryGuard::iter_mut`].
 pub type QueryIter<'a, 'b, Q> = std::iter::FlatMap<
     std::slice::IterMut<'b, <Q as IsQuery>::LockedColumns<'a>>,
     <Q as IsQuery>::QueryResult<'b>,
@@ -712,7 +727,43 @@ where
     }
 }
 
-/// A query that can be run over matching bundles of components.
+/// Queries can be used iterate over matching bundles of components.
+///
+/// `Query`s are written as a tuple of component column types, where each
+/// position in the tuple denotes a column value in the resulting iteration
+/// tuple.
+///
+/// Below we use mutable and immutable reference types in our query to include
+/// either a mutable or immutable reference to those components:
+/// ```rust
+/// use apecs::*;
+///
+/// struct Position(pub f32);
+/// struct Velocity(pub f32);
+/// struct Acceleration(pub f32);
+///
+/// let mut world = World::default();
+/// {
+///     let mut entities: Write<Entities> = world.fetch().unwrap();
+///     for i in 0..100 {
+///         entities
+///             .create()
+///             .insert_bundle((Position(0.0), Velocity(0.0), Acceleration(i as f32)));
+///     }
+/// }
+/// {
+///     let q_accelerate: Query<(&mut Velocity, &Acceleration)> = world.fetch().unwrap();
+///     for (v, a) in q_accelerate.query().iter_mut() {
+///         v.0 += a.0;
+///     }
+/// }
+/// {
+///     let q_move: Query<(&mut Position, &Velocity)> = world.fetch().unwrap();
+///     for (p, v) in q_move.query().iter_mut() {
+///         p.0 += v.0;
+///     }
+/// }
+/// ````
 pub struct Query<T>(
     Box<dyn Deref<Target = Components> + Send + Sync + 'static>,
     PhantomData<T>,
@@ -744,7 +795,8 @@ impl<Q> Query<Q>
 where
     Q: IsQuery + ?Sized,
 {
-    /// Acquire a lock on the archetype columns needed to iterate the query.
+    /// Prepare the query, locking the columns needed to iterate over matching
+    /// components.
     pub fn query(&self) -> QueryGuard<'_, Q> {
         QueryGuard(
             self.0
@@ -757,9 +809,13 @@ where
     }
 }
 
+/// Alias for `&'static T` for folks with wrist pain.
 pub type Ref<T> = &'static T;
+/// Alias for `&'static mut T` for folks with wrist pain.
 pub type Mut<T> = &'static mut T;
+/// Alias for `Maybe<&'static T>` for folks with wrist pain.
 pub type MaybeRef<T> = Maybe<&'static T>;
+/// Alias for `Maybe<&'static mut T>` for folks with wrist pain.
 pub type MaybeMut<T> = Maybe<&'static mut T>;
 
 #[cfg(test)]
@@ -894,12 +950,12 @@ mod test {
 
     #[test]
     fn can_query_maybe() {
-        let mut archset = Components::default();
-        archset.insert_bundle(0, (0.0f32, "zero".to_string()));
-        archset.insert_bundle(1, (1.0f32, "one".to_string(), false));
-        archset.insert_bundle(2, (2.0f32, "two".to_string()));
+        let mut components = Components::default();
+        components.insert_bundle(0, (0.0f32, "zero".to_string()));
+        components.insert_bundle(1, (1.0f32, "one".to_string(), false));
+        components.insert_bundle(2, (2.0f32, "two".to_string()));
 
-        let cols = archset
+        let cols = components
             .query::<(&f32, Maybe<&bool>, &String)>()
             .iter_mut()
             .map(|(f, mb, s)| (**f, mb.map(|b| **b), s.value().clone()))
@@ -914,7 +970,7 @@ mod test {
             cols
         );
 
-        let par_cols = archset
+        let par_cols = components
             .query::<(&f32, Maybe<&bool>, &String)>()
             .par_iter_mut()
             .map(|(f, mb, s)| (**f, mb.map(|b| **b), s.value().clone()))
@@ -924,12 +980,12 @@ mod test {
 
     #[test]
     fn can_query_without() {
-        let mut archset = Components::default();
-        archset.insert_bundle(0, (0.0f32, "zero".to_string()));
-        archset.insert_bundle(1, (1.0f32, "one".to_string(), false));
-        archset.insert_bundle(2, (2.0f32, "two".to_string()));
+        let mut components = Components::default();
+        components.insert_bundle(0, (0.0f32, "zero".to_string()));
+        components.insert_bundle(1, (1.0f32, "one".to_string(), false));
+        components.insert_bundle(2, (2.0f32, "two".to_string()));
 
-        let cols = archset
+        let cols = components
             .query::<(&f32, Without<bool>, &String)>()
             .iter_mut()
             .map(|(f, (), s)| (**f, (), s.value().clone()))
@@ -939,7 +995,7 @@ mod test {
             cols
         );
 
-        let par_cols = archset
+        let par_cols = components
             .query::<(&f32, Without<bool>, &String)>()
             .par_iter_mut()
             .map(|(f, (), s)| (**f, (), s.value().clone()))

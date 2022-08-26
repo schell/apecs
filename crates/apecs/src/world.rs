@@ -71,7 +71,7 @@ pub struct LazyOp {
     tx: chan::oneshot::Sender<Arc<dyn Any + Send + Sync>>,
 }
 
-/// Used to associate a discrete group of components within the world.
+/// Associates a discrete group of components within the world.
 ///
 /// `Entity` can be used to add and remove components lazily.
 pub struct Entity {

@@ -1,13 +1,13 @@
-use apecs::storage::*;
+use apecs::*;
 
 pub struct A(f32);
 pub struct B(f32);
 
-pub struct Benchmark(ArchetypeSet);
+pub struct Benchmark(Components);
 
 impl Benchmark {
     pub fn new() -> Self {
-        let mut all = ArchetypeSet::default();
+        let mut all = Components::default();
         all.extend::<(A,)>(Box::new((0..10_000).map(|id| Entry::new(id, A(0.0)))));
         Self(all)
     }

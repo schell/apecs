@@ -3,7 +3,7 @@
 //! This module contains trait definitions. Implementations can be found in
 //! other modeluse.
 use rustc_hash::FxHashSet;
-use std::{any::Any, cmp::Ordering, iter::FlatMap, slice::Iter};
+use std::{any::Any, iter::FlatMap, slice::Iter};
 
 use super::{
     resource_manager::{LoanManager, ResourceManager},
@@ -140,9 +140,10 @@ pub(crate) trait IsSchedule: std::fmt::Debug {
             .into_iter()
             .zip(systems.into_iter())
             .collect::<Vec<_>>();
-        indexed_systems.sort_by(|a, b| match a.0.total_cmp(&b.0) {
-            Ordering::Equal => a.1.name().cmp(b.1.name()),
-            o => o,
+        indexed_systems.sort_by(|a, b| if a.0 == b.0 {
+            a.1.name().cmp(b.1.name())
+        } else {
+            a.0.total_cmp(&b.0)
         });
         log::trace!(
             "pre-schedule: {:#?}",
@@ -388,6 +389,19 @@ mod test {
     use crate::system::*;
 
     #[test]
+    fn negative_zero_sanity() {
+        let nzero:f64 = -0.0;
+        let zero:f64 = 0.0;
+
+        assert_eq!(
+            std::cmp::Ordering::Less,
+            nzero.total_cmp(&zero)
+        );
+
+        assert_eq!(-0.0f64, 0.0f64);
+    }
+
+    #[test]
     fn schedule_with_dependencies() {
         let _ = env_logger::builder()
             .is_test(true)
@@ -462,7 +476,7 @@ mod test {
         schedule.add_system(SyncSystem::new("four", |()| ok(), vec![]));
 
         assert_eq!(
-            vec![vec!["one"], vec!["two", "three"], vec!["four"]],
+            vec![vec!["one"], vec!["three", "two"], vec!["four"]],
             schedule.get_schedule_names()
         );
     }
@@ -475,12 +489,12 @@ mod test {
         schedule.add_system(SyncSystem::new("three", |()| ok(), vec![]));
 
         assert_eq!(
-            vec![vec!["one", "two", "three"]],
+            vec![vec!["one", "three", "two"]],
             schedule.get_schedule_names()
         );
 
         let mut manager = ResourceManager::default();
         schedule.run((), &mut manager).unwrap();
-        assert_eq!(vec![vec!["two", "three"]], schedule.get_schedule_names());
+        assert_eq!(vec![vec!["three", "two"]], schedule.get_schedule_names());
     }
 }

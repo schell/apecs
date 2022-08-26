@@ -1,7 +1,4 @@
-use apecs::{
-    anyhow,
-    storage::*,
-};
+use apecs::*;
 use cgmath::*;
 use rayon::prelude::*;
 
@@ -17,11 +14,11 @@ pub struct Rotation(Vector3<f32>);
 #[derive(Copy, Clone)]
 pub struct Velocity(Vector3<f32>);
 
-pub struct Benchmark(ArchetypeSet);
+pub struct Benchmark(Components);
 
 impl Benchmark {
     pub fn new() -> anyhow::Result<Self> {
-        let mut archs = ArchetypeSet::default();
+        let mut archs = Components::default();
         archs.extend::<(Transform, Position, Rotation, Velocity)>((
             Box::new(
                 (0..1000)
