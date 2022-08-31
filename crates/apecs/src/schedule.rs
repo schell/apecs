@@ -270,7 +270,6 @@ pub enum Dependency {
 mod solver {
     use anyhow;
     use casuarius::*;
-    use std::ops::*;
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     struct Sys(usize);
