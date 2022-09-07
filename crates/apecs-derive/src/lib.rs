@@ -1,11 +1,11 @@
 use proc_macro2::Span;
 use quote::quote;
-use syn::{parse_macro_input, DeriveInput, Ident, TypeTuple};
+use syn::{parse_macro_input, DeriveInput, Ident, Path, TypeTuple};
 
 #[proc_macro_derive(CanFetch)]
 pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input: DeriveInput = parse_macro_input!(input);
-    let path = quote::format_ident!("apecs");
+    let path: Path = syn::parse_str("apecs").unwrap();
     apecs_derive_canfetch::derive_canfetch(path, input).into()
 }
 

@@ -16,7 +16,7 @@ proc-macro = true
 bench = false
 
 [dependencies]
-apecs-derive-canfetch = { path = "../apecs-derive-canfetch", version = "^0.1" }
+apecs-derive-canfetch = { path = "../apecs-derive-canfetch", version = "^0.2" }
 proc-macro2 = "^1.0"
 quote = "^1.0"
 syn = "^1.0"

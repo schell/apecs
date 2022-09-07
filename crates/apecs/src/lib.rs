@@ -25,6 +25,7 @@ mod storage;
 mod system;
 mod world;
 
+#[cfg(feature = "derive-canfetch")]
 pub use apecs_derive::CanFetch;
 pub use fetch::*;
 pub use plugin::Plugin;

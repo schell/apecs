@@ -4,11 +4,11 @@
 use quote::quote;
 use syn::{
     punctuated::Punctuated, token::Comma, Data, DataStruct, DeriveInput, Field, Fields,
-    FieldsNamed, FieldsUnnamed, Ident, Type, WhereClause, WherePredicate,
+    FieldsNamed, FieldsUnnamed, Ident, Path, Type, WhereClause, WherePredicate,
 };
 
 /// Adds a `CanFetch<'lt>` bound on each of the system data types.
-fn constrain_system_data_types(path: &Ident, clause: &mut WhereClause, tys: &[Type]) {
+fn constrain_system_data_types(path: &Path, clause: &mut WhereClause, tys: &[Type]) {
     for ty in tys.iter() {
         let where_predicate: WherePredicate = syn::parse_quote!(#ty : #path::CanFetch);
         clause.predicates.push(where_predicate);
@@ -23,7 +23,7 @@ fn gen_identifiers(fields: &Punctuated<Field, Comma>) -> Vec<Ident> {
     fields.iter().map(|x| x.ident.clone().unwrap()).collect()
 }
 
-fn gen_from_body(path: &Ident, ast: &Data, name: &Ident) -> (proc_macro2::TokenStream, Vec<Type>) {
+fn gen_from_body(path: &Path, ast: &Data, name: &Ident) -> (proc_macro2::TokenStream, Vec<Type>) {
     enum DataType {
         Struct,
         Tuple,
@@ -67,7 +67,7 @@ fn gen_from_body(path: &Ident, ast: &Data, name: &Ident) -> (proc_macro2::TokenS
 }
 
 /// Helper to create derive macros with a configurable module prefix.
-pub fn derive_canfetch(path: Ident, input: DeriveInput) -> proc_macro2::TokenStream {
+pub fn derive_canfetch(path: Path, input: DeriveInput) -> proc_macro2::TokenStream {
     let name = input.ident;
     let (construct_return, tys) = gen_from_body(&path, &input.data, &name);
     let mut generics = input.generics;
@@ -88,7 +88,7 @@ pub fn derive_canfetch(path: Ident, input: DeriveInput) -> proc_macro2::TokenStr
                 r
             }
 
-            fn construct(loan_mngr: &mut #path::internal::LoanManager) -> apecs::anyhow::Result<Self> {
+            fn construct(loan_mngr: &mut #path::internal::LoanManager) -> anyhow::Result<Self> {
                 Ok(#construct_return)
             }
 
