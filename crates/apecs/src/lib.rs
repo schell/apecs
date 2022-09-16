@@ -31,8 +31,8 @@ pub use fetch::*;
 pub use plugin::Plugin;
 pub use rustc_hash::FxHashMap;
 pub use storage::{
-    Components, Entry, IsQuery, Maybe, MaybeMut, MaybeRef, Mut, Query, QueryGuard, QueryIter, Ref,
-    Without,
+    Components, Entry, IsBundle, IsQuery, Maybe, MaybeMut, MaybeRef, Mut, Query, QueryGuard,
+    QueryIter, Ref, Without,
 };
 pub use system::{current_iteration, end, err, ok, ShouldContinue};
 pub use world::{Entities, Entity, Facade, Parallelism, World};
