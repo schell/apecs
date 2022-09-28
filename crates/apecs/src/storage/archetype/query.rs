@@ -705,13 +705,16 @@ where
     }
 
     pub fn find_one(&mut self, entity_id: usize) -> Option<Q::QueryRow<'_>> {
-        self.1.entity_lookup.get(entity_id).copied().flatten().map(
-            |(archetype_index, component_index)| {
+        self.1
+            .entity_lookup
+            .get(entity_id)
+            .copied()
+            .and_then(|may_indices| {
+                let (archetype_index, component_index) = may_indices?;
                 let mut vs =
                     Q::iter_one(&mut self.0[archetype_index], component_index).collect::<Vec<_>>();
-                vs.pop().unwrap()
-            },
-        )
+                vs.pop()
+            })
     }
 
     pub fn par_iter_mut(
