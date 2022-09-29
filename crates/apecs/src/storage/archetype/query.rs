@@ -790,7 +790,7 @@ where
     }
 
     fn plugin() -> apecs::Plugin {
-        apecs::Plugin::default().with_default_resource::<Components>()
+        apecs::Plugin::default().with_resource::<Components>()
     }
 }
 

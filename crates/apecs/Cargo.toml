@@ -1,6 +1,6 @@
 [package]
 name = "apecs"
-version = "0.4.3"
+version = "0.5.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 keywords = ["gamedev", "ecs", "async"]
@@ -13,8 +13,8 @@ description = "An asyncronous and parallel entity-component system"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
-default = ["derive-canfetch"]
-derive-canfetch = []
+default = ["derive"]
+derive = []
 
 [lib]
 name = "apecs"
@@ -24,7 +24,7 @@ bench = false
 [dependencies]
 anyhow = "^1.0"
 any_vec = "^0.10"
-apecs-derive = { version = "^0.2", path = "../apecs-derive" }
+apecs-derive = { version = "^0.2.2", path = "../apecs-derive" }
 async-broadcast = "^0.4"
 async-channel = "^1.6"
 async-executor = "^1.4"

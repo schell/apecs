@@ -9,6 +9,7 @@ use std::{any::Any, collections::VecDeque};
 use anyhow::Context;
 use rustc_hash::FxHashSet;
 
+use crate::{TryDefault, LazyResource};
 use crate::{
     chan::{self, mpsc, oneshot::oneshot, spsc},
     plugin::Plugin,
@@ -19,7 +20,7 @@ use crate::{
         AsyncSchedule, AsyncSystem, AsyncSystemFuture, AsyncSystemRequest, ShouldContinue,
         SyncSchedule, SyncSystem,
     },
-    CanFetch, IsResource, Request, Resource, ResourceId, ResourceRequirement, Write,
+    CanFetch, IsResource, Request, Resource, ResourceId, Write,
 };
 
 /// Fetches world resources in async systems.
@@ -273,6 +274,12 @@ impl Default for Entities {
     }
 }
 
+impl TryDefault for Entities {
+    fn try_default() -> Option<Self> {
+        Some(Default::default())
+    }
+}
+
 impl Entities {
     pub fn new(lazy_op_sender: mpsc::Sender<LazyOp>) -> Self {
         Self {
@@ -510,30 +517,23 @@ impl World {
         }
     }
 
-    /// Add a plugin to the world, instantiating any missing resources or systems.
+    /// Add a plugin to the world, instantiating any missing resources or
+    /// systems.
     ///
     /// ## Errs
     /// Errs if the plugin requires resources that cannot be created by default.
     pub fn with_plugin(&mut self, plugin: impl Into<Plugin>) -> anyhow::Result<&mut Self> {
         let plugin = plugin.into();
 
-        let mut missing_required_resources = FxHashSet::default();
-        for req_rez in plugin.resources.into_iter() {
-            let id = req_rez.id();
-            if !self.resource_manager.has_resource(id) {
-                log::trace!("missing resource {}...", id.name);
-                match req_rez {
-                    ResourceRequirement::ExpectedExisting(id) => {
-                        log::warn!("...and it was expected!");
-                        missing_required_resources.insert(id);
-                    }
-                    ResourceRequirement::LazyDefault(lazy_rez) => {
-                        log::trace!("...so we're creating it with default");
-                        let (id, resource) = lazy_rez.into();
-                        missing_required_resources.remove(&id);
-                        let _ = self.resource_manager.insert(id, resource);
-                    }
-                }
+        let mut missing_required_resources: FxHashSet<ResourceId> = FxHashSet::default();
+        for LazyResource { id, create } in plugin.resources.into_iter() {
+            if !self.resource_manager.has_resource(&id) {
+                log::trace!("attempting to create missing resource {}...", id.name);
+                let resource = (create)(&mut self.resource_manager.as_mut_loan_manager())?;
+                missing_required_resources.remove(&id);
+                let _ = self.resource_manager.insert(id, resource);
+                self.resource_manager
+                    .unify_resources("after building lazy dep")?;
             }
         }
 
@@ -890,13 +890,21 @@ mod test {
     use std::{ops::DerefMut, sync::Mutex};
 
     use crate::{
-        self as apecs, anyhow, chan::spsc,
+        self as apecs,
+        anyhow,
+        chan::spsc,
         storage::{Components, Query},
         system::*,
         world::*,
-        Read, Write, WriteExpect,
+        Read, Write, CanFetch, TryDefault
     };
     use rustc_hash::FxHashMap;
+
+    #[derive(Default, TryDefault)]
+    struct MyMap(FxHashMap<String, u32>);
+
+    #[derive(Default, TryDefault)]
+    struct Number(u32);
 
     #[test]
     fn can_closure_system() {
@@ -959,7 +967,7 @@ mod test {
         async fn create(tx: spsc::Sender<()>, mut facade: Facade) -> anyhow::Result<()> {
             log::info!("create running");
             tx.try_send(()).unwrap();
-            let (mut entities, mut archset): (WriteExpect<Entities>, Write<Components>) =
+            let (mut entities, mut archset): (Write<Entities>, Write<Components>) =
                 facade.fetch().await?;
             for n in 0..100u32 {
                 let e = entities.create();
@@ -970,11 +978,11 @@ mod test {
         }
 
         fn maintain_map(
-            mut data: (Query<(&String, &u32)>, Write<FxHashMap<String, u32>>),
+            mut data: (Query<(&String, &u32)>, Write<MyMap>),
         ) -> anyhow::Result<ShouldContinue> {
             for (name, number) in data.0.query().iter_mut() {
-                if !data.1.contains_key(name.value()) {
-                    let _ = data.1.insert(name.to_string(), *number.value());
+                if !data.1.inner().0.contains_key(name.value()) {
+                    let _ = data.1.inner_mut().0.insert(name.to_string(), *number.value());
                 }
             }
 
@@ -996,9 +1004,9 @@ mod test {
         // entities+components, then the maintain system updates the book
         world.tick();
 
-        let book = world.fetch::<Read<FxHashMap<String, u32>>>().unwrap();
+        let book = world.fetch::<Read<MyMap>>().unwrap();
         for n in 0..100 {
-            assert_eq!(book.get(&format!("entity_{}", n)), Some(&n));
+            assert_eq!(book.0.get(&format!("entity_{}", n)), Some(&n));
         }
     }
 
@@ -1010,11 +1018,12 @@ mod test {
             .try_init();
 
         struct DataOne(u32, mpsc::Sender<u32>);
+        impl TryDefault for DataOne {}
 
         async fn asys(mut facade: Facade) -> anyhow::Result<()> {
             log::info!("running asys");
             {
-                let data = facade.fetch::<WriteExpect<DataOne>>().await?;
+                let data = facade.fetch::<Write<DataOne>>().await?;
                 log::info!("asys fetched data");
 
                 // hold the fetched data over another await point
@@ -1027,7 +1036,7 @@ mod test {
             Ok(())
         }
 
-        fn sys(mut data: WriteExpect<DataOne>) -> anyhow::Result<ShouldContinue> {
+        fn sys(mut data: Write<DataOne>) -> anyhow::Result<ShouldContinue> {
             log::info!("running sys");
             data.deref_mut().0 += 1;
             ok()
@@ -1132,6 +1141,9 @@ mod test {
 
     #[test]
     fn plugin_inserts_resources_from_canfetch_in_systems() {
+        #[derive(Default, TryDefault)]
+        struct MyStr(&'static str);
+
         let _ = env_logger::builder()
             .is_test(true)
             .filter_level(log::LevelFilter::Trace)
@@ -1139,10 +1151,10 @@ mod test {
 
         let mut world = World::default();
         world
-            .with_system("test", |_: Write<&'static str>| ok())
+            .with_system("test", |_: Write<MyStr>| ok())
             .unwrap();
-        let s = world.resource_mut::<&'static str>().unwrap();
-        *s = "blah";
+        let s = world.resource_mut::<MyStr>().unwrap();
+        s.0 = "blah";
     }
 
     #[test]
@@ -1186,16 +1198,16 @@ mod test {
         world
             .with_async_system("one", |mut facade: Facade| -> AsyncSystemFuture {
                 Box::pin(async move {
-                    let mut number: Write<u32> = facade.fetch().await?;
-                    *number = 1;
+                    let mut number: Write<Number> = facade.fetch().await?;
+                    number.inner_mut().0 = 1;
                     Ok(())
                 })
             })
             .with_async_system("two", |mut facade: Facade| -> AsyncSystemFuture {
                 Box::pin(async move {
                     for _ in 0..2 {
-                        let mut number: Write<u32> = facade.fetch().await?;
-                        *number = 2;
+                        let mut number: Write<Number> = facade.fetch().await?;
+                        number.inner_mut().0 = 2;
                     }
                     Ok(())
                 })
@@ -1203,8 +1215,8 @@ mod test {
             .with_async_system("three", |mut facade: Facade| -> AsyncSystemFuture {
                 Box::pin(async move {
                     for _ in 0..3 {
-                        let mut number: Write<u32> = facade.fetch().await?;
-                        *number = 3;
+                        let mut number: Write<Number> = facade.fetch().await?;
+                        number.inner_mut().0 = 3;
                     }
                     Ok(())
                 })

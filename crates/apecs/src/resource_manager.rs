@@ -6,9 +6,13 @@ use std::sync::Arc;
 use anyhow::Context;
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use crate::TryDefault;
+
 use super::{
-    chan::mpsc, internal::{FetchReadyResource, Resource}, schedule::Borrow, IsResource,
-    ResourceId,
+    chan::mpsc,
+    internal::{FetchReadyResource, Resource},
+    schedule::Borrow,
+    IsResource, ResourceId,
 };
 
 /// Systems use this to return resources borrowed exclusively.
@@ -217,6 +221,11 @@ impl ResourceManager {
             .collect::<Vec<_>>()
             .join("\n")
     }
+
+    /// Mutably borrow as a [`LoanManager`].
+    pub fn as_mut_loan_manager(&mut self) -> LoanManager<'_> {
+        LoanManager(self)
+    }
 }
 
 /// Manages resources requested by systems. For internal use, mostly.
@@ -232,7 +241,7 @@ impl<'a> LoanManager<'a> {
         self.0.get_loaned(label, borrow)
     }
 
-    pub fn get_loaned_or_default<T: IsResource + Default>(
+    pub fn get_loaned_or_try_default<T: IsResource + TryDefault>(
         &mut self,
         label: &str,
         borrow: &Borrow,
@@ -242,12 +251,12 @@ impl<'a> LoanManager<'a> {
             self.0.get_loaned(label, borrow)
         } else {
             log::trace!(
-                "{} was missing in resources, so we create it from default",
+                "{} was missing in resources, so we'll try to create it from default",
                 std::any::type_name::<T>()
             );
-            let prev = self
-                .0
-                .insert(ResourceId::new::<T>(), Box::new(T::default()));
+            let t: T = T::try_default()
+                .with_context(|| format!("could not make default value for {}", rez_id.name))?;
+            let prev = self.0.insert(ResourceId::new::<T>(), Box::new(t));
             debug_assert!(prev.is_none());
             self.0.get_loaned(label, borrow)
         }
@@ -266,16 +275,24 @@ impl<'a> LoanManager<'a> {
 
 #[cfg(test)]
 mod test {
-    use crate::{CanFetch, Write};
+    use crate::{self as apecs, CanFetch, Write};
 
     use super::*;
+
+    #[derive(Default, apecs_derive::TryDefault)]
+    struct MyVec(Vec<&'static str>);
+    impl MyVec {
+        fn push(&mut self, s: &'static str) {
+            self.0.push(s);
+        }
+    }
 
     #[test]
     fn can_get_mut() {
         let mut mngr = ResourceManager::default();
-        assert!(mngr.add(vec!["one", "two"]).is_none());
+        assert!(mngr.add(MyVec(vec!["one", "two"])).is_none());
         {
-            let vs: &mut Vec<&str> = mngr.get_mut::<Vec<&str>>().unwrap();
+            let vs: &mut MyVec = mngr.get_mut::<MyVec>().unwrap();
             vs.push("three");
         }
     }
@@ -283,14 +300,14 @@ mod test {
     #[test]
     fn can_fetch_roundtrip() {
         let mut mngr = ResourceManager::default();
-        mngr.add(vec!["one"]);
+        mngr.add(MyVec(vec!["one"]));
         {
-            let mut vs = Write::<Vec<&str>>::construct(&mut LoanManager(&mut mngr)).unwrap();
+            let mut vs = Write::<MyVec>::construct(&mut LoanManager(&mut mngr)).unwrap();
             vs.push("two");
         }
         mngr.unify_resources("test").unwrap();
         {
-            let mut vs = Write::<Vec<&str>>::construct(&mut LoanManager(&mut mngr)).unwrap();
+            let mut vs = Write::<MyVec>::construct(&mut LoanManager(&mut mngr)).unwrap();
             vs.push("three");
         }
         mngr.unify_resources("test").unwrap();

@@ -1,6 +1,6 @@
 [package]
 name = "apecs-derive"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 keywords = ["gamedev", "ecs", "async"]
@@ -16,7 +16,7 @@ proc-macro = true
 bench = false
 
 [dependencies]
-apecs-derive-canfetch = { path = "../apecs-derive-canfetch", version = "^0.2" }
+apecs-derive-canfetch = { path = "../apecs-derive-canfetch", version = "^0.2.2" }
 proc-macro2 = "^1.0"
 quote = "^1.0"
 syn = "^1.0"

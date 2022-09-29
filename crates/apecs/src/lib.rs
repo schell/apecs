@@ -1,5 +1,4 @@
 //! *A*syncronous and *P*leasant *E*ntity *C*omponent *S*ystem
-#![feature(generic_associated_types)]
 #![allow(clippy::type_complexity)]
 
 use ::anyhow::Context;
@@ -25,8 +24,10 @@ mod storage;
 mod system;
 mod world;
 
-#[cfg(feature = "derive-canfetch")]
+#[cfg(feature = "derive")]
 pub use apecs_derive::CanFetch;
+#[cfg(feature = "derive")]
+pub use apecs_derive::TryDefault;
 pub use fetch::*;
 pub use plugin::Plugin;
 pub use rustc_hash::FxHashMap;
@@ -195,16 +196,26 @@ pub mod internal {
 pub trait IsResource: Any + Send + Sync + 'static {}
 impl<T: Any + Send + Sync + 'static> IsResource for T {}
 
+/// Optional default creation.
+///
+/// This is used to attempt to create resources when they don't already exist
+/// in the world.
+pub trait TryDefault: Sized {
+    fn try_default() -> Option<Self> {
+        None
+    }
+}
+
 /// Wrapper for one fetched resource.
 ///
 /// When dropped, the wrapped resource will be sent back to the world.
-pub(crate) struct Fetched<T: IsResource> {
+pub(crate) struct Fetched<T: IsResource + TryDefault> {
     // should be unbounded, `send` should never fail
     resource_return_tx: chan::mpsc::Sender<(ResourceId, Resource)>,
     inner: Option<Box<T>>,
 }
 
-impl<'a, T: IsResource> Deref for Fetched<T> {
+impl<'a, T: IsResource + TryDefault> Deref for Fetched<T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -212,13 +223,13 @@ impl<'a, T: IsResource> Deref for Fetched<T> {
     }
 }
 
-impl<'a, T: IsResource> DerefMut for Fetched<T> {
+impl<'a, T: IsResource + TryDefault> DerefMut for Fetched<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.inner.as_mut().unwrap()
     }
 }
 
-impl<'a, T: IsResource> Drop for Fetched<T> {
+impl<'a, T: IsResource + TryDefault> Drop for Fetched<T> {
     fn drop(&mut self) {
         if let Some(inner) = self.inner.take() {
             self.resource_return_tx
@@ -231,9 +242,9 @@ impl<'a, T: IsResource> Drop for Fetched<T> {
 /// A mutably borrowed resource that can be created by default.
 ///
 /// The resource is automatically sent back to the world on drop.
-pub struct Write<T: IsResource + Default>(Fetched<T>);
+pub struct Write<T: IsResource + TryDefault>(Fetched<T>);
 
-impl<T: IsResource + Default> Deref for Write<T> {
+impl<T: IsResource + TryDefault> Deref for Write<T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -241,13 +252,13 @@ impl<T: IsResource + Default> Deref for Write<T> {
     }
 }
 
-impl<'a, T: IsResource + Default> DerefMut for Write<T> {
+impl<'a, T: IsResource + TryDefault> DerefMut for Write<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.0.inner.as_mut().unwrap()
     }
 }
 
-impl<'a, T: Default + Send + Sync + 'static> IntoIterator for &'a Write<T>
+impl<'a, T: TryDefault + Send + Sync + 'static> IntoIterator for &'a Write<T>
 where
     &'a T: IntoIterator,
 {
@@ -260,7 +271,7 @@ where
     }
 }
 
-impl<'a, T: Default + Send + Sync + 'static> IntoParallelIterator for &'a Write<T>
+impl<'a, T: TryDefault + Send + Sync + 'static> IntoParallelIterator for &'a Write<T>
 where
     &'a T: IntoParallelIterator,
 {
@@ -273,7 +284,7 @@ where
     }
 }
 
-impl<'a, T: Default + Send + Sync + 'static> IntoIterator for &'a mut Write<T>
+impl<'a, T: TryDefault + Send + Sync + 'static> IntoIterator for &'a mut Write<T>
 where
     &'a mut T: IntoIterator,
 {
@@ -286,7 +297,7 @@ where
     }
 }
 
-impl<'a, T: Default + Send + Sync + 'static> IntoParallelIterator for &'a mut Write<T>
+impl<'a, T: TryDefault + Send + Sync + 'static> IntoParallelIterator for &'a mut Write<T>
 where
     &'a mut T: IntoParallelIterator,
 {
@@ -299,62 +310,25 @@ where
     }
 }
 
-/// A mutably borrowed resource that must be created explicitly.
-///
-/// The created resource should then be added to the world with
-/// [`World::with_resource`] or [`World::set_resource`].
-///
-/// The resource is automatically sent back to the world on drop.
-pub struct WriteExpect<T: IsResource>(Fetched<T>);
-
-impl<T: IsResource> Deref for WriteExpect<T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        self.0.inner.as_ref().unwrap()
+impl<T: IsResource + TryDefault> Write<T> {
+    fn inner(&self) -> &T {
+        self.deref()
     }
-}
 
-impl<'a, T: IsResource> DerefMut for WriteExpect<T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.0.inner.as_mut().unwrap()
-    }
-}
-
-impl<'a, S: Send + Sync + 'static> IntoParallelIterator for &'a mut WriteExpect<S>
-where
-    &'a mut S: IntoParallelIterator,
-{
-    type Iter = <&'a mut S as IntoParallelIterator>::Iter;
-
-    type Item = <&'a mut S as IntoParallelIterator>::Item;
-
-    fn into_par_iter(self) -> Self::Iter {
-        self.0.into_par_iter()
-    }
-}
-
-impl<'a, S: Send + Sync + 'static> IntoParallelIterator for &'a WriteExpect<S>
-where
-    &'a S: IntoParallelIterator,
-{
-    type Iter = <&'a S as IntoParallelIterator>::Iter;
-    type Item = <&'a S as IntoParallelIterator>::Item;
-
-    fn into_par_iter(self) -> Self::Iter {
-        self.0.into_par_iter()
+    fn inner_mut(&mut self) -> &mut T {
+        self.deref_mut()
     }
 }
 
 /// Immutably borrowed resource that can be created by default.
 ///
 /// The resource is automatically sent back to the world on drop.
-pub struct Read<T: IsResource + Default> {
+pub struct Read<T: IsResource + TryDefault> {
     inner: Arc<Resource>,
     _phantom: PhantomData<T>,
 }
 
-impl<'a, T: IsResource + Default> Deref for Read<T> {
+impl<'a, T: IsResource + TryDefault> Deref for Read<T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -362,7 +336,7 @@ impl<'a, T: IsResource + Default> Deref for Read<T> {
     }
 }
 
-impl<'a, T: Default + Send + Sync + 'static> IntoIterator for &'a Read<T>
+impl<'a, T: TryDefault + Send + Sync + 'static> IntoIterator for &'a Read<T>
 where
     &'a T: IntoIterator,
 {
@@ -375,7 +349,7 @@ where
     }
 }
 
-impl<'a, S: Default + Send + Sync + 'static> IntoParallelIterator for &'a Read<S>
+impl<'a, S: TryDefault + Send + Sync + 'static> IntoParallelIterator for &'a Read<S>
 where
     &'a S: IntoParallelIterator,
 {
@@ -388,36 +362,9 @@ where
     }
 }
 
-/// Immutably borrowed resource that must be created explicitly.
-///
-/// The resource can then be added to the world with [`World::with_resource`] or
-/// [`World::set_resource`].
-///
-/// The resource is automatically sent back to the world when dropped.
-pub struct ReadExpect<T: IsResource> {
-    inner: Arc<Resource>,
-    _phantom: PhantomData<T>,
-}
-
-impl<'a, T: IsResource> Deref for ReadExpect<T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        // I don't like this unwrap, but it works
-        self.inner.downcast_ref().unwrap()
-    }
-}
-
-impl<'a, S: Send + Sync + 'static> IntoParallelIterator for &'a ReadExpect<S>
-where
-    &'a S: IntoParallelIterator,
-{
-    type Iter = <&'a S as IntoParallelIterator>::Iter;
-
-    type Item = <&'a S as IntoParallelIterator>::Item;
-
-    fn into_par_iter(self) -> Self::Iter {
-        self.deref().into_par_iter()
+impl<T: IsResource + TryDefault> Read<T> {
+    fn inner(&self) -> &T {
+        self.deref()
     }
 }
 
@@ -447,40 +394,20 @@ impl Default for Request {
     }
 }
 
-pub(crate) struct LazyResource(ResourceId, Box<dyn FnOnce() -> Resource>);
+pub(crate) struct LazyResource {
+    id: ResourceId,
+    create: Box<dyn FnOnce(&mut LoanManager) -> anyhow::Result<Resource>>,
+}
 
 impl LazyResource {
-    pub fn new<T: IsResource>(f: impl FnOnce() -> T + 'static) -> LazyResource {
-        LazyResource(ResourceId::new::<T>(), Box::new(move || Box::new(f())))
-    }
-
-    // pub fn id(&self) -> &ResourceId {
-    //    &self.0
-    //}
-}
-
-impl From<LazyResource> for (ResourceId, Resource) {
-    fn from(lazy_rez: LazyResource) -> Self {
-        (lazy_rez.0, lazy_rez.1())
-    }
-}
-
-pub(crate) enum ResourceRequirement {
-    LazyDefault(LazyResource),
-    ExpectedExisting(ResourceId),
-}
-
-impl ResourceRequirement {
-    pub fn id(&self) -> &ResourceId {
-        match self {
-            ResourceRequirement::LazyDefault(lazy) => &lazy.0,
-            ResourceRequirement::ExpectedExisting(id) => &id,
+    pub fn new<T: IsResource>(
+        f: impl FnOnce(&mut LoanManager) -> anyhow::Result<T> + 'static,
+    ) -> LazyResource {
+        LazyResource{
+            id: ResourceId::new::<T>(),
+            create: Box::new(move |loans| Ok(Box::new(f(loans)?))),
         }
     }
-
-    // pub fn is_lazy_default(&self) -> bool {
-    //    matches!(self, ResourceRequirement::LazyDefault(_))
-    //}
 }
 
 /// Types that can be fetched from the [`World`].
@@ -501,7 +428,7 @@ pub trait CanFetch: Send + Sync + Sized {
     }
 }
 
-impl<'a, T: IsResource + Default> CanFetch for Write<T> {
+impl<'a, T: IsResource + TryDefault> CanFetch for Write<T> {
     fn borrows() -> Vec<internal::Borrow> {
         vec![internal::Borrow {
             id: ResourceId::new::<T>(),
@@ -515,11 +442,11 @@ impl<'a, T: IsResource + Default> CanFetch for Write<T> {
             is_exclusive: true,
         };
         let t: FetchReadyResource =
-            loan_mngr.get_loaned_or_default::<T>("Write::construct", &borrow)?;
+            loan_mngr.get_loaned_or_try_default::<T>("Write::construct", &borrow)?;
         let t = t.into_owned().context("resource is not owned")?;
         let inner: Option<Box<T>> = Some(t.downcast::<T>().map_err(|_| {
             anyhow::anyhow!(
-                "WriteExpect::construct could not cast resource as '{}'",
+                "Write::construct could not cast resource as '{}'",
                 std::any::type_name::<T>(),
             )
         })?);
@@ -531,44 +458,11 @@ impl<'a, T: IsResource + Default> CanFetch for Write<T> {
     }
 
     fn plugin() -> Plugin {
-        Plugin::default().with_default_resource::<T>()
+        Plugin::default().with_resource::<T>()
     }
 }
 
-impl<'a, T: IsResource> CanFetch for WriteExpect<T> {
-    fn borrows() -> Vec<internal::Borrow> {
-        vec![internal::Borrow {
-            id: ResourceId::new::<T>(),
-            is_exclusive: true,
-        }]
-    }
-
-    fn construct(loan_mngr: &mut LoanManager) -> anyhow::Result<Self> {
-        let borrow = internal::Borrow {
-            id: ResourceId::new::<T>(),
-            is_exclusive: true,
-        };
-        let t: FetchReadyResource = loan_mngr.get_loaned("WriteExpect::construct", &borrow)?; //
-        let t = t.into_owned().context("resource is not owned")?;
-        let inner: Option<Box<T>> = Some(t.downcast::<T>().map_err(|_| {
-            anyhow::anyhow!(
-                "WriteExpect::construct could not cast resource as '{}'",
-                std::any::type_name::<T>(),
-            )
-        })?);
-        let fetched = Fetched {
-            resource_return_tx: loan_mngr.resource_return_tx(),
-            inner,
-        };
-        Ok(WriteExpect(fetched))
-    }
-
-    fn plugin() -> Plugin {
-        Plugin::default().with_expected_resource::<T>()
-    }
-}
-
-impl<'a, T: IsResource + Default> CanFetch for Read<T> {
+impl<'a, T: IsResource + TryDefault> CanFetch for Read<T> {
     fn borrows() -> Vec<internal::Borrow> {
         vec![internal::Borrow {
             id: ResourceId::new::<T>(),
@@ -582,7 +476,7 @@ impl<'a, T: IsResource + Default> CanFetch for Read<T> {
             is_exclusive: false,
         };
         let t: FetchReadyResource =
-            loan_mngr.get_loaned_or_default::<T>("Read::construct", &borrow)?;
+            loan_mngr.get_loaned_or_try_default::<T>("Read::construct", &borrow)?;
         let inner = t.into_ref().context("resource is not borrowed")?;
         Ok(Read {
             inner,
@@ -591,34 +485,7 @@ impl<'a, T: IsResource + Default> CanFetch for Read<T> {
     }
 
     fn plugin() -> Plugin {
-        Plugin::default().with_default_resource::<T>()
-    }
-}
-
-impl<'a, T: IsResource> CanFetch for ReadExpect<T> {
-    fn borrows() -> Vec<internal::Borrow> {
-        vec![internal::Borrow {
-            id: ResourceId::new::<T>(),
-            is_exclusive: false,
-        }]
-    }
-
-    fn construct(loan_mngr: &mut LoanManager) -> anyhow::Result<Self> {
-        let borrow = internal::Borrow {
-            id: ResourceId::new::<T>(),
-            is_exclusive: false,
-        };
-        let t: FetchReadyResource = loan_mngr.get_loaned("ReadExpect::construct", &borrow)?;
-        let inner = t.into_ref().context("resource is not borrowed")?;
-
-        Ok(ReadExpect {
-            inner,
-            _phantom: PhantomData,
-        })
-    }
-
-    fn plugin() -> Plugin {
-        Plugin::default().with_expected_resource::<T>()
+        Plugin::default().with_resource::<T>()
     }
 }
 

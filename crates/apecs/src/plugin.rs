@@ -5,11 +5,14 @@
 //! [`crate::World::with_plugin`].
 use std::future::Future;
 
+use anyhow::Context;
+
 use crate::{
+    resource_manager::LoanManager,
     schedule::Dependency,
     system::{AsyncSystemFuture, ShouldContinue, SyncSystem},
     world::Facade,
-    CanFetch, IsResource, LazyResource, ResourceId, ResourceRequirement,
+    CanFetch, IsResource, LazyResource, TryDefault,
 };
 
 pub struct SyncSystemWithDeps(pub SyncSystem);
@@ -58,10 +61,10 @@ where
 /// A plugin can contain duplicate entries of resources and systems. At the time
 /// when the plugin is loaded into the world with
 /// [`World::with_plugin`](crate::World::with_plugin), all resources and systems
-/// will be created and will be unique.
+/// will be created once and will be unique.
 #[derive(Default)]
 pub struct Plugin {
-    pub(crate) resources: Vec<ResourceRequirement>,
+    pub(crate) resources: Vec<LazyResource>,
     pub(crate) sync_systems: Vec<SyncSystemWithDeps>,
     pub(crate) async_systems: Vec<LazyAsyncSystem>,
 }
@@ -75,43 +78,39 @@ impl Plugin {
         self
     }
 
-    /// Add a dependency on a resource that can be created with
-    /// [`Default::default()`].
+    /// Add a dependency on a resource that may be created with
+    /// [`TryDefault::try_default()`].
     ///
     /// If this resource does not already exist in the world at the time this
     /// plugin is instantiated, it will be inserted into the
-    /// [`World`](crate::World).
-    pub fn with_default_resource<T: IsResource + Default>(mut self) -> Self {
-        self.resources
-            .push(ResourceRequirement::LazyDefault(LazyResource::new(|| {
-                T::default()
-            })));
+    /// [`World`](crate::World), if possible - otherwise instantiation will
+    /// err.
+    pub fn with_resource<T: IsResource + TryDefault>(mut self) -> Self {
+        self.resources.push(LazyResource::new(|_| {
+            T::try_default().with_context(|| {
+                format!("{}::try_default returned None", std::any::type_name::<T>())
+            })
+        }));
         self
     }
 
-    /// Add a dependency on a resource that can be created lazily with a
-    /// closure.
-    ///
-    /// If a resource of this type does not already exist in the world at the
-    /// time the plugin is instantiated, it will be inserted into the
-    /// [`World`](crate::World).
-    pub fn with_lazy_resource<T: IsResource>(
-        mut self,
-        create: impl FnOnce() -> T + 'static,
-    ) -> Self {
-        self.resources
-            .push(ResourceRequirement::LazyDefault(LazyResource::new(create)));
-        self
-    }
-
-    /// Add a dependency on a resource that must already exist in the
-    /// [`World`](crate::World) at the time of plugin instantiation.
+    /// Add a dependency on a resource that may be created using other existing
+    /// and fetchable resources.
     ///
     /// If this resource does not already exist in the world at the time this
-    /// plugin is instantiated, adding the plugin will err.
-    pub fn with_expected_resource<T: IsResource>(mut self) -> Self {
+    /// plugin is instantiated, it will be inserted into the
+    /// [`World`](crate::World), if possible - otherwise instantiation will
+    /// err.
+    pub fn with_dependent_resource<S: CanFetch, T: IsResource>(
+        mut self,
+        create: impl FnOnce(S) -> anyhow::Result<T> + 'static,
+    ) -> Self {
         self.resources
-            .push(ResourceRequirement::ExpectedExisting(ResourceId::new::<T>()));
+            .push(LazyResource::new(move |loans: &mut LoanManager| {
+                let s: S = S::construct(loans)?;
+                let t: T = create(s)?;
+                Ok(t)
+            }));
         self
     }
 
@@ -162,8 +161,15 @@ impl Plugin {
 
 #[cfg(test)]
 mod test {
-    use crate as apecs;
-    use apecs::{storage::*, system::*, world::World, CanFetch};
+    use crate::{
+        self as apecs, storage::*, system::*, world::World, CanFetch, Plugin, Read, TryDefault,
+    };
+
+    #[derive(Default, apecs_derive::TryDefault)]
+    pub struct Number(u32);
+
+    #[derive(apecs_derive::CanFetch)]
+    pub struct MyData(Query<(&'static mut String, &'static mut usize)>);
 
     #[test]
     fn sanity() {
@@ -171,9 +177,6 @@ mod test {
             .is_test(true)
             .filter_level(log::LevelFilter::Trace)
             .try_init();
-
-        #[derive(CanFetch)]
-        struct MyData(Query<(&'static mut String, &'static mut usize)>);
 
         fn my_system(data: MyData) -> anyhow::Result<ShouldContinue> {
             for (_, n) in data.0.query().iter_mut() {
@@ -190,5 +193,16 @@ mod test {
         world.with_system("my_system", my_system).unwrap();
 
         let _data = world.fetch::<MyData>().unwrap();
+    }
+
+    #[test]
+    fn can_build_dependent_resources() {
+        let plugin = Plugin::default()
+            .with_dependent_resource::<Read<Number>, bool>(|num| Ok(num.inner().0 == 0));
+        let mut world = World::default();
+        world.with_plugin(plugin).unwrap();
+
+        let boolean = world.resource::<bool>().unwrap();
+        assert!(boolean);
     }
 }

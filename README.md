@@ -48,11 +48,15 @@ systems do the hot-path work that completes those async operations as fast as po
 - syncronous systems with early exit and failure
   ```rust
   use apecs::*;
+
+  #[derive(Clone, Copy, Debug, Default, TryDefault, PartialEq)]
+  struct Number(u32);
+
   let mut world = World::default();
   world
-      .with_system("demo", |mut u32_number: Write<u32>| -> anyhow::Result<ShouldContinue> {
-          *u32_number += 1;
-          if *u32_number == 3 {
+      .with_system("demo", |mut u32_number: Write<Number>| -> anyhow::Result<ShouldContinue> {
+          u32_number.0 += 1;
+          if u32_number.0 == 3 {
               end()
           } else {
               ok()
@@ -60,31 +64,36 @@ systems do the hot-path work that completes those async operations as fast as po
       })
       .unwrap();
   world.run();
-  assert_eq!(3, *world.resource::<u32>().unwrap());
+  assert_eq!(Number(3), *world.resource::<Number>().unwrap());
   ```
 - async systems, ie systems that end and/or change over time (for scenes, stories, etc)
   - fetch resources from the world asyncronously. If they have not been added and can be
     created by default, they will be. `Write` and `Read` will create default resources
-    during fetching, and `WriteExpect` and `ReadExpect` will not.
+    during fetching using `TryDefault::try_default` if possible.
   - resources are acquired without lifetimes
-  - when resources are dropped they are sent back into the world
+  - when fetched resources are dropped they are sent back into the world
   ```rust
   use apecs::*;
+
+  #[derive(Clone, Copy, Debug, Default, TryDefault, PartialEq)]
+  struct Number(u32);
+
   async fn demo(mut facade: Facade) -> anyhow::Result<()> {
       loop {
-          let mut u32_number: Write<u32> = facade.fetch().await?;
-          *u32_number += 1;
-          if *u32_number > 5 {
+          let mut u32_number: Write<Number> = facade.fetch().await?;
+          u32_number.0 += 1;
+          if u32_number.0 > 5 {
               break;
           }
       }
       Ok(())
   }
+
   let mut world = World::default();
   world
       .with_async_system("demo", demo);
   world.run();
-  assert_eq!(6, *world.resource::<u32>().unwrap());
+  assert_eq!(Number(6), *world.resource::<Number>().unwrap());
   ```
 - support for async futures
   ```rust
@@ -100,15 +109,18 @@ systems do the hot-path work that completes those async operations as fast as po
   ```rust
   use apecs::*;
 
+  #[derive(Default, TryDefault)]
+  struct U32(u32);
+
   #[derive(CanFetch)]
   struct MyData {
       entities: Read<Entities>,
-      u32_number: Write<u32>,
+      u32_number: Write<U32>,
   }
 
   let mut world = World::default();
   let mut my_data: MyData = world.fetch().unwrap();
-  *my_data.u32_number = 1;
+  my_data.u32_number.0 = 1;
   ```
 - system scheduling
   - compatible systems are placed in parallel batches (a batch is a group of systems
@@ -118,27 +130,33 @@ systems do the hot-path work that completes those async operations as fast as po
   ```rust
   use apecs::*;
 
-  fn one(mut u32_number: Write<u32>) -> anyhow::Result<ShouldContinue> {
-      *u32_number += 1;
+  #[derive(Default, TryDefault)]
+  struct U32(u32);
+
+  #[derive(Default, TryDefault)]
+  struct F32(f32);
+
+  fn one(mut u32_number: Write<U32>) -> anyhow::Result<ShouldContinue> {
+      u32_number.0 += 1;
       end()
   }
 
-  fn two(mut u32_number: Write<u32>) -> anyhow::Result<ShouldContinue> {
-      *u32_number += 1;
+  fn two(mut u32_number: Write<U32>) -> anyhow::Result<ShouldContinue> {
+      u32_number.0 += 1;
       end()
   }
 
-  fn exit_on_three(mut f32_number: Write<f32>) -> anyhow::Result<ShouldContinue> {
-      *f32_number += 1.0;
-      if *f32_number == 3.0 {
+  fn exit_on_three(mut f32_number: Write<F32>) -> anyhow::Result<ShouldContinue> {
+      f32_number.0 += 1.0;
+      if f32_number.0 == 3.0 {
           end()
       } else {
           ok()
       }
   }
 
-  fn lastly((u32_number, f32_number): (Read<u32>, Read<f32>)) -> anyhow::Result<ShouldContinue> {
-      if *u32_number == 2 && *f32_number == 3.0 {
+  fn lastly((u32_number, f32_number): (Read<U32>, Read<F32>)) -> anyhow::Result<ShouldContinue> {
+      if u32_number.0 == 2 && f32_number.0 == 3.0 {
           end()
       } else {
           ok()
@@ -189,7 +207,7 @@ systems do the hot-path work that completes those async operations as fast as po
   use apecs::*;
 
   // Make a type for tracking changes
-  #[derive(Default)]
+  #[derive(Default, TryDefault)]
   struct MyTracker(u64);
 
   // Entities and Components (which stores components) are default
@@ -249,18 +267,22 @@ systems do the hot-path work that completes those async operations as fast as po
   - parallelism is configurable (can be automatic or a requested number of threads, including 1)
   ```rust
   use apecs::*;
+
+  #[derive(Default, TryDefault)]
+  struct F32(f32);
+
   let mut world = World::default();
   world
-      .with_system("one", |mut f32_number: Write<f32>| {
-          *f32_number += 1.0;
+      .with_system("one", |mut f32_number: Write<F32>| {
+          f32_number.0 += 1.0;
           ok()
       }).unwrap()
-      .with_system("two", |f32_number: Read<f32>| {
-          println!("system two reads {}", *f32_number);
+      .with_system("two", |f32_number: Read<F32>| {
+          println!("system two reads {}", f32_number.0);
           ok()
       }).unwrap()
-      .with_system("three", |f32_number: Read<f32>| {
-          println!("system three reads {}", *f32_number);
+      .with_system("three", |f32_number: Read<F32>| {
+          println!("system three reads {}", f32_number.0);
           ok()
       }).unwrap()
       .with_parallelism(Parallelism::Automatic);
@@ -270,7 +292,7 @@ systems do the hot-path work that completes those async operations as fast as po
   ```rust
   use apecs::*;
 
-  #[derive(Default)]
+  #[derive(Default, TryDefault)]
   struct MyTracker(u64);
 
   #[derive(CanFetch)]
