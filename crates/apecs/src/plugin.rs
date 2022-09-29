@@ -161,9 +161,7 @@ impl Plugin {
 
 #[cfg(test)]
 mod test {
-    use crate::{
-        self as apecs, storage::*, system::*, world::World, CanFetch, Plugin, Read, TryDefault,
-    };
+    use crate::{self as apecs, storage::*, system::*, world::World, CanFetch, Plugin, Read};
 
     #[derive(Default, apecs_derive::TryDefault)]
     pub struct Number(u32);

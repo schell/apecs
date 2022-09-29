@@ -199,7 +199,29 @@ impl<T: Any + Send + Sync + 'static> IsResource for T {}
 /// Optional default creation.
 ///
 /// This is used to attempt to create resources when they don't already exist
-/// in the world.
+/// in the world. See [`Read`](crate::Read) and [`Write`](crate::Write).
+///
+/// This trait can be derived, so long as the type also has a [`Default`]
+/// instance: ```rust
+/// use apecs::*;
+///
+/// #[derive(Debug, Default, TryDefault, PartialEq)]
+/// struct MyVec(Vec<String>);
+///
+/// assert_eq!(MyVec(vec![]), MyVec::try_default().unwrap());
+/// ```
+///
+/// The default implementation of `try_default` returns `None`:
+/// ```rust
+/// use apecs::*;
+///
+/// #[derive(Debug, PartialEq)]
+/// struct MyVec(Vec<String>);
+///
+/// impl TryDefault for MyVec {}
+///
+/// assert_eq!(None, MyVec::try_default());
+/// ```
 pub trait TryDefault: Sized {
     fn try_default() -> Option<Self> {
         None
@@ -239,9 +261,15 @@ impl<'a, T: IsResource + TryDefault> Drop for Fetched<T> {
     }
 }
 
-/// A mutably borrowed resource that can be created by default.
+/// A mutably borrowed resource that may be created by default.
 ///
-/// The resource is automatically sent back to the world on drop.
+/// [`Read`] and [`Write`] are the main way systems interact with resources.
+/// When [`fetch`](crate::World::fetch)ed The wrapped type `T` will
+/// automatically be created, if it doesn't already exist and if possible,
+/// according to its [`TryDefault`] implementation.
+///
+/// The resource is then automatically sent back to the world on drop. For this
+/// reason, when writing async systems you must take care to drop fetched resources.
 pub struct Write<T: IsResource + TryDefault>(Fetched<T>);
 
 impl<T: IsResource + TryDefault> Deref for Write<T> {
@@ -311,18 +339,24 @@ where
 }
 
 impl<T: IsResource + TryDefault> Write<T> {
-    fn inner(&self) -> &T {
+    pub fn inner(&self) -> &T {
         self.deref()
     }
 
-    fn inner_mut(&mut self) -> &mut T {
+    pub fn inner_mut(&mut self) -> &mut T {
         self.deref_mut()
     }
 }
 
-/// Immutably borrowed resource that can be created by default.
+/// Immutably borrowed resource that may also be created by default.
 ///
-/// The resource is automatically sent back to the world on drop.
+/// [`Read`] and [`Write`] are the main way systems interact with resources.
+/// When [`fetch`](crate::World::fetch)ed The wrapped type `T` will
+/// automatically be created, if it doesn't already exist and if possible,
+/// according to its [`TryDefault`] implementation.
+///
+/// The resource is then automatically sent back to the world on drop. For this
+/// reason, when writing async systems you must take care to drop fetched resources.
 pub struct Read<T: IsResource + TryDefault> {
     inner: Arc<Resource>,
     _phantom: PhantomData<T>,
@@ -363,7 +397,7 @@ where
 }
 
 impl<T: IsResource + TryDefault> Read<T> {
-    fn inner(&self) -> &T {
+    pub fn inner(&self) -> &T {
         self.deref()
     }
 }
@@ -403,7 +437,7 @@ impl LazyResource {
     pub fn new<T: IsResource>(
         f: impl FnOnce(&mut LoanManager) -> anyhow::Result<T> + 'static,
     ) -> LazyResource {
-        LazyResource{
+        LazyResource {
             id: ResourceId::new::<T>(),
             create: Box::new(move |loans| Ok(Box::new(f(loans)?))),
         }
