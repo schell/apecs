@@ -24,7 +24,7 @@ bench = false
 [dependencies]
 anyhow = "^1.0"
 any_vec = "^0.10"
-apecs-derive = { version = "^0.2.2", path = "../apecs-derive" }
+apecs-derive = { version = "^0.2.3", path = "../apecs-derive" }
 async-broadcast = "^0.4"
 async-channel = "^1.6"
 async-executor = "^1.4"

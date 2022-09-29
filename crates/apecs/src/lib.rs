@@ -591,4 +591,12 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn try_default_test() {
+        use crate as apecs;
+
+        #[derive(apecs_derive::TryDefault)]
+        struct A<T>(T);
+    }
 }
