@@ -3,8 +3,6 @@ use std::{any::TypeId, ops::DerefMut};
 
 use any_vec::{any_value::AnyValueMut, AnyVec};
 
-use crate::TryDefault;
-
 use super::{bundle::*, Archetype, Entry};
 
 /// The set of all entities' components.
@@ -25,12 +23,6 @@ impl Default for Components {
         };
         set.upkeep(&[]);
         set
-    }
-}
-
-impl TryDefault for Components {
-    fn try_default() -> Option<Self> {
-        Some(Default::default())
     }
 }
 

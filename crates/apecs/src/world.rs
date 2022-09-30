@@ -9,7 +9,7 @@ use std::{any::Any, collections::VecDeque};
 use anyhow::Context;
 use rustc_hash::FxHashSet;
 
-use crate::{TryDefault, LazyResource};
+use crate::QueryGuard;
 use crate::{
     chan::{self, mpsc, oneshot::oneshot, spsc},
     plugin::Plugin,
@@ -20,10 +20,13 @@ use crate::{
         AsyncSchedule, AsyncSystem, AsyncSystemFuture, AsyncSystemRequest, ShouldContinue,
         SyncSchedule, SyncSystem,
     },
-    CanFetch, IsResource, Request, Resource, ResourceId, Write,
+    CanFetch, IsResource, LazyResource, Request, Resource, ResourceId, Write,
 };
 
 /// Fetches world resources in async systems.
+///
+/// A facade is a window into the world, by which an async system can interact
+/// with the world without causing resource contention.
 pub struct Facade {
     // Unbounded. Sending a request from the system should not yield the async
     pub(crate) resource_request_tx: spsc::Sender<Request>,
@@ -32,16 +35,28 @@ pub struct Facade {
 }
 
 impl Facade {
-    pub async fn fetch<T: CanFetch + Send + Sync + 'static>(&mut self) -> anyhow::Result<T> {
-        let borrows = T::borrows();
+    /// Asyncronously visit fetchable system resources using a closure.
+    ///
+    /// The closure may return data to the caller.
+    ///
+    /// A roundtrip takes one frame.
+    ///
+    /// Using a closure ensures that no fetched system resources are held over
+    /// an await point, which would preclude other systems from accessing
+    /// them and susequently being able to run.
+    pub async fn visit<D: CanFetch + Send + Sync + 'static, T: Send + Sync + 'static>(
+        &mut self,
+        f: impl FnOnce(D) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        let borrows = D::borrows();
         self.resource_request_tx
             .try_send(Request {
                 borrows,
                 construct: |loan_mngr: &mut LoanManager| {
-                    let t = T::construct(loan_mngr).with_context(|| {
-                        format!("could not construct {}", std::any::type_name::<T>())
+                    let t = D::construct(loan_mngr).with_context(|| {
+                        format!("could not construct {}", std::any::type_name::<D>())
                     })?;
-                    let box_t: Box<T> = Box::new(t);
+                    let box_t: Box<D> = Box::new(t);
                     let box_any: UntypedSystemData = box_t;
                     Ok(box_any)
                 },
@@ -53,11 +68,12 @@ impl Facade {
             .recv()
             .await
             .context("could not fetch resources")?;
-        let box_t: Box<T> = box_any
+        let box_d: Box<D> = box_any
             .downcast()
             .ok()
-            .with_context(|| format!("Facade could not downcast {}", std::any::type_name::<T>()))?;
-        let t = *box_t;
+            .with_context(|| format!("Facade could not downcast {}", std::any::type_name::<D>()))?;
+        let d = *box_d;
+        let t = f(d)?;
         Ok(t)
     }
 }
@@ -72,9 +88,37 @@ pub struct LazyOp {
     tx: chan::oneshot::Sender<Arc<dyn Any + Send + Sync>>,
 }
 
-/// Associates a discrete group of components within the world.
+/// Associates a group of components within the world.
 ///
-/// `Entity` can be used to add and remove components lazily.
+/// Entities are mostly just `usize` identifiers that help locate components,
+/// but [`Entity`] comes with some conveniences.
+///
+/// After an entity is created you can attach and remove
+/// bundles of components asynchronously (or "lazily" if not in an async
+/// context).
+/// ```
+/// # use apecs::*;
+/// let mut world = World::default();
+/// // asynchronously create new entities from within an async system
+/// world.with_async_system("spawn-b-entity", |mut facade: Facade| async move {
+///     let mut b = facade
+///         .visit(|mut ents: Write<Entities>| {
+///             Ok(ents.create().with_bundle((123, "entity B", true)))
+///         })
+///         .await?;
+///     // after this await `b` has its bundle
+///     b.updates().await;
+///     // visit a component or bundle
+///     let did_visit = b
+///         .visit::<&&str, ()>(|name| assert_eq!("entity B", *name.value()))
+///         .await
+///         .is_some();
+///     Ok(())
+/// });
+/// world.run();
+/// ```
+/// Alternatively, if you have access to the [`Components`] resource you can
+/// attach components directly and immediately.
 pub struct Entity {
     id: usize,
     gen: usize,
@@ -246,9 +290,18 @@ impl Entity {
     }
 }
 
-/// Creates and destroys entities.
+/// Creates, destroys and recycles entities.
 ///
-/// Exists in [`World`](crate::World) by default.
+/// The most common reason to interact with `Entities` is to
+/// [`create`](Entities::create) or [`destroy`](Entities::destroy) an
+/// [`Entity`].
+/// ```
+/// # use apecs::*;
+/// let mut world = World::default();
+/// let entities = world.resource_mut::<Entities>().unwrap();
+/// let ent = entities.create();
+/// entities.destroy(ent);
+/// ```
 pub struct Entities {
     pub(crate) next_k: usize,
     pub(crate) generations: Vec<usize>,
@@ -271,12 +324,6 @@ impl Default for Entities {
             deleted: Default::default(),
             lazy_op_sender: mpsc::unbounded().0,
         }
-    }
-}
-
-impl TryDefault for Entities {
-    fn try_default() -> Option<Self> {
-        Some(Default::default())
     }
 }
 
@@ -337,7 +384,8 @@ impl Entities {
         }
     }
 
-    /// Lazily destroy an entity, recycling it at the end of this tick.
+    /// Lazily destroy an entity, removing its components and recycling it
+    /// at the end of this tick.
     ///
     /// ## NOTE:
     /// Destroyed entities will have their components removed
@@ -460,7 +508,85 @@ pub enum Parallelism {
 ///
 /// The `World` is the executor of your systems and async computations.
 ///
-/// Contains [`Entities`] and [`Components`] as resources, by default.
+/// Most applications will create and configure a `World` in their main
+/// function, finally [`run`](World::run)ning it or [`tick`](World::tick)ing
+/// it in a loop.
+///
+/// ```rust
+/// use apecs::*;
+///
+/// #[derive(CanFetch)]
+/// struct MyAppData {
+///     channel: Read<chan::mpmc::Channel<String>>,
+///     count: Write<usize>,
+/// }
+///
+/// let mut world = World::default();
+/// world
+///     .with_system(
+///         "compute_hello",
+///         |mut data: MyAppData| -> anyhow::Result<ShouldContinue> {
+///             if *data.count >= 3 {
+///                 data.channel
+///                     .tx
+///                     .try_broadcast("hello world".to_string())
+///                     .unwrap();
+///                 end()
+///             } else {
+///                 *data.count += 1;
+///                 ok()
+///             }
+///         },
+///     )
+///     .unwrap()
+///     .with_async_system("await_hello", |mut facade: Facade| async move {
+///         let mut rx = facade
+///             .visit(|mut data: MyAppData| Ok(data.channel.new_receiver()))
+///             .await?;
+///         if let Ok(msg) = rx.recv().await {
+///             println!("got message: {}", msg);
+///         }
+///         Ok(())
+///     });
+/// world.run();
+/// ```
+///
+/// `World` is the outermost object of `apecs`, as it contains all systems and
+/// resources. It contains [`Entities`] and [`Components`] as default resources.
+/// You can create entities, attach components and query them from outside the
+/// world if desired:
+///
+/// ```
+/// # use apecs::*;
+/// let mut world = World::default();
+/// // Nearly any type can be used as a component with zero boilerplate
+/// let a = world.entity_with_bundle((123, true, "abc"));
+/// let b = world.entity_with_bundle((42, false));
+///
+/// // Query the world for all matching bundles
+/// let mut query = world.query::<(&mut i32, &bool)>();
+/// for (number, flag) in query.iter_mut() {
+///     if **flag {
+///         **number *= 2;
+///     }
+/// }
+///
+/// // Perform random access within the same query
+/// let a_entry: &Entry<i32> = query.find_one(a.id()).unwrap().0;
+/// assert_eq!(**a_entry, 246);
+/// // Track changes to individual components
+/// assert_eq!(apecs::current_iteration(), a_entry.last_changed());
+/// ```
+///
+/// ## Where to look next 📚
+/// * [`Entities`] for info on creating and deleting [`Entity`]s
+/// * [`Components`] for info on creating updating and deleting components
+/// * [`Entry`] for info on tracking changes to individual components
+/// * [`Query`](crate::Query) for info on querying bundles of components
+/// * [`Facade`] for info on interacting with the `World` from within an async
+///   system
+/// * [`Plugin`] for info on how to bundle systems and resources of common
+///   operation together into an easy-to-integrate package
 pub struct World {
     pub(crate) resource_manager: ResourceManager,
     pub(crate) sync_schedule: SyncSchedule,
@@ -703,7 +829,7 @@ impl World {
         self.resource_manager.has_resource(&ResourceId::new::<T>())
     }
 
-    /// Spawn a non-system asynchronous task.
+    /// Spawn an asynchronous task.
     pub fn spawn(&self, future: impl Future<Output = ()> + Send + Sync + 'static) {
         let task = self.async_task_executor.spawn(future);
         task.detach();
@@ -838,6 +964,22 @@ impl World {
         Ok(())
     }
 
+    /// Run all systems and futures until they have finished or one system has
+    /// erred, whichever comes first.
+    pub fn run(&mut self) -> &mut Self {
+        loop {
+            self.tick();
+            if self.async_systems.is_empty()
+                && self.sync_schedule.is_empty()
+                && self.async_task_executor.is_empty()
+            {
+                break;
+            }
+        }
+
+        self
+    }
+
     /// Attempt to get a reference to one resource.
     pub fn resource<T: IsResource>(&self) -> anyhow::Result<&T> {
         let id = ResourceId::new::<T>();
@@ -854,25 +996,24 @@ impl World {
         T::construct(&mut LoanManager(&mut self.resource_manager))
     }
 
+    /// Create a new entity.
     pub fn entity(&mut self) -> Entity {
         let mut entities = self.fetch::<Write<Entities>>().unwrap();
         entities.create()
     }
 
-    /// Run all system and non-system futures until they have all finished or
-    /// one system has erred, whichever comes first.
-    pub fn run(&mut self) -> &mut Self {
-        loop {
-            self.tick();
-            if self.async_systems.is_empty()
-                && self.sync_schedule.is_empty()
-                && self.async_task_executor.is_empty()
-            {
-                break;
-            }
-        }
+    /// Create a new entity and immediately attach the bundle of components to
+    /// it.
+    pub fn entity_with_bundle<B: IsBundle>(&mut self, bundle: B) -> Entity {
+        let entity = self.resource_mut::<Entities>().unwrap().create();
+        self.resource_mut::<Components>()
+            .unwrap()
+            .insert_bundle(entity.id(), bundle);
+        entity
+    }
 
-        self
+    pub fn query<Q: IsQuery + 'static>(&mut self) -> QueryGuard<'_, Q> {
+        self.resource_mut::<Components>().unwrap().query::<Q>()
     }
 
     pub fn get_schedule_description(&self) -> String {
@@ -887,23 +1028,22 @@ impl World {
 
 #[cfg(test)]
 mod test {
-    use std::{ops::DerefMut, sync::Mutex};
+    use std::sync::Mutex;
 
     use crate::{
-        self as apecs,
-        anyhow,
+        self as apecs, anyhow,
         chan::spsc,
         storage::{Components, Query},
         system::*,
         world::*,
-        Read, Write, CanFetch, TryDefault
+        CanFetch, Read, Write,
     };
     use rustc_hash::FxHashMap;
 
-    #[derive(Default, TryDefault)]
+    #[derive(Default)]
     struct MyMap(FxHashMap<String, u32>);
 
-    #[derive(Default, TryDefault)]
+    #[derive(Default)]
     struct Number(u32);
 
     #[test]
@@ -967,14 +1107,18 @@ mod test {
         async fn create(tx: spsc::Sender<()>, mut facade: Facade) -> anyhow::Result<()> {
             log::info!("create running");
             tx.try_send(()).unwrap();
-            let (mut entities, mut archset): (Write<Entities>, Write<Components>) =
-                facade.fetch().await?;
-            for n in 0..100u32 {
-                let e = entities.create();
-                archset.insert_bundle(e.id(), (format!("entity_{}", n), n))
-            }
+            facade
+                .visit(
+                    |(mut entities, mut archset): (Write<Entities>, Write<Components>)| {
+                        for n in 0..100u32 {
+                            let e = entities.create();
+                            archset.insert_bundle(e.id(), (format!("entity_{}", n), n));
+                        }
 
-            Ok(())
+                        Ok(())
+                    },
+                )
+                .await
         }
 
         fn maintain_map(
@@ -982,7 +1126,11 @@ mod test {
         ) -> anyhow::Result<ShouldContinue> {
             for (name, number) in data.0.query().iter_mut() {
                 if !data.1.inner().0.contains_key(name.value()) {
-                    let _ = data.1.inner_mut().0.insert(name.to_string(), *number.value());
+                    let _ = data
+                        .1
+                        .inner_mut()
+                        .0
+                        .insert(name.to_string(), *number.value());
                 }
             }
 
@@ -1008,54 +1156,6 @@ mod test {
         for n in 0..100 {
             assert_eq!(book.0.get(&format!("entity_{}", n)), Some(&n));
         }
-    }
-
-    #[test]
-    fn can_run_async_systems_that_both_borrow_reads() {
-        let _ = env_logger::builder()
-            .is_test(true)
-            .filter_level(log::LevelFilter::Trace)
-            .try_init();
-
-        struct DataOne(u32, mpsc::Sender<u32>);
-        impl TryDefault for DataOne {}
-
-        async fn asys(mut facade: Facade) -> anyhow::Result<()> {
-            log::info!("running asys");
-            {
-                let data = facade.fetch::<Write<DataOne>>().await?;
-                log::info!("asys fetched data");
-
-                // hold the fetched data over another await point
-                use async_timer::oneshot::Oneshot;
-                async_timer::oneshot::Timer::new(std::time::Duration::from_millis(50)).await;
-                log::info!("asys passed timer");
-
-                data.deref().1.send(data.deref().0).await?;
-            }
-            Ok(())
-        }
-
-        fn sys(mut data: Write<DataOne>) -> anyhow::Result<ShouldContinue> {
-            log::info!("running sys");
-            data.deref_mut().0 += 1;
-            ok()
-        }
-
-        let (tx, rx) = mpsc::bounded(1);
-        let mut world = World::default();
-        world
-            .with_resource(DataOne(0, tx))
-            .unwrap()
-            .with_async_system("asys", asys)
-            .with_system("sys", sys)
-            .unwrap();
-        // it takes two ticks for asys to run:
-        // 1. execute up to the first await point
-        // 2. deliver resources and compute the rest
-        world.tick();
-        world.tick();
-        assert_eq!(Some(1), rx.try_recv().ok());
     }
 
     #[test]
@@ -1103,9 +1203,12 @@ mod test {
         world.with_async_system("test", |mut facade| async move {
             await_points.lock().unwrap().push(1);
             let mut e = {
-                let mut entities: Write<Entities> = facade.fetch().await?;
+                let e = facade
+                    .visit(|mut entities: Write<Entities>| Ok(entities.create()))
+                    .await
+                    .unwrap();
                 await_points.lock().unwrap().push(2);
-                entities.create()
+                e
             };
 
             e.insert_bundle((Name("ada"), Age(666)));
@@ -1141,7 +1244,7 @@ mod test {
 
     #[test]
     fn plugin_inserts_resources_from_canfetch_in_systems() {
-        #[derive(Default, TryDefault)]
+        #[derive(Default)]
         struct MyStr(&'static str);
 
         let _ = env_logger::builder()
@@ -1150,9 +1253,7 @@ mod test {
             .try_init();
 
         let mut world = World::default();
-        world
-            .with_system("test", |_: Write<MyStr>| ok())
-            .unwrap();
+        world.with_system("test", |_: Write<MyStr>| ok()).unwrap();
         let s = world.resource_mut::<MyStr>().unwrap();
         s.0 = "blah";
     }
@@ -1198,16 +1299,23 @@ mod test {
         world
             .with_async_system("one", |mut facade: Facade| -> AsyncSystemFuture {
                 Box::pin(async move {
-                    let mut number: Write<Number> = facade.fetch().await?;
-                    number.inner_mut().0 = 1;
-                    Ok(())
+                    facade
+                        .visit(|mut number: Write<Number>| {
+                            number.inner_mut().0 = 1;
+                            Ok(())
+                        })
+                        .await
                 })
             })
             .with_async_system("two", |mut facade: Facade| -> AsyncSystemFuture {
                 Box::pin(async move {
                     for _ in 0..2 {
-                        let mut number: Write<Number> = facade.fetch().await?;
-                        number.inner_mut().0 = 2;
+                        facade
+                            .visit(|mut number: Write<Number>| {
+                                number.inner_mut().0 = 2;
+                                Ok(())
+                            })
+                            .await?;
                     }
                     Ok(())
                 })
@@ -1215,8 +1323,12 @@ mod test {
             .with_async_system("three", |mut facade: Facade| -> AsyncSystemFuture {
                 Box::pin(async move {
                     for _ in 0..3 {
-                        let mut number: Write<Number> = facade.fetch().await?;
-                        number.inner_mut().0 = 3;
+                        facade
+                            .visit(|mut number: Write<Number>| {
+                                number.inner_mut().0 = 3;
+                                Ok(())
+                            })
+                            .await?;
                     }
                     Ok(())
                 })

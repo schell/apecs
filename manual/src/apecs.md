@@ -71,8 +71,10 @@ struct DataOne(u32);
         log::info!("running sys");
 
         loop {
-            let mut data: Write<DataOne> = facade.fetch().await.unwrap();
-            data.0 += 1;
+            facade.visit(|mut data: Write<DataOne>| {
+                data.0 += 1;
+                Ok(())
+            }).await?;
         }
 
         Ok(())

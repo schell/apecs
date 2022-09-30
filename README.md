@@ -49,7 +49,7 @@ systems do the hot-path work that completes those async operations as fast as po
   ```rust
   use apecs::*;
 
-  #[derive(Clone, Copy, Debug, Default, TryDefault, PartialEq)]
+  #[derive(Clone, Copy, Debug, Default, PartialEq)]
   struct Number(u32);
 
   let mut world = World::default();
@@ -67,22 +67,24 @@ systems do the hot-path work that completes those async operations as fast as po
   assert_eq!(Number(3), *world.resource::<Number>().unwrap());
   ```
 - async systems, ie systems that end and/or change over time (for scenes, stories, etc)
-  - fetch resources from the world asyncronously. If they have not been added and can be
+  - fetch and visit resources from the world asyncronously. If they have not been added and can be
     created by default, they will be. `Write` and `Read` will create default resources
-    during fetching using `TryDefault::try_default` if possible.
+    during fetching if possible.
   - resources are acquired without lifetimes
   - when fetched resources are dropped they are sent back into the world
   ```rust
   use apecs::*;
 
-  #[derive(Clone, Copy, Debug, Default, TryDefault, PartialEq)]
+  #[derive(Clone, Copy, Debug, Default, PartialEq)]
   struct Number(u32);
 
   async fn demo(mut facade: Facade) -> anyhow::Result<()> {
       loop {
-          let mut u32_number: Write<Number> = facade.fetch().await?;
-          u32_number.0 += 1;
-          if u32_number.0 > 5 {
+          let i = facade.visit(|mut u32_number: Write<Number>| {
+              u32_number.0 += 1;
+              Ok(u32_number.0)
+          }).await?;
+          if i > 5 {
               break;
           }
       }
@@ -109,7 +111,7 @@ systems do the hot-path work that completes those async operations as fast as po
   ```rust
   use apecs::*;
 
-  #[derive(Default, TryDefault)]
+  #[derive(Default)]
   struct U32(u32);
 
   #[derive(CanFetch)]
@@ -130,10 +132,10 @@ systems do the hot-path work that completes those async operations as fast as po
   ```rust
   use apecs::*;
 
-  #[derive(Default, TryDefault)]
+  #[derive(Default)]
   struct U32(u32);
 
-  #[derive(Default, TryDefault)]
+  #[derive(Default)]
   struct F32(f32);
 
   fn one(mut u32_number: Write<U32>) -> anyhow::Result<ShouldContinue> {
@@ -207,7 +209,7 @@ systems do the hot-path work that completes those async operations as fast as po
   use apecs::*;
 
   // Make a type for tracking changes
-  #[derive(Default, TryDefault)]
+  #[derive(Default)]
   struct MyTracker(u64);
 
   // Entities and Components (which stores components) are default
@@ -268,7 +270,7 @@ systems do the hot-path work that completes those async operations as fast as po
   ```rust
   use apecs::*;
 
-  #[derive(Default, TryDefault)]
+  #[derive(Default)]
   struct F32(f32);
 
   let mut world = World::default();
@@ -292,7 +294,7 @@ systems do the hot-path work that completes those async operations as fast as po
   ```rust
   use apecs::*;
 
-  #[derive(Default, TryDefault)]
+  #[derive(Default)]
   struct MyTracker(u64);
 
   #[derive(CanFetch)]

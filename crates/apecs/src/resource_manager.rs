@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::TryDefault;
+use crate::Gen;
 
 use super::{
     chan::mpsc,
@@ -241,7 +241,7 @@ impl<'a> LoanManager<'a> {
         self.0.get_loaned(label, borrow)
     }
 
-    pub fn get_loaned_or_try_default<T: IsResource + TryDefault>(
+    pub fn get_loaned_or_gen<T: IsResource, G: Gen<T>>(
         &mut self,
         label: &str,
         borrow: &Borrow,
@@ -254,7 +254,7 @@ impl<'a> LoanManager<'a> {
                 "{} was missing in resources, so we'll try to create it from default",
                 std::any::type_name::<T>()
             );
-            let t: T = T::try_default()
+            let t: T = G::generate()
                 .with_context(|| format!("could not make default value for {}", rez_id.name))?;
             let prev = self.0.insert(ResourceId::new::<T>(), Box::new(t));
             debug_assert!(prev.is_none());
@@ -275,11 +275,11 @@ impl<'a> LoanManager<'a> {
 
 #[cfg(test)]
 mod test {
-    use crate::{self as apecs, CanFetch, Write};
+    use crate::{CanFetch, Write};
 
     use super::*;
 
-    #[derive(Default, apecs_derive::TryDefault)]
+    #[derive(Default)]
     struct MyVec(Vec<&'static str>);
     impl MyVec {
         fn push(&mut self, s: &'static str) {

@@ -1,4 +1,10 @@
-//! *A*syncronous and *P*leasant *E*ntity *C*omponent *S*ystem
+//! Welcome to the docs of the *A*syncronous and *P*leasant *E*ntity *C*omponent *S*ystem 😊
+//!
+//! `apecs` is a flexible and well-performing entity-component-system libary that includes
+//! support for asynchronous systems.
+//!
+//! A good place to start learning about `apecs` is
+//! It's best to start learning about `apecs` from the [`World`].
 #![allow(clippy::type_complexity)]
 
 use ::anyhow::Context;
@@ -27,7 +33,6 @@ mod world;
 #[cfg(feature = "derive")]
 pub use apecs_derive::CanFetch;
 #[cfg(feature = "derive")]
-pub use apecs_derive::TryDefault;
 pub use fetch::*;
 pub use plugin::Plugin;
 pub use rustc_hash::FxHashMap;
@@ -70,6 +75,13 @@ pub mod chan {
         pub struct Channel<T> {
             pub tx: Sender<T>,
             pub rx: InactiveReceiver<T>,
+        }
+
+        /// By default a channel is created with a capacity of `1`.
+        impl<T: Clone> Default for Channel<T> {
+            fn default() -> Self {
+                Self::new_with_capacity(1)
+            }
         }
 
         impl<T: Clone> Channel<T> {
@@ -196,48 +208,16 @@ pub mod internal {
 pub trait IsResource: Any + Send + Sync + 'static {}
 impl<T: Any + Send + Sync + 'static> IsResource for T {}
 
-/// Optional default creation.
-///
-/// This is used to attempt to create resources when they don't already exist
-/// in the world. See [`Read`](crate::Read) and [`Write`](crate::Write).
-///
-/// This trait can be derived, so long as the type also has a [`Default`]
-/// instance: ```rust
-/// use apecs::*;
-///
-/// #[derive(Debug, Default, TryDefault, PartialEq)]
-/// struct MyVec(Vec<String>);
-///
-/// assert_eq!(MyVec(vec![]), MyVec::try_default().unwrap());
-/// ```
-///
-/// The default implementation of `try_default` returns `None`:
-/// ```rust
-/// use apecs::*;
-///
-/// #[derive(Debug, PartialEq)]
-/// struct MyVec(Vec<String>);
-///
-/// impl TryDefault for MyVec {}
-///
-/// assert_eq!(None, MyVec::try_default());
-/// ```
-pub trait TryDefault: Sized {
-    fn try_default() -> Option<Self> {
-        None
-    }
-}
-
 /// Wrapper for one fetched resource.
 ///
 /// When dropped, the wrapped resource will be sent back to the world.
-pub(crate) struct Fetched<T: IsResource + TryDefault> {
+pub(crate) struct Fetched<T: IsResource> {
     // should be unbounded, `send` should never fail
     resource_return_tx: chan::mpsc::Sender<(ResourceId, Resource)>,
     inner: Option<Box<T>>,
 }
 
-impl<'a, T: IsResource + TryDefault> Deref for Fetched<T> {
+impl<'a, T: IsResource> Deref for Fetched<T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -245,13 +225,13 @@ impl<'a, T: IsResource + TryDefault> Deref for Fetched<T> {
     }
 }
 
-impl<'a, T: IsResource + TryDefault> DerefMut for Fetched<T> {
+impl<'a, T: IsResource> DerefMut for Fetched<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.inner.as_mut().unwrap()
     }
 }
 
-impl<'a, T: IsResource + TryDefault> Drop for Fetched<T> {
+impl<'a, T: IsResource> Drop for Fetched<T> {
     fn drop(&mut self) {
         if let Some(inner) = self.inner.take() {
             self.resource_return_tx
@@ -261,18 +241,65 @@ impl<'a, T: IsResource + TryDefault> Drop for Fetched<T> {
     }
 }
 
+/// Used to generate a default value of a resource, if possible.
+pub trait Gen<T> {
+    fn generate() -> Option<T>;
+}
+
+/// Valueless type that represents the ability to generate a resource by
+/// default.
+pub struct SomeDefault;
+
+impl<T: Default> Gen<T> for SomeDefault {
+    fn generate() -> Option<T> {
+        Some(T::default())
+    }
+}
+
+/// Valueless type that represents the **inability** to generate a resource by
+/// default.
+pub struct NoDefault;
+
+impl<T> Gen<T> for NoDefault {
+    fn generate() -> Option<T> {
+        None
+    }
+}
+
 /// A mutably borrowed resource that may be created by default.
 ///
 /// [`Read`] and [`Write`] are the main way systems interact with resources.
-/// When [`fetch`](crate::World::fetch)ed The wrapped type `T` will
-/// automatically be created, if it doesn't already exist and if possible,
-/// according to its [`TryDefault`] implementation.
+/// When [`fetch`](crate::World::fetch)ed the wrapped type `T` will
+/// automatically be created by default. If fetched as `Write<T, NoDefault>` the
+/// fetch will err if the resource doesn't already exist.
 ///
-/// The resource is then automatically sent back to the world on drop. For this
-/// reason, when writing async systems you must take care to drop fetched resources.
-pub struct Write<T: IsResource + TryDefault>(Fetched<T>);
+/// After a successful fetch, the resource will be automatically sent back to
+/// the world on drop. For this reason, when writing async systems you must take
+/// care to drop the fetched resources before your code crosses an await point.
+///
+/// `Write` has two type parameters:
+/// * `T` - The type of the resource.
+/// * `G` - The method by which the resource can be generated if it doesn't
+///   exist. By default this is [`SomeDefault`], which denotes creating the
+///   resource using its default instance. Another option is [`NoDefault`] which
+///   fails to generate the resource.
+///
+/// ```rust
+/// use apecs::*;
+///
+/// let mut world = World::default();
+/// {
+///     let default_number = world.fetch::<Read<u32>>();
+///     assert_eq!(Some(0), default_number.map(|n| *n).ok());
+/// }
+/// {
+///     let no_number = world.fetch::<Read<f32, NoDefault>>();
+///     assert!(no_number.is_err());
+/// }
+/// ```
+pub struct Write<T: IsResource, G: Gen<T> = SomeDefault>(Fetched<T>, PhantomData<G>);
 
-impl<T: IsResource + TryDefault> Deref for Write<T> {
+impl<T: IsResource, G: Gen<T>> Deref for Write<T, G> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -280,13 +307,13 @@ impl<T: IsResource + TryDefault> Deref for Write<T> {
     }
 }
 
-impl<'a, T: IsResource + TryDefault> DerefMut for Write<T> {
+impl<T: IsResource, G: Gen<T>> DerefMut for Write<T, G> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.0.inner.as_mut().unwrap()
     }
 }
 
-impl<'a, T: TryDefault + Send + Sync + 'static> IntoIterator for &'a Write<T>
+impl<'a, T: Send + Sync + 'static, G: Gen<T>> IntoIterator for &'a Write<T, G>
 where
     &'a T: IntoIterator,
 {
@@ -299,7 +326,7 @@ where
     }
 }
 
-impl<'a, T: TryDefault + Send + Sync + 'static> IntoParallelIterator for &'a Write<T>
+impl<'a, T: Send + Sync + 'static, G: Gen<T>> IntoParallelIterator for &'a Write<T, G>
 where
     &'a T: IntoParallelIterator,
 {
@@ -312,7 +339,7 @@ where
     }
 }
 
-impl<'a, T: TryDefault + Send + Sync + 'static> IntoIterator for &'a mut Write<T>
+impl<'a, T: Send + Sync + 'static, G: Gen<T>> IntoIterator for &'a mut Write<T, G>
 where
     &'a mut T: IntoIterator,
 {
@@ -325,7 +352,7 @@ where
     }
 }
 
-impl<'a, T: TryDefault + Send + Sync + 'static> IntoParallelIterator for &'a mut Write<T>
+impl<'a, T: Send + Sync + 'static, G: Gen<T>> IntoParallelIterator for &'a mut Write<T, G>
 where
     &'a mut T: IntoParallelIterator,
 {
@@ -338,31 +365,56 @@ where
     }
 }
 
-impl<T: IsResource + TryDefault> Write<T> {
+impl<T: IsResource, G: Gen<T>> Write<T, G> {
+    /// An explicit method of getting a reference to the inner type without `Deref`.
     pub fn inner(&self) -> &T {
         self.deref()
     }
 
+    /// An explicit method of getting a mutable reference to the inner type without `DerefMut`.
     pub fn inner_mut(&mut self) -> &mut T {
         self.deref_mut()
     }
 }
 
-/// Immutably borrowed resource that may also be created by default.
+/// Immutably borrowed resource that may be created by default.
 ///
 /// [`Read`] and [`Write`] are the main way systems interact with resources.
 /// When [`fetch`](crate::World::fetch)ed The wrapped type `T` will
-/// automatically be created, if it doesn't already exist and if possible,
-/// according to its [`TryDefault`] implementation.
+/// automatically be created b default. If fetched as `Write<T, NoDefault>` the
+/// fetch will err if the resource doesn't already exist.
 ///
-/// The resource is then automatically sent back to the world on drop. For this
-/// reason, when writing async systems you must take care to drop fetched resources.
-pub struct Read<T: IsResource + TryDefault> {
+/// After a successful fetch, the resource will be automatically sent back to
+/// the world on drop. For this reason, when writing async systems you must take
+/// care to drop the fetched resources before your code crosses an await point.
+///
+/// `Read` has two type parameters:
+/// * `T` - The type of the resource.
+/// * `G` - The method by which the resource can be generated if it doesn't
+///   exist. By default this is [`SomeDefault`], which denotes creating the
+///   resource using its default instance. Another option is [`NoDefault`] which
+///   fails to generate the resource.
+///
+/// ```rust
+/// use apecs::*;
+///
+/// let mut world = World::default();
+/// {
+///     let default_number = world.fetch::<Read<u32>>();
+///     assert_eq!(Some(0), default_number.map(|n| *n).ok());
+/// }
+/// {
+///     let no_number = world.fetch::<Read<f32, NoDefault>>();
+///     assert!(no_number.is_err());
+/// }
+/// ```
+pub struct Read<T: IsResource, G: Gen<T> = SomeDefault> {
     inner: Arc<Resource>,
-    _phantom: PhantomData<T>,
+    _phantom_t: PhantomData<T>,
+    _phantom_g: PhantomData<G>,
 }
 
-impl<'a, T: IsResource + TryDefault> Deref for Read<T> {
+impl<'a, T: IsResource, G: Gen<T>> Deref for Read<T, G> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -370,7 +422,7 @@ impl<'a, T: IsResource + TryDefault> Deref for Read<T> {
     }
 }
 
-impl<'a, T: TryDefault + Send + Sync + 'static> IntoIterator for &'a Read<T>
+impl<'a, T: Send + Sync + 'static, G: Gen<T>> IntoIterator for &'a Read<T, G>
 where
     &'a T: IntoIterator,
 {
@@ -383,7 +435,7 @@ where
     }
 }
 
-impl<'a, S: TryDefault + Send + Sync + 'static> IntoParallelIterator for &'a Read<S>
+impl<'a, S: Send + Sync + 'static, G: Gen<S>> IntoParallelIterator for &'a Read<S, G>
 where
     &'a S: IntoParallelIterator,
 {
@@ -396,7 +448,8 @@ where
     }
 }
 
-impl<T: IsResource + TryDefault> Read<T> {
+impl<T: IsResource, G: Gen<T>> Read<T, G> {
+    /// An explicit method of getting a reference to the inner type without `Deref`.
     pub fn inner(&self) -> &T {
         self.deref()
     }
@@ -462,7 +515,7 @@ pub trait CanFetch: Send + Sync + Sized {
     }
 }
 
-impl<'a, T: IsResource + TryDefault> CanFetch for Write<T> {
+impl<'a, T: IsResource, G: Gen<T> + IsResource> CanFetch for Write<T, G> {
     fn borrows() -> Vec<internal::Borrow> {
         vec![internal::Borrow {
             id: ResourceId::new::<T>(),
@@ -476,7 +529,7 @@ impl<'a, T: IsResource + TryDefault> CanFetch for Write<T> {
             is_exclusive: true,
         };
         let t: FetchReadyResource =
-            loan_mngr.get_loaned_or_try_default::<T>("Write::construct", &borrow)?;
+            loan_mngr.get_loaned_or_gen::<T, G>("Write::construct", &borrow)?;
         let t = t.into_owned().context("resource is not owned")?;
         let inner: Option<Box<T>> = Some(t.downcast::<T>().map_err(|_| {
             anyhow::anyhow!(
@@ -488,15 +541,16 @@ impl<'a, T: IsResource + TryDefault> CanFetch for Write<T> {
             resource_return_tx: loan_mngr.resource_return_tx(),
             inner,
         };
-        Ok(Write(fetched))
+        Ok(Write(fetched, PhantomData))
     }
 
     fn plugin() -> Plugin {
-        Plugin::default().with_resource::<T>()
+        Plugin::default()
+            .with_dependent_resource(|_: ()| G::generate().context("could not generate"))
     }
 }
 
-impl<'a, T: IsResource + TryDefault> CanFetch for Read<T> {
+impl<'a, T: IsResource, G: Gen<T> + IsResource> CanFetch for Read<T, G> {
     fn borrows() -> Vec<internal::Borrow> {
         vec![internal::Borrow {
             id: ResourceId::new::<T>(),
@@ -510,22 +564,25 @@ impl<'a, T: IsResource + TryDefault> CanFetch for Read<T> {
             is_exclusive: false,
         };
         let t: FetchReadyResource =
-            loan_mngr.get_loaned_or_try_default::<T>("Read::construct", &borrow)?;
+            loan_mngr.get_loaned_or_gen::<T, G>("Read::construct", &borrow)?;
         let inner = t.into_ref().context("resource is not borrowed")?;
         Ok(Read {
             inner,
-            _phantom: PhantomData,
+            _phantom_t: PhantomData,
+            _phantom_g: PhantomData,
         })
     }
 
     fn plugin() -> Plugin {
-        Plugin::default().with_resource::<T>()
+        Plugin::default()
+            .with_dependent_resource(|_: ()| G::generate().context("could not generate"))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::chan::mpsc;
+    use crate::{World, Write};
 
     #[test]
     fn unbounded_channel_doesnt_yield_on_send_and_await() {
@@ -593,10 +650,14 @@ mod tests {
     }
 
     #[test]
-    fn try_default_test() {
-        use crate as apecs;
-
-        #[derive(apecs_derive::TryDefault)]
-        struct A<T>(T);
+    fn can_compile_write_without_trydefault() {
+        let mut world = World::default();
+        world.with_resource(0.0f32).unwrap();
+        {
+            let _f32_num = world.resource_mut::<f32>().unwrap();
+        }
+        {
+            let _f32_num = world.fetch::<Write<f32>>().unwrap();
+        }
     }
 }

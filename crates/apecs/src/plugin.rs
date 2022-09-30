@@ -5,14 +5,12 @@
 //! [`crate::World::with_plugin`].
 use std::future::Future;
 
-use anyhow::Context;
-
 use crate::{
     resource_manager::LoanManager,
     schedule::Dependency,
     system::{AsyncSystemFuture, ShouldContinue, SyncSystem},
     world::Facade,
-    CanFetch, IsResource, LazyResource, TryDefault,
+    CanFetch, IsResource, LazyResource,
 };
 
 pub struct SyncSystemWithDeps(pub SyncSystem);
@@ -78,19 +76,15 @@ impl Plugin {
         self
     }
 
-    /// Add a dependency on a resource that may be created with
-    /// [`TryDefault::try_default()`].
+    /// Add a dependency on a resource that can be created with
+    /// [`Default::default`].
     ///
     /// If this resource does not already exist in the world at the time this
     /// plugin is instantiated, it will be inserted into the
-    /// [`World`](crate::World), if possible - otherwise instantiation will
-    /// err.
-    pub fn with_resource<T: IsResource + TryDefault>(mut self) -> Self {
-        self.resources.push(LazyResource::new(|_| {
-            T::try_default().with_context(|| {
-                format!("{}::try_default returned None", std::any::type_name::<T>())
-            })
-        }));
+    /// [`World`](crate::World).
+    pub fn with_resource<T: IsResource + Default>(mut self) -> Self {
+        self.resources
+            .push(LazyResource::new(|_| Ok(T::default())));
         self
     }
 
@@ -163,7 +157,7 @@ impl Plugin {
 mod test {
     use crate::{self as apecs, storage::*, system::*, world::World, CanFetch, Plugin, Read};
 
-    #[derive(Default, apecs_derive::TryDefault)]
+    #[derive(Default)]
     pub struct Number(u32);
 
     #[derive(apecs_derive::CanFetch)]

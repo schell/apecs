@@ -19,25 +19,30 @@ async fn can_run_async() {
 
 #[wasm_bindgen_test]
 fn parallelism() {
-    #[derive(Default, apecs_derive::TryDefault)]
+    #[derive(Default)]
     struct Number(u32);
 
     async fn one(mut facade: Facade) -> anyhow::Result<()> {
-        let mut number: Write<Number> = facade.fetch().await?;
-        number.0 = 1;
-        Ok(())
+        facade.visit(|mut number: Write<Number>| {
+            number.0 = 1;
+            Ok(())
+        }).await
     }
     async fn two(mut facade: Facade) -> anyhow::Result<()> {
         for _ in 0..2 {
-            let mut number: Write<Number> = facade.fetch().await?;
-            number.0 = 2;
+            facade.visit(|mut number: Write<Number>| {
+                number.0 = 2;
+                Ok(())
+            }).await?;
         }
         Ok(())
     }
     async fn three(mut facade: Facade) -> anyhow::Result<()> {
         for _ in 0..3 {
-            let mut number: Write<Number> = facade.fetch().await?;
-            number.0 = 3;
+            facade.visit(|mut number: Write<Number>| {
+                number.0 = 3;
+                Ok(())
+            }).await?;
         }
         Ok(())
     }
