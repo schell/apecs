@@ -7,7 +7,40 @@ use super::{bundle::*, Archetype, Entry};
 
 /// The set of all entities' components.
 ///
-/// Exists in [`World`](crate::World) by default.
+/// Exists as a resource in the [`World`](crate::World) by default.
+///
+/// `Components` is the store that holds every entity's components. It is an
+/// archetypal storage, which means it is optimized for fast traversal and
+/// space-saving (in terms of CPU memory).
+///
+/// Use `Components` when you need to add or remove components from entities
+/// eagerly and immediately. For this you will need a mutable reference, which
+/// means it will block access to `Components` by other systems. If you don't
+/// need to see the effects of your changes immediately you can use
+/// [`crate::Entity::insert_bundle`], which works lazily (changes appear at the
+/// end of each frame), and within an async context [`crate::Entity::updates`]
+/// will return a future that completes when these changes have resolved.
+///
+/// Here's an example of a syncronous system that creates and updates an entity
+/// immediately:
+/// ```
+/// # use apecs::*;
+/// fn mk_ent(
+///     (mut entities, mut components): (Write<Entities>, Write<Components>),
+/// ) -> anyhow::Result<ShouldContinue> {
+///     let e = entities.create();
+///     components.insert_bundle(e.id(), (123, "123", 123.0));
+///     end()
+/// }
+/// let mut world = World::default();
+/// world.with_system("mk_ent", mk_ent).unwrap();
+/// world.run();
+/// ```
+///
+/// ## A note about bundles
+/// Component archetypes (the collection of unique components for a set of entities) are
+/// made up of bundles. Bundles are tuples that implement [`IsBundle`]. Each component element
+/// in a bundle must be unique and `'static`. `IsBundle` is implemented by tuples sized 1 to 12.
 #[derive(Debug)]
 pub struct Components {
     pub(crate) archetypes: Vec<Archetype>,

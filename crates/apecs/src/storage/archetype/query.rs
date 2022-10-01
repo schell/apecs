@@ -694,16 +694,25 @@ pub type QueryIter<'a, 'b, Q> = std::iter::FlatMap<
 >;
 
 /// A prepared and active query.
+///
+/// Iterate over queried items using [`QueryGuard::iter_mut`].
 pub struct QueryGuard<'a, Q: IsQuery + ?Sized>(Vec<Q::LockedColumns<'a>>, &'a Components);
 
 impl<'a, Q> QueryGuard<'a, Q>
 where
     Q: IsQuery + ?Sized,
 {
+    /// Iterate over matched component bundles.
+    ///
+    /// Each component is wrapped with [`Entry`], which provides access
+    /// to the entity id and modification data.
     pub fn iter_mut(&mut self) -> QueryIter<'a, '_, Q> {
         self.0.iter_mut().flat_map(|cols| Q::iter_mut(cols))
     }
 
+    /// Find the component bundle with the given entity id.
+    ///
+    /// This does not iterate. It locates the item by index.
     pub fn find_one(&mut self, entity_id: usize) -> Option<Q::QueryRow<'_>> {
         self.1
             .entity_lookup
@@ -717,6 +726,10 @@ where
             })
     }
 
+    /// Iterate over matched component bundles, in parallel.
+    ///
+    /// Each component is wrapped with [`Entry`], which provides access
+    /// to the entity id and modification data.
     pub fn par_iter_mut(
         &mut self,
     ) -> rayon::iter::Flatten<rayon::vec::IntoIter<<Q as IsQuery>::ParQueryResult<'_>>> {
@@ -730,12 +743,74 @@ where
     }
 }
 
-/// Queries can be used iterate over matching bundles of components.
+/// Queries are used to iterate over matching bundles of components.
 ///
 /// `Query`s are written as a tuple of component column types, where each
-/// position in the tuple denotes a column value in the resulting iteration
-/// tuple.
+/// position in the tuple denotes a column value in each item of the resulting
+/// query iterator. Each item column type will be wrapped in [`Entry`] in the
+/// resulting query iterator.
 ///
+/// For example: `Query<(&mut f32, &String)>` will result in an iterator of
+/// items with the type `(&mut Entry<f32>, &Entry<String>)`.
+///
+/// ## Creating queries
+/// Some functions query immidiately and return [`QueryGuard`]:
+/// * [`World::query`](crate::World::query)
+/// * [`Components::query`]
+/// * [`Entity::visit`](crate::Entity::visit)
+///
+/// With these functions you pass component column types as a type parameter:
+/// ```
+/// # use apecs::*;
+/// # let mut world = World::default();
+/// let mut query = world.query::<(&f32, &String)>();
+/// for (f32, string) in query.iter_mut() {
+///     //...
+/// }
+/// ```
+///
+/// ### System data queries
+/// `Query` implements [`CanFetch`], which allows you to use queries
+/// as fields inside system data structs:
+///
+/// ```
+/// # use apecs::*;
+/// #[derive(CanFetch)]
+/// struct MySystemData {
+///     counter: Write<u32>,
+///     // we use &'static to avoid introducing a lifetime
+///     q_f32_and_string: Query<(&'static f32, &'static String)>,
+/// }
+/// ```
+///
+/// Which means queries may be [`fetch`](crate::World::fetch)ed from the world,
+/// [`visit`](crate::Facade::visit)ed from a facade or used as the input to a
+/// system: ```
+/// # use apecs::*;
+/// #
+/// #[derive(CanFetch)]
+/// struct MySystemData {
+///     tracker: Write<u64>,
+///     // we can use Mut and Ref which are aliases for &'static mut and &'static
+///     q_f32_and_string: Query<(Mut<f32>, Ref<String>)>,
+/// }
+/// let mut world = World::default();
+/// world
+///     .with_system("query_example", |mut data: MySystemData| {
+///         for (f32, string) in data.q_f32_and_string.query().iter_mut() {
+///             if f32.was_modified_since(*data.tracker) {
+///                 **f32 += 1.0;
+///                 println!("set entity {} = {}", f32.id(), **f32);
+///             }
+///         }
+///         *data.tracker = apecs::current_iteration();
+///         ok()
+///     })
+///     .unwrap();
+/// world.tick();
+/// ```
+///
+/// ## Iterating queries
 /// Below we use mutable and immutable reference types in our query to include
 /// either a mutable or immutable reference to those components:
 /// ```rust
@@ -746,26 +821,35 @@ where
 /// struct Acceleration(pub f32);
 ///
 /// let mut world = World::default();
-/// {
-///     let mut entities: Write<Entities> = world.fetch().unwrap();
-///     for i in 0..100 {
-///         entities
-///             .create()
-///             .insert_bundle((Position(0.0), Velocity(0.0), Acceleration(i as f32)));
-///     }
-/// }
-/// {
-///     let q_accelerate: Query<(&mut Velocity, &Acceleration)> = world.fetch().unwrap();
-///     for (v, a) in q_accelerate.query().iter_mut() {
-///         v.0 += a.0;
-///     }
-/// }
-/// {
-///     let q_move: Query<(&mut Position, &Velocity)> = world.fetch().unwrap();
-///     for (p, v) in q_move.query().iter_mut() {
-///         p.0 += v.0;
-///     }
-/// }
+/// world
+///     .with_system("create", |mut entities: Write<Entities>| {
+///         for i in 0..100 {
+///             entities.create().insert_bundle((
+///                 Position(0.0),
+///                 Velocity(0.0),
+///                 Acceleration(i as f32),
+///             ));
+///         }
+///         end()
+///     })
+///     .unwrap()
+///     .with_system(
+///         "accelerate",
+///         |q_accelerate: Query<(&mut Velocity, &Acceleration)>| {
+///             for (v, a) in q_accelerate.query().iter_mut() {
+///                 v.0 += a.0;
+///             }
+///             ok()
+///         },
+///     )
+///     .unwrap()
+///     .with_system("move", |q_move: Query<(&mut Position, &Velocity)>| {
+///         for (p, v) in q_move.query().iter_mut() {
+///             p.0 += v.0;
+///         }
+///         ok()
+///     })
+///     .unwrap();
 /// ````
 pub struct Query<T>(
     Box<dyn Deref<Target = Components> + Send + Sync + 'static>,

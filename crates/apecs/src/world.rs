@@ -23,10 +23,10 @@ use crate::{
     CanFetch, IsResource, LazyResource, Request, Resource, ResourceId, Write,
 };
 
-/// Fetches world resources in async systems.
+/// Visits world resources from async systems.
 ///
 /// A facade is a window into the world, by which an async system can interact
-/// with the world without causing resource contention.
+/// with the world through [`Facade::visit`], without causing resource contention.
 pub struct Facade {
     // Unbounded. Sending a request from the system should not yield the async
     pub(crate) resource_request_tx: spsc::Sender<Request>,
@@ -39,9 +39,9 @@ impl Facade {
     ///
     /// The closure may return data to the caller.
     ///
-    /// A roundtrip takes one frame.
+    /// A roundtrip takes at most one frame.
     ///
-    /// Using a closure ensures that no fetched system resources are held over
+    /// **Note**: Using a closure ensures that no fetched system resources are held over
     /// an await point, which would preclude other systems from accessing
     /// them and susequently being able to run.
     pub async fn visit<D: CanFetch + Send + Sync + 'static, T: Send + Sync + 'static>(

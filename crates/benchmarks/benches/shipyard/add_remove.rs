@@ -7,7 +7,7 @@ pub struct Benchmark(World, Vec<EntityId>);
 
 impl Benchmark {
     pub fn new() -> Self {
-        let world = World::default();
+        let mut world = World::default();
 
         let entities = world
             .run(|mut entities: EntitiesViewMut, mut a: ViewMut<A>| {

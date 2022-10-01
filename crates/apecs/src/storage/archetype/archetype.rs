@@ -8,6 +8,24 @@ use smallvec::SmallVec;
 use super::bundle::*;
 
 /// A component value along with its entity's id and change tracking information.
+///
+/// An entry is returned from component queries. It is a wrapper around a component
+/// that provides extra information about the last time the component was modified.
+///
+/// `Entry` implements [`Deref`] and [`DerefMut`], but you can also obtain a reference
+/// to the component value through [`Entry::value`] or [`Entry::value_mut`].
+///
+/// ```
+/// # use apecs::*;
+/// let mut world = World::default();
+/// let e = world.entity_with_bundle((123, "123", 123.0));
+/// let mut query = world.query::<(&mut i32, &f64)>();
+/// let (entry_i32, entry_f64): (&mut Entry<i32>, &Entry<f64>) = query.find_one(e.id()).unwrap();
+/// **entry_i32 = 321;
+/// assert_eq!(321 - 123, **entry_i32 - **entry_f64 as i32);
+/// // both components were added (and one component modified) this iteration
+/// assert_eq!(entry_i32.last_changed(), entry_f64.last_changed());
+/// ```
 #[derive(Clone, Debug, PartialEq)]
 pub struct Entry<T> {
     pub(crate) value: T,
@@ -52,30 +70,25 @@ impl<T> Entry<T> {
         }
     }
 
+    /// Get the identifier of the entity this component is associated with.
     pub fn id(&self) -> usize {
         self.key
     }
 
+    /// Get a reference to the component value.
     pub fn value(&self) -> &T {
-        &self.value
+        self.deref()
     }
 
-    pub fn set_value(&mut self, t: T) {
-        self.mark_changed();
-        self.value = t;
-    }
-
-    pub fn replace_value(&mut self, t: T) -> T {
-        self.mark_changed();
-        std::mem::replace(&mut self.value, t)
+    /// Get a mutable reference to the component value.
+    ///
+    /// This updates the last time this copmonent was changed.
+    pub fn value_mut(&mut self) -> &mut T {
+        self.deref_mut()
     }
 
     pub fn into_inner(self) -> T {
         self.value
-    }
-
-    pub fn split(self) -> (usize, T) {
-        (self.key, self.value)
     }
 
     #[inline]
@@ -84,18 +97,27 @@ impl<T> Entry<T> {
         self.added = false;
     }
 
+    /// Determine if the component has changed since the given
+    /// iteration timestamp.
+    ///
+    /// This includes being added or being modified.
     pub fn has_changed_since(&self, iteration: u64) -> bool {
         self.changed >= iteration
     }
 
+    /// Determine if the component has been added since the given
+    /// iteration timestamp.
     pub fn was_added_since(&self, iteration: u64) -> bool {
         self.changed >= iteration && self.added
     }
 
+    /// Determine if the component has been modified since the given
+    /// iteration timestamp, but has not been added.
     pub fn was_modified_since(&self, iteration: u64) -> bool {
         self.changed >= iteration && !self.added
     }
 
+    /// Return the last time this component was changed.
     pub fn last_changed(&self) -> u64 {
         self.changed
     }

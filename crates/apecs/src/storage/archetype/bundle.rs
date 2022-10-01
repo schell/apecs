@@ -5,8 +5,8 @@ use any_vec::AnyVec;
 use anyhow::Context;
 use smallvec::{smallvec, SmallVec};
 
-use crate::storage::Entry;
 use crate as apecs;
+use crate::storage::Entry;
 
 pub(crate) trait AnyVecExt: Sized {
     fn anyvec_from_iter<C, I>(iter: I) -> Self
