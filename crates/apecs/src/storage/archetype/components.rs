@@ -1,7 +1,11 @@
 //! Operate on all archetypes.
-use std::{any::TypeId, ops::DerefMut};
+use std::{
+    any::TypeId,
+    ops::{Deref, DerefMut},
+};
 
 use any_vec::{any_value::AnyValueMut, AnyVec};
+use parking_lot::{RwLockReadGuard, RwLockWriteGuard};
 
 use super::{bundle::*, Archetype, Entry};
 
@@ -38,9 +42,10 @@ use super::{bundle::*, Archetype, Entry};
 /// ```
 ///
 /// ## A note about bundles
-/// Component archetypes (the collection of unique components for a set of entities) are
-/// made up of bundles. Bundles are tuples that implement [`IsBundle`]. Each component element
-/// in a bundle must be unique and `'static`. `IsBundle` is implemented by tuples sized 1 to 12.
+/// Component archetypes (the collection of unique components for a set of
+/// entities) are made up of bundles. Bundles are tuples that implement
+/// [`IsBundle`]. Each component element in a bundle must be unique and
+/// `'static`. `IsBundle` is implemented by tuples sized 1 to 12.
 #[derive(Debug)]
 pub struct Components {
     pub(crate) archetypes: Vec<Archetype>,
@@ -224,6 +229,50 @@ impl Components {
         }
     }
 
+    /// Returns a reference to a single component, if possible.
+    pub fn get_component<T: Send + Sync + 'static>(
+        &self,
+        entity_id: usize,
+    ) -> Option<impl Deref<Target = T> + '_> {
+        let (archetype_index, component_index) = self
+            .entity_lookup
+            .get(entity_id)
+            .map(Option::as_ref)
+            .flatten()?;
+        let ty = TypeId::of::<Entry<T>>();
+        let ty_index = self.archetypes[*archetype_index].index_of(&ty)?;
+        let col = self.archetypes[*archetype_index].data[ty_index].read();
+        Some(RwLockReadGuard::map(col, |col| {
+            col.get(*component_index)
+                .unwrap()
+                .downcast_ref::<Entry<T>>()
+                .unwrap()
+                .value()
+        }))
+    }
+
+    /// Returns a mutable reference to a single component, if possible.
+    pub fn get_component_mut<T: Send + Sync + 'static>(
+        &mut self,
+        entity_id: usize,
+    ) -> Option<impl DerefMut<Target = T> + '_> {
+        let (archetype_index, component_index) = self
+            .entity_lookup
+            .get(entity_id)
+            .map(Option::as_ref)
+            .flatten()?;
+        let ty = TypeId::of::<Entry<T>>();
+        let ty_index = self.archetypes[*archetype_index].index_of(&ty)?;
+        let col = self.archetypes[*archetype_index].data[ty_index].write();
+        Some(RwLockWriteGuard::map(col, |col| {
+            col.get_mut(*component_index)
+                .unwrap()
+                .downcast_mut::<Entry<T>>()
+                .unwrap()
+                .value_mut()
+        }))
+    }
+
     /// Insert a single component for the given entity.
     ///
     /// Returns the previous component, if available.
@@ -394,6 +443,71 @@ impl Components {
             }
         }
         ids_types
+    }
+}
+
+/// Add components lazily, at the time of your choosing.
+///
+/// Used in instances where you can't apply changes to Components because of a
+/// borrow conflict (eg while iterating over a component query).
+#[derive(Default)]
+pub struct LazyComponents(Vec<Box<dyn FnOnce(&mut Components)>>);
+
+impl Extend<Box<dyn FnOnce(&mut Components)>> for LazyComponents {
+    fn extend<T: IntoIterator<Item = Box<dyn FnOnce(&mut Components)>>>(&mut self, iter: T) {
+        self.0.extend(iter);
+    }
+}
+
+impl IntoIterator for LazyComponents {
+    type Item = Box<dyn FnOnce(&mut Components)>;
+
+    type IntoIter = std::vec::IntoIter<Self::Item>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl LazyComponents {
+    /// Inserts the bundled components for the given entity.
+    pub fn insert_bundle<B: IsBundle + 'static>(&mut self, entity_id: usize, bundle: B) {
+        self.0.push(Box::new(move |components| {
+            components.insert_bundle(entity_id, bundle)
+        }));
+    }
+
+    /// Insert a single component for the given entity.
+    pub fn insert_component<T: Send + Sync + 'static>(&mut self, entity_id: usize, component: T) {
+        self.0.push(Box::new(move |components| {
+            components.insert_component(entity_id, component);
+        }));
+    }
+
+    /// Remove all components of the given entity and return them as a typed
+    /// bundle.
+    pub fn remove<B: IsBundle + 'static>(&mut self, entity_id: usize) {
+        self.0.push(Box::new(move |components| {
+            components.remove::<B>(entity_id);
+        }));
+    }
+
+    /// Remove a single component from the given entity, returning it if the
+    /// entity had a component of that type.
+    pub fn remove_component<T: Send + Sync + 'static>(&mut self, entity_id: usize) {
+        self.0.push(Box::new(move |components| {
+            components.remove_component::<T>(entity_id);
+        }));
+    }
+
+    /// Apply changes.
+    ///
+    /// ## Panics
+    /// Panics if the application of any changes panic.
+    pub fn apply(self, components: &mut Components) {
+        for op in self.0.into_iter() {
+            (op)(components);
+        }
     }
 }
 

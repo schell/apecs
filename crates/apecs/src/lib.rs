@@ -38,7 +38,7 @@ pub use plugin::Plugin;
 pub use rustc_hash::FxHashMap;
 pub use storage::{
     Components, Entry, IsBundle, IsQuery, Maybe, MaybeMut, MaybeRef, Mut, Query, QueryGuard,
-    QueryIter, Ref, Without,
+    QueryIter, Ref, Without, LazyComponents
 };
 pub use system::{current_iteration, end, err, ok, ShouldContinue};
 pub use world::{Entities, Entity, Facade, Parallelism, World};

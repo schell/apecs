@@ -25,28 +25,3 @@ mod test {
         assert_eq!(2.0f32, *entry.get_component::<f32>().unwrap());
     }
 }
-
-pub trait TyEq<A, B, const C: bool> {}
-
-impl<A> TyEq<A, A, true> for A {}
-impl<A, B> TyEq<A, B, false> for A {}
-
-fn ty_eq<A, B>()
-where
-    A: TyEq<A, B, true>,
-{
-}
-
-fn ty_neq<A, B>()
-where
-    A: TyEq<A, B, false>,
-{
-}
-
-fn go() {
-    ty_eq::<f32, f32>();
-    // fails to compile, which is good!
-    // ty_eq::<u32, f32>();
-
-    ty_neq::<f32, f32>(); // unfortunately this still compiles
-}

@@ -1016,6 +1016,21 @@ impl World {
         self.resource_mut::<Components>().unwrap().query::<Q>()
     }
 
+    pub fn insert_component<T: Send + Sync + 'static>(&mut self, id: usize, component: T) -> Option<T> {
+        let components = self.resource_mut::<Components>().unwrap();
+        components.insert_component(id, component)
+    }
+
+    pub fn insert_bundle<B: IsBundle>(&mut self, id: usize, bundle: B) {
+        let components = self.resource_mut::<Components>().unwrap();
+        components.insert_bundle(id, bundle);
+    }
+
+    pub fn get_component<T: Send + Sync + 'static>(&self, id: usize) -> Option<impl Deref<Target = T> + '_> {
+        let components = self.resource::<Components>().unwrap();
+        components.get_component::<T>(id)
+    }
+
     pub fn get_schedule_description(&self) -> String {
         format!("{:#?}", self.sync_schedule)
     }
