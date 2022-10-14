@@ -1,7 +1,8 @@
-//! Welcome to the docs of the *A*syncronous and *P*leasant *E*ntity *C*omponent *S*ystem 😊
+//! Welcome to the docs of the *A*syncronous and *P*leasant *E*ntity *C*omponent
+//! *S*ystem 😊
 //!
-//! `apecs` is a flexible and well-performing entity-component-system libary that includes
-//! support for asynchronous systems.
+//! `apecs` is a flexible and well-performing entity-component-system libary
+//! that includes support for asynchronous systems.
 //!
 //! A good place to start learning about `apecs` is
 //! It's best to start learning about `apecs` from the [`World`].
@@ -37,8 +38,8 @@ pub use fetch::*;
 pub use plugin::Plugin;
 pub use rustc_hash::FxHashMap;
 pub use storage::{
-    Components, Entry, IsBundle, IsQuery, Maybe, MaybeMut, MaybeRef, Mut, Query, QueryGuard,
-    QueryIter, Ref, Without, LazyComponents
+    Components, Entry, IsBundle, IsQuery, LazyComponents, Maybe, MaybeMut, MaybeRef, Mut, Query,
+    QueryGuard, QueryIter, Ref, Without,
 };
 pub use system::{current_iteration, end, err, ok, ShouldContinue};
 pub use world::{Entities, Entity, Facade, Parallelism, World};
@@ -366,12 +367,14 @@ where
 }
 
 impl<T: IsResource, G: Gen<T>> Write<T, G> {
-    /// An explicit method of getting a reference to the inner type without `Deref`.
+    /// An explicit method of getting a reference to the inner type without
+    /// `Deref`.
     pub fn inner(&self) -> &T {
         self.deref()
     }
 
-    /// An explicit method of getting a mutable reference to the inner type without `DerefMut`.
+    /// An explicit method of getting a mutable reference to the inner type
+    /// without `DerefMut`.
     pub fn inner_mut(&mut self) -> &mut T {
         self.deref_mut()
     }
@@ -449,7 +452,8 @@ where
 }
 
 impl<T: IsResource, G: Gen<T>> Read<T, G> {
-    /// An explicit method of getting a reference to the inner type without `Deref`.
+    /// An explicit method of getting a reference to the inner type without
+    /// `Deref`.
     pub fn inner(&self) -> &T {
         self.deref()
     }
@@ -545,8 +549,15 @@ impl<'a, T: IsResource, G: Gen<T> + IsResource> CanFetch for Write<T, G> {
     }
 
     fn plugin() -> Plugin {
-        Plugin::default()
-            .with_dependent_resource(|_: ()| G::generate().context("could not generate"))
+        Plugin::default().with_dependent_resource(|_: ()| {
+            G::generate().with_context(|| {
+                format!(
+                    "could not generate {} with '{}'",
+                    std::any::type_name::<T>(),
+                    std::any::type_name::<G>()
+                )
+            })
+        })
     }
 }
 
