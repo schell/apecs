@@ -23,26 +23,32 @@ fn parallelism() {
     struct Number(u32);
 
     async fn one(mut facade: Facade) -> anyhow::Result<()> {
-        facade.visit(|mut number: Write<Number>| {
-            number.0 = 1;
-            Ok(())
-        }).await
+        facade
+            .visit(|mut number: Write<Number>| {
+                number.0 = 1;
+                Ok(())
+            })
+            .await
     }
     async fn two(mut facade: Facade) -> anyhow::Result<()> {
         for _ in 0..2 {
-            facade.visit(|mut number: Write<Number>| {
-                number.0 = 2;
-                Ok(())
-            }).await?;
+            facade
+                .visit(|mut number: Write<Number>| {
+                    number.0 = 2;
+                    Ok(())
+                })
+                .await?;
         }
         Ok(())
     }
     async fn three(mut facade: Facade) -> anyhow::Result<()> {
         for _ in 0..3 {
-            facade.visit(|mut number: Write<Number>| {
-                number.0 = 3;
-                Ok(())
-            }).await?;
+            facade
+                .visit(|mut number: Write<Number>| {
+                    number.0 = 3;
+                    Ok(())
+                })
+                .await?;
         }
         Ok(())
     }

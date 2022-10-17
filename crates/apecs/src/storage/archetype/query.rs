@@ -785,7 +785,8 @@ where
 ///
 /// Which means queries may be [`fetch`](crate::World::fetch)ed from the world,
 /// [`visit`](crate::Facade::visit)ed from a facade or used as the input to a
-/// system: ```
+/// system:
+/// ```
 /// # use apecs::*;
 /// #
 /// #[derive(CanFetch)]
@@ -813,7 +814,7 @@ where
 /// ## Iterating queries
 /// Below we use mutable and immutable reference types in our query to include
 /// either a mutable or immutable reference to those components:
-/// ```rust
+/// ```
 /// use apecs::*;
 ///
 /// struct Position(pub f32);
@@ -850,7 +851,7 @@ where
 ///         ok()
 ///     })
 ///     .unwrap();
-/// ````
+/// ```
 pub struct Query<T>(
     Box<dyn Deref<Target = Components> + Send + Sync + 'static>,
     PhantomData<T>,

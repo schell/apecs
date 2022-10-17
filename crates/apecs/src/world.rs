@@ -11,10 +11,10 @@ use rustc_hash::FxHashSet;
 
 use crate::QueryGuard;
 use crate::{
-    chan::{self, mpsc, oneshot::oneshot, spsc},
+    chan::{self, mpsc, oneshot, spsc},
     plugin::Plugin,
     resource_manager::{LoanManager, ResourceManager},
-    schedule::{Dependency, IsSchedule, UntypedSystemData},
+    schedule::{Dependency, IsSchedule},
     storage::{Components, Entry, IsBundle, IsQuery},
     system::{
         AsyncSchedule, AsyncSystem, AsyncSystemFuture, AsyncSystemRequest, ShouldContinue,
@@ -26,12 +26,11 @@ use crate::{
 /// Visits world resources from async systems.
 ///
 /// A facade is a window into the world, by which an async system can interact
-/// with the world through [`Facade::visit`], without causing resource contention.
+/// with the world through [`Facade::visit`], without causing resource
+/// contention.
 pub struct Facade {
     // Unbounded. Sending a request from the system should not yield the async
     pub(crate) resource_request_tx: spsc::Sender<Request>,
-    // Bounded(1). Awaiting in the system should yield the async
-    pub(crate) resources_to_system_rx: spsc::Receiver<Resource>,
 }
 
 impl Facade {
@@ -41,37 +40,45 @@ impl Facade {
     ///
     /// A roundtrip takes at most one frame.
     ///
-    /// **Note**: Using a closure ensures that no fetched system resources are held over
-    /// an await point, which would preclude other systems from accessing
-    /// them and susequently being able to run.
+    /// **Note**: Using a closure ensures that no fetched system resources are
+    /// held over an await point, which would preclude other systems from
+    /// accessing them and susequently being able to run.
     pub async fn visit<D: CanFetch + Send + Sync + 'static, T: Send + Sync + 'static>(
         &mut self,
         f: impl FnOnce(D) -> anyhow::Result<T>,
     ) -> anyhow::Result<T> {
         let borrows = D::borrows();
+        // request the resources from the world
+        // these requests are gathered in World::tick_async into an AsyncSchedule
+        // and then run with the executor and resource maanger
+        let (deploy_tx, deploy_rx) = oneshot::oneshot();
         self.resource_request_tx
             .try_send(Request {
                 borrows,
                 construct: |loan_mngr: &mut LoanManager| {
-                    let t = D::construct(loan_mngr).with_context(|| {
+                    let my_d = D::construct(loan_mngr).with_context(|| {
                         format!("could not construct {}", std::any::type_name::<D>())
                     })?;
-                    let box_t: Box<D> = Box::new(t);
-                    let box_any: UntypedSystemData = box_t;
-                    Ok(box_any)
+                    let my_d_in_a_box: Box<D> = Box::new(my_d);
+                    let rez = Resource::from(my_d_in_a_box);
+                    Ok(rez)
                 },
+                deploy_tx,
             })
             .context("could not send request for resources")?;
+        log::trace!("'{}' requested", std::any::type_name::<D>());
 
-        let box_any: Resource = self
-            .resources_to_system_rx
-            .recv()
+        let rez: Resource = deploy_rx
             .await
-            .context("could not fetch resources")?;
-        let box_d: Box<D> = box_any
-            .downcast()
-            .ok()
-            .with_context(|| format!("Facade could not downcast {}", std::any::type_name::<D>()))?;
+            .map_err(|_| anyhow::anyhow!("could not fetch resources"))?;
+        log::trace!("'{}' received", std::any::type_name::<D>());
+        let box_d: Box<D> = rez.downcast().map_err(|rez| {
+            anyhow::anyhow!(
+                "Facade could not downcast resource '{}' to '{}'",
+                rez.type_name().unwrap_or("unknown"),
+                std::any::type_name::<D>()
+            )
+        })?;
         let d = *box_d;
         let t = f(d)?;
         Ok(t)
@@ -174,7 +181,7 @@ impl Entity {
     /// This entity will have the associated components after the next tick.
     pub fn insert_bundle<B: IsBundle + Send + Sync + 'static>(&mut self, bundle: B) {
         let id = self.id;
-        let (tx, rx) = oneshot();
+        let (tx, rx) = oneshot::oneshot();
         let op = LazyOp {
             op: Box::new(move |world: &mut World| {
                 if !world.has_resource::<Components>() {
@@ -197,7 +204,7 @@ impl Entity {
     /// This entity will have the associated component after the next tick.
     pub fn insert_component<T: Send + Sync + 'static>(&mut self, component: T) {
         let id = self.id;
-        let (tx, rx) = oneshot();
+        let (tx, rx) = oneshot::oneshot();
         let op = LazyOp {
             op: Box::new(move |world: &mut World| {
                 if !world.has_resource::<Components>() {
@@ -220,7 +227,7 @@ impl Entity {
     /// This entity will have lost the associated component after the next tick.
     pub fn remove_component<T: Send + Sync + 'static>(&mut self) {
         let id = self.id;
-        let (tx, rx) = oneshot();
+        let (tx, rx) = oneshot::oneshot();
         let op = LazyOp {
             op: Box::new(move |world: &mut World| {
                 if !world.has_resource::<Components>() {
@@ -260,7 +267,7 @@ impl Entity {
         f: impl FnOnce(Q::QueryRow<'_>) -> T + Send + Sync + 'static,
     ) -> Option<T> {
         let id = self.id();
-        let (tx, rx) = oneshot();
+        let (tx, rx) = oneshot::oneshot();
         self.op_sender
             .try_send(LazyOp {
                 op: Box::new(move |world: &mut World| {
@@ -347,6 +354,14 @@ impl Entities {
         }
     }
 
+    /// Return an iterator over all alive entities.
+    pub fn alive_iter(&self) -> impl Iterator<Item = Entity> + '_ {
+        self.generations
+            .iter()
+            .enumerate()
+            .filter_map(|(id, _gen)| self.hydrate(id))
+    }
+
     /// Returns the number of entities that are currently alive.
     pub fn alive_len(&self) -> usize {
         self.generations.len() - self.recycle.len()
@@ -395,6 +410,15 @@ impl Entities {
         self.delete_tx.try_send(entity.id()).unwrap();
     }
 
+    /// Destroys all entities.
+    pub fn destroy_all(&mut self) {
+        for id in 0..self.next_k {
+            if let Some(entity) = self.hydrate(id) {
+                self.destroy(entity);
+            }
+        }
+    }
+
     /// Produce an iterator of deleted entities as entries.
     ///
     /// This iterator should be filtered at the callsite for the latest changed
@@ -434,7 +458,13 @@ impl Entities {
     }
 
     /// Hydrate an `Entity` from an id.
+    ///
+    /// Returns `None` the entity with the given id does not exist, or has
+    /// been destroyed.
     pub fn hydrate(&self, entity_id: usize) -> Option<Entity> {
+        if self.recycle.contains(&entity_id) {
+            return None;
+        }
         let gen = self.generations.get(entity_id)?;
         Some(Entity {
             id: entity_id,
@@ -484,15 +514,12 @@ where
     Fut: Future<Output = anyhow::Result<()>> + Send + Sync + 'static,
 {
     let (resource_request_tx, resource_request_rx) = spsc::unbounded();
-    let (resources_to_system_tx, resources_to_system_rx) = spsc::bounded(1);
     let facade = Facade {
         resource_request_tx,
-        resources_to_system_rx,
     };
     let system = AsyncSystem {
         name: name.clone(),
         resource_request_rx,
-        resources_to_system_tx,
     };
     let asys = Box::pin((make_system_future)(facade));
     (system, asys)
@@ -873,7 +900,6 @@ impl World {
             // if the channels are closed they have been dropped by the
             // async system and we should no longer poll them for requests
             if system.resource_request_rx.is_closed() {
-                debug_assert!(system.resources_to_system_tx.is_closed());
                 log::trace!(
                     "removing {} from the system resource requester pool, it has dropped its \
                      request channel",
@@ -1016,7 +1042,11 @@ impl World {
         self.resource_mut::<Components>().unwrap().query::<Q>()
     }
 
-    pub fn insert_component<T: Send + Sync + 'static>(&mut self, id: usize, component: T) -> Option<T> {
+    pub fn insert_component<T: Send + Sync + 'static>(
+        &mut self,
+        id: usize,
+        component: T,
+    ) -> Option<T> {
         let components = self.resource_mut::<Components>().unwrap();
         components.insert_component(id, component)
     }
@@ -1026,7 +1056,10 @@ impl World {
         components.insert_bundle(id, bundle);
     }
 
-    pub fn get_component<T: Send + Sync + 'static>(&self, id: usize) -> Option<impl Deref<Target = T> + '_> {
+    pub fn get_component<T: Send + Sync + 'static>(
+        &self,
+        id: usize,
+    ) -> Option<impl Deref<Target = T> + '_> {
         let components = self.resource::<Components>().unwrap();
         components.get_component::<T>(id)
     }

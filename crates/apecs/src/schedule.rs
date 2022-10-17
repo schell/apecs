@@ -3,7 +3,9 @@
 //! This module contains trait definitions. Implementations can be found in
 //! other modeluse.
 use rustc_hash::FxHashSet;
-use std::{any::Any, iter::FlatMap, slice::Iter};
+use std::{iter::FlatMap, slice::Iter};
+
+use crate::internal::Resource;
 
 use super::{
     resource_manager::{LoanManager, ResourceManager},
@@ -12,8 +14,6 @@ use super::{
 };
 
 use self::solver::SolverSystem;
-
-pub type UntypedSystemData = Box<dyn Any + Send + Sync>;
 
 pub trait IsSystem: std::fmt::Debug {
     fn name(&self) -> &str;
@@ -26,9 +26,9 @@ pub trait IsSystem: std::fmt::Debug {
 
     fn barrier(&self) -> usize;
 
-    fn prep(&self, loan_mngr: &mut LoanManager<'_>) -> anyhow::Result<UntypedSystemData>;
+    fn prep(&self, loan_mngr: &mut LoanManager<'_>) -> anyhow::Result<Resource>;
 
-    fn run(&mut self, data: UntypedSystemData) -> anyhow::Result<ShouldContinue>;
+    fn run(&mut self, data: Resource) -> anyhow::Result<ShouldContinue>;
 }
 
 /// A batch of systems that can run in parallel (because their borrows
@@ -140,10 +140,12 @@ pub(crate) trait IsSchedule: std::fmt::Debug {
             .into_iter()
             .zip(systems.into_iter())
             .collect::<Vec<_>>();
-        indexed_systems.sort_by(|a, b| if a.0 == b.0 {
-            a.1.name().cmp(b.1.name())
-        } else {
-            a.0.total_cmp(&b.0)
+        indexed_systems.sort_by(|a, b| {
+            if a.0 == b.0 {
+                a.1.name().cmp(b.1.name())
+            } else {
+                a.0.total_cmp(&b.0)
+            }
         });
         log::trace!(
             "pre-schedule: {:#?}",
@@ -389,13 +391,10 @@ mod test {
 
     #[test]
     fn negative_zero_sanity() {
-        let nzero:f64 = -0.0;
-        let zero:f64 = 0.0;
+        let nzero: f64 = -0.0;
+        let zero: f64 = 0.0;
 
-        assert_eq!(
-            std::cmp::Ordering::Less,
-            nzero.total_cmp(&zero)
-        );
+        assert_eq!(std::cmp::Ordering::Less, nzero.total_cmp(&zero));
 
         assert_eq!(-0.0f64, 0.0f64);
     }

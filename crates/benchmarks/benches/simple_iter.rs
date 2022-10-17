@@ -13,12 +13,13 @@ pub struct Rotation(Vector3<f32>);
 #[derive(Copy, Clone, Debug)]
 pub struct Velocity(Vector3<f32>);
 
-
 pub struct Benchmark(Components);
 
 impl Benchmark {
     pub fn new() -> anyhow::Result<Self> {
-        let ts = Box::new((0..10000).map(|id| Entry::new(id, Transform(Matrix4::<f32>::from_scale(1.0)))));
+        let ts = Box::new(
+            (0..10000).map(|id| Entry::new(id, Transform(Matrix4::<f32>::from_scale(1.0)))),
+        );
         let ps = Box::new((0..10000).map(|id| Entry::new(id, Position(Vector3::unit_x()))));
         let rs = Box::new((0..10000).map(|id| Entry::new(id, Rotation(Vector3::unit_x()))));
         let vs = Box::new((0..10000).map(|id| Entry::new(id, Velocity(Vector3::unit_x()))));

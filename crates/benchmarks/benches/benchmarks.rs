@@ -67,10 +67,10 @@ fn bench_simple_insert(c: &mut Criterion) {
 
 fn bench_add_remove(c: &mut Criterion) {
     let mut group = c.benchmark_group("add_remove_component");
-    //let plot_config =
+    // let plot_config =
     //   criterion::PlotConfiguration::default().
-    //summary_scale(criterion::AxisScale::Logarithmic);
-    //group.plot_config(plot_config);
+    // summary_scale(criterion::AxisScale::Logarithmic);
+    // group.plot_config(plot_config);
     group.throughput(criterion::Throughput::Elements(10_000));
     group.bench_function("apecs", |b| {
         let mut bench = add_remove::Benchmark::new();
@@ -112,8 +112,7 @@ fn bench_simple_iter(c: &mut Criterion) {
         b.iter(move || bench.run());
     });
     group.bench_function("apecs", |b| {
-        let mut bench = simple_iter::Benchmark::new()
-        .unwrap();
+        let mut bench = simple_iter::Benchmark::new().unwrap();
         b.iter(move || bench.run());
     });
     group.bench_function("bevy", |b| {
@@ -210,8 +209,7 @@ fn bench_heavy_compute(c: &mut Criterion) {
     let mut group = c.benchmark_group("heavy_compute");
 
     group.bench_function("apecs", |b| {
-        let mut bench = heavy_compute::Benchmark::new()
-            .unwrap();
+        let mut bench = heavy_compute::Benchmark::new().unwrap();
         b.iter(move || bench.run());
     });
     group.bench_function("legion", |b| {

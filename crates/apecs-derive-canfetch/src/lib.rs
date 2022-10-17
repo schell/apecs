@@ -102,10 +102,13 @@ pub fn derive_canfetch(path: Path, input: DeriveInput) -> proc_macro2::TokenStre
     output.into()
 }
 
-/// Helper to create `TryDefault` derive macros with a configurable module prefix.
+/// Helper to create `TryDefault` derive macros with a configurable module
+/// prefix.
 pub fn derive_trydefault(path: Path, mut input: DeriveInput) -> proc_macro2::TokenStream {
     let name = input.ident;
-    {input.generics.make_where_clause();}
+    {
+        input.generics.make_where_clause();
+    }
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
     let where_clause = if let Some(mut clause) = where_clause.map(|c| c.clone()) {
         let where_predicate: WherePredicate = syn::parse_quote!(#name #ty_generics : Default);
@@ -114,7 +117,7 @@ pub fn derive_trydefault(path: Path, mut input: DeriveInput) -> proc_macro2::Tok
     } else {
         syn::parse_quote!(where #name #ty_generics: Default)
     };
-    let output = quote!{
+    let output = quote! {
         impl #impl_generics #path::TryDefault for #name #ty_generics #where_clause {
             fn try_default() -> Option<Self> {
                 Some(Self::default())

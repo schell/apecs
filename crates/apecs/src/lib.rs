@@ -4,11 +4,12 @@
 //! `apecs` is a flexible and well-performing entity-component-system libary
 //! that includes support for asynchronous systems.
 //!
-//! A good place to start learning about `apecs` is
-//! It's best to start learning about `apecs` from the [`World`].
+//! It's best to start learning about `apecs` from the [`World`], but if you
+//! just want some examples please check out the [readme](https://github.com/schell/apecs#readme)
 #![allow(clippy::type_complexity)]
 
 use ::anyhow::Context;
+use chan::oneshot;
 use internal::{FetchReadyResource, LoanManager, Resource, ResourceId};
 use rayon::iter::IntoParallelIterator;
 use std::{
@@ -123,11 +124,71 @@ pub mod internal {
     use std::any::TypeId;
     use std::{any::Any, sync::Arc};
 
+    use anyhow::Context;
+
     pub use super::resource_manager::LoanManager;
     pub use super::schedule::Borrow;
 
     /// A type-erased resource.
-    pub type Resource = Box<dyn Any + Send + Sync + 'static>;
+    pub struct Resource {
+        data: Box<dyn Any + Send + Sync + 'static>,
+        #[cfg(debug_assertions)]
+        type_name: &'static str,
+    }
+
+    impl<T: Any + Send + Sync + 'static> From<Box<T>> for Resource {
+        fn from(data: Box<T>) -> Self {
+            #[cfg(debug_assertions)]
+            {
+                Resource {
+                    data,
+                    type_name: std::any::type_name::<T>(),
+                }
+            }
+            #[cfg(not(debug_assertions))]
+            {
+                Resource { data }
+            }
+        }
+    }
+
+    impl Resource {
+        pub fn type_name(&self) -> Option<&'static str> {
+            #[cfg(debug_assertions)]
+            {
+                Some(self.type_name)
+            }
+            #[cfg(not(debug_assertions))]
+            {
+                None
+            }
+        }
+
+        pub fn downcast<T: Any + Send + Sync + 'static>(self) -> Result<Box<T>, Resource> {
+            let Resource { data, type_name } = self;
+            data.downcast::<T>()
+                .map_err(|data| Resource { data, type_name })
+        }
+
+        pub fn downcast_ref<T: Any + Send + Sync + 'static>(&self) -> anyhow::Result<&T> {
+            self.data.downcast_ref::<T>().with_context(|| {
+                format!(
+                    "could not downcast_ref '{}'",
+                    self.type_name().unwrap_or("unknown")
+                )
+            })
+        }
+
+        pub fn downcast_mut<T: Any + Send + Sync + 'static>(&mut self) -> anyhow::Result<&mut T> {
+            let type_name = self.type_name();
+            self.data.downcast_mut::<T>().with_context(|| {
+                format!(
+                    "could not downcast_mut '{}'",
+                    type_name.unwrap_or("unknown")
+                )
+            })
+        }
+    }
 
     /// A resource that is ready for fetching, which means it is
     /// either owned (and therefore mutable by the owner) or sitting in an Arc.
@@ -236,7 +297,7 @@ impl<'a, T: IsResource> Drop for Fetched<T> {
     fn drop(&mut self) {
         if let Some(inner) = self.inner.take() {
             self.resource_return_tx
-                .try_send((ResourceId::new::<T>(), inner as Resource))
+                .try_send((ResourceId::new::<T>(), Resource::from(inner)))
                 .unwrap();
         }
     }
@@ -462,6 +523,7 @@ impl<T: IsResource, G: Gen<T>> Read<T, G> {
 pub(crate) struct Request {
     pub borrows: Vec<internal::Borrow>,
     pub construct: fn(&mut LoanManager<'_>) -> anyhow::Result<Resource>,
+    pub deploy_tx: oneshot::Sender<Resource>,
 }
 
 impl std::fmt::Debug for Request {
@@ -476,15 +538,6 @@ impl std::fmt::Debug for Request {
     }
 }
 
-impl Default for Request {
-    fn default() -> Self {
-        Self {
-            borrows: Default::default(),
-            construct: |_| anyhow::bail!("default construct"),
-        }
-    }
-}
-
 pub(crate) struct LazyResource {
     id: ResourceId,
     create: Box<dyn FnOnce(&mut LoanManager) -> anyhow::Result<Resource>>,
@@ -496,7 +549,7 @@ impl LazyResource {
     ) -> LazyResource {
         LazyResource {
             id: ResourceId::new::<T>(),
-            create: Box::new(move |loans| Ok(Box::new(f(loans)?))),
+            create: Box::new(move |loans| Ok(Resource::from(Box::new(f(loans)?)))),
         }
     }
 }

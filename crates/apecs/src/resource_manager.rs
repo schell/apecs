@@ -58,7 +58,7 @@ impl ResourceManager {
     }
 
     pub fn add<T: IsResource>(&mut self, rez: T) -> Option<Resource> {
-        self.insert(ResourceId::new::<T>(), Box::new(rez))
+        self.insert(ResourceId::new::<T>(), Resource::from(Box::new(rez)))
     }
 
     pub fn insert(&mut self, id: ResourceId, boxed_rez: Resource) -> Option<Resource> {
@@ -72,24 +72,20 @@ impl ResourceManager {
     }
 
     pub fn get<T: IsResource>(&self, key: &ResourceId) -> anyhow::Result<&T> {
-        let box_t: &Resource = self
+        let rez: &Resource = self
             .world_resources
             .get(key)
             .with_context(|| format!("resource {} is missing", key.name))?;
-        box_t
-            .downcast_ref()
-            .with_context(|| "could not downcast resource")
+        rez.downcast_ref()
     }
 
     pub fn get_mut<T: IsResource>(&mut self) -> anyhow::Result<&mut T> {
         let key = ResourceId::new::<T>();
-        let box_t: &mut Resource = self
+        let rez: &mut Resource = self
             .world_resources
             .get_mut(&key)
             .with_context(|| format!("resource {} is missing", key.name))?;
-        box_t
-            .downcast_mut()
-            .with_context(|| "could not downcast resource")
+        rez.downcast_mut()
     }
 
     fn missing_msg(label: &str, borrow: &Borrow, extra: &str) -> String {
@@ -256,7 +252,9 @@ impl<'a> LoanManager<'a> {
             );
             let t: T = G::generate()
                 .with_context(|| format!("could not make default value for {}", rez_id.name))?;
-            let prev = self.0.insert(ResourceId::new::<T>(), Box::new(t));
+            let prev = self
+                .0
+                .insert(ResourceId::new::<T>(), Resource::from(Box::new(t)));
             debug_assert!(prev.is_none());
             self.0.get_loaned(label, borrow)
         }

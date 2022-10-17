@@ -6,7 +6,7 @@ use rayon::prelude::*;
 use super::{
     chan::spsc,
     resource_manager::{LoanManager, ResourceManager},
-    schedule::{Borrow, Dependency, IsBatch, IsSchedule, IsSystem, UntypedSystemData},
+    schedule::{Borrow, Dependency, IsBatch, IsSchedule, IsSystem},
     CanFetch, Request, Resource,
 };
 
@@ -39,8 +39,6 @@ pub(crate) struct AsyncSystem {
     // pub future: AsyncSystemFuture,
     // Unbounded. Used to send resource requests from the system to the world.
     pub resource_request_rx: spsc::Receiver<Request>,
-    // Bounded (1). Used to send resources from the world to the system.
-    pub resources_to_system_tx: spsc::Sender<Resource>,
 }
 
 /// Whether or not a system should continue execution.
@@ -68,14 +66,14 @@ pub fn err(err: anyhow::Error) -> anyhow::Result<ShouldContinue> {
 }
 
 pub type SystemFunction =
-    Box<dyn FnMut(UntypedSystemData) -> anyhow::Result<ShouldContinue> + Send + Sync + 'static>;
+    Box<dyn FnMut(Resource) -> anyhow::Result<ShouldContinue> + Send + Sync + 'static>;
 
 pub struct SyncSystem {
     pub name: String,
     pub borrows: Vec<Borrow>,
     pub dependencies: Vec<Dependency>,
     pub barrier: usize,
-    pub prepare: fn(&mut LoanManager<'_>) -> anyhow::Result<UntypedSystemData>,
+    pub prepare: fn(&mut LoanManager<'_>) -> anyhow::Result<Resource>,
     pub function: SystemFunction,
 }
 
@@ -110,11 +108,11 @@ impl IsSystem for SyncSystem {
         self.barrier = barrier;
     }
 
-    fn prep(&self, loan_mngr: &mut LoanManager<'_>) -> anyhow::Result<UntypedSystemData> {
+    fn prep(&self, loan_mngr: &mut LoanManager<'_>) -> anyhow::Result<Resource> {
         (self.prepare)(loan_mngr)
     }
 
-    fn run(&mut self, data: UntypedSystemData) -> anyhow::Result<ShouldContinue> {
+    fn run(&mut self, data: Resource) -> anyhow::Result<ShouldContinue> {
         (self.function)(data)
     }
 }
@@ -131,11 +129,10 @@ impl SyncSystem {
             dependencies,
             barrier: 0,
             prepare: |loan_mngr: &mut LoanManager| {
-                let box_t: Box<T> = Box::new(T::construct(loan_mngr)?);
-                let b: UntypedSystemData = box_t;
-                Ok(b)
+                let rez: Resource = Resource::from(Box::new(T::construct(loan_mngr)?));
+                Ok(rez)
             },
-            function: Box::new(move |b: UntypedSystemData| {
+            function: Box::new(move |b: Resource| {
                 let box_t: Box<T> = b.downcast().ok().context("cannot downcast")?;
                 let t: T = *box_t;
                 sys_fn(t)
@@ -313,18 +310,16 @@ impl<'a> IsSystem for AsyncSystemRequest<'a> {
 
     fn set_barrier(&mut self, _: usize) {}
 
-    fn prep(&self, loan_mngr: &mut LoanManager<'_>) -> anyhow::Result<UntypedSystemData> {
+    fn prep(&self, loan_mngr: &mut LoanManager<'_>) -> anyhow::Result<Resource> {
         (self.1.construct)(loan_mngr)
     }
 
-    fn run(&mut self, data: UntypedSystemData) -> anyhow::Result<ShouldContinue> {
-        self.0
-            .resources_to_system_tx
-            .try_send(data)
-            .context(format!(
-                "could not send resources to async system '{}'",
-                self.name()
-            ))?;
+    fn run(&mut self, data: Resource) -> anyhow::Result<ShouldContinue> {
+        // it's perfectly normal for an async system to drop the resource
+        // receiver, eg cases where an async system had two asyncs being `race`d
+        // and one of them won (and the one that lost had just called facade.visit and
+        // was awaiting resources)
+        let _ = self.1.deploy_tx.send(data);
         ok()
     }
 }
@@ -381,8 +376,12 @@ impl<'a> IsBatch for AsyncBatch<'a> {
         drop(loan_mngr);
 
         systems.retain_mut(|system| {
-            let data: UntypedSystemData = data.pop_front().unwrap();
+            let data: Resource = data.pop_front().unwrap();
             if system.0.resource_request_rx.is_closed() {
+                log::trace!(
+                    "system '{}' closed after requesting resources",
+                    system.name()
+                );
                 return false;
             }
             // send the resources off, if need be

@@ -83,8 +83,7 @@ impl Plugin {
     /// plugin is instantiated, it will be inserted into the
     /// [`World`](crate::World).
     pub fn with_resource<T: IsResource + Default>(mut self) -> Self {
-        self.resources
-            .push(LazyResource::new(|_| Ok(T::default())));
+        self.resources.push(LazyResource::new(|_| Ok(T::default())));
         self
     }
 

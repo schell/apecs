@@ -36,7 +36,8 @@ impl Benchmark {
     pub fn new() -> Self {
         let mut world = World::default();
         {
-            let (mut comps, mut entities): (Write<Components>, Write<Entities>) = world.fetch().unwrap();
+            let (mut comps, mut entities): (Write<Components>, Write<Entities>) =
+                world.fetch().unwrap();
             let ids = entities.create_many(10_000);
             comps.extend::<(A, B)>((
                 Box::new(ids.clone().into_iter().map(|id| Entry::new(id, A(0.0)))),
