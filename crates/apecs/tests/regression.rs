@@ -1,14 +1,12 @@
 //! Tests for bugs we've encountered.
-use std::sync::Arc;
-
 use ::anyhow::Context;
 use apecs::{anyhow, chan::mpmc::Channel, ok, Facade, Read, ShouldContinue, World, Write};
 use futures_lite::StreamExt;
 
 #[test]
-fn can_race_asyncs() {
+fn system_batch_drops_resources_after_racing_asyncs() {
     // ensures that resources are dropped after being sent to
-    // an async that is caling Facade::visit, but then gets
+    // an async that is awaiting Facade::visit, but then gets
     // cancelled
 
     //let _ = env_logger::builder()
@@ -16,8 +14,8 @@ fn can_race_asyncs() {
     //    .filter_level(log::LevelFilter::Trace)
     //    .try_init();
 
-    // each tick this increments a counter by 1
-    // when the counter reaches 3 it fires an event
+    // * each tick this increments a counter by 1
+    // * when the counter reaches 3 it fires an event
     fn ticker(
         (mut chan, mut tick): (Write<Channel<()>>, Write<usize>),
     ) -> anyhow::Result<ShouldContinue> {
@@ -43,9 +41,9 @@ fn can_race_asyncs() {
         }
     }
 
-    // races the losing async against awaiting an event from ticker
-    // after ticker wins the race it should be able to access the unit
-    // resource
+    // * races the losing async against awaiting an event from ticker
+    // * after ticker wins the race it should be able to access the unit
+    //   resource, because the async batch runner has dropped it
     async fn system(mut facade: Facade) -> anyhow::Result<()> {
         let mut rx = facade
             .visit(|chan: Read<Channel<()>>| Ok(chan.new_receiver()))

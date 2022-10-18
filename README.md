@@ -18,7 +18,7 @@ async fn my_system(mut facade: Facade) -> anyhow::Result<()> {
     Ok(())
 }
 ```
-The `Facade` type is like a window into the world. It can `fetch` resources from the
+The `Facade` type is like a window into the world. It can visit bundles of resources in the
 world asyncronously. This allows your async system to affect different parts of the
 world at different times.
 
@@ -26,9 +26,7 @@ Syncronous systems are great for tight loops that are always iterating over the 
 data. In other words sync systems are highly optimized algorithms that run in the hot path.
 But they don't quite fit in situations where the system's focus changes over time, or when
 the system needs to wait for some condition before doing something different. Async systems are a
-good fit for situations where we're mutating different resources at different times, and
-when doing things fast (as in "as fast as possible") isn't necessary. Async systems are therefore
-a good fit for high-level orchestration.
+good fit for these situations. Async systems are therefore a good fit for high-level orchestration.
 
 For example you might use an async system to setup your title screen, wait for user input and then
 start the main game simulation by injecting your game entities.
@@ -111,18 +109,15 @@ systems do the hot-path work that completes those async operations as fast as po
   ```rust
   use apecs::*;
 
-  #[derive(Default)]
-  struct U32(u32);
-
   #[derive(CanFetch)]
   struct MyData {
       entities: Read<Entities>,
-      u32_number: Write<U32>,
+      u32_number: Write<u32>,
   }
 
   let mut world = World::default();
   let mut my_data: MyData = world.fetch().unwrap();
-  my_data.u32_number.0 = 1;
+  *my_data.u32_number = 1;
   ```
 - system scheduling
   - compatible systems are placed in parallel batches (a batch is a group of systems
@@ -132,33 +127,27 @@ systems do the hot-path work that completes those async operations as fast as po
   ```rust
   use apecs::*;
 
-  #[derive(Default)]
-  struct U32(u32);
-
-  #[derive(Default)]
-  struct F32(f32);
-
-  fn one(mut u32_number: Write<U32>) -> anyhow::Result<ShouldContinue> {
-      u32_number.0 += 1;
+  fn one(mut u32_number: Write<u32>) -> anyhow::Result<ShouldContinue> {
+      *u32_number += 1;
       end()
   }
 
-  fn two(mut u32_number: Write<U32>) -> anyhow::Result<ShouldContinue> {
-      u32_number.0 += 1;
+  fn two(mut u32_number: Write<u32>) -> anyhow::Result<ShouldContinue> {
+      *u32_number += 1;
       end()
   }
 
-  fn exit_on_three(mut f32_number: Write<F32>) -> anyhow::Result<ShouldContinue> {
-      f32_number.0 += 1.0;
-      if f32_number.0 == 3.0 {
+  fn exit_on_three(mut f32_number: Write<f32>) -> anyhow::Result<ShouldContinue> {
+      *f32_number += 1.0;
+      if *f32_number == 3.0 {
           end()
       } else {
           ok()
       }
   }
 
-  fn lastly((u32_number, f32_number): (Read<U32>, Read<F32>)) -> anyhow::Result<ShouldContinue> {
-      if u32_number.0 == 2 && f32_number.0 == 3.0 {
+  fn lastly((u32_number, f32_number): (Read<u32>, Read<f32>)) -> anyhow::Result<ShouldContinue> {
+      if *u32_number == 2 && *f32_number == 3.0 {
           end()
       } else {
           ok()
