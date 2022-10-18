@@ -368,29 +368,39 @@ impl<'a> IsBatch for AsyncBatch<'a> {
         resource_manager: &mut ResourceManager,
     ) -> anyhow::Result<()> {
         let mut loan_mngr = LoanManager(resource_manager);
-        let mut systems = self.take_systems();
+        let systems = self.take_systems();
         let mut data = VecDeque::new();
         for sys in systems.iter() {
             data.push_back(sys.prep(&mut loan_mngr)?);
         }
         drop(loan_mngr);
 
-        systems.retain_mut(|system| {
+        for system in systems.into_iter() {
             let data: Resource = data.pop_front().unwrap();
             if system.0.resource_request_rx.is_closed() {
                 log::trace!(
                     "system '{}' closed after requesting resources",
                     system.name()
                 );
-                return false;
+                continue;
             }
             // send the resources off, if need be
-            log::trace!("sending resources to async '{}'", system.name());
-            let _ = system.run(data).unwrap();
-            true
-        });
-
-        self.set_systems(systems);
+            if !system.1.deploy_tx.is_closed() {
+                log::trace!(
+                    "sending resource '{}' to async '{}'",
+                    data.type_name().unwrap_or("unknown"),
+                    system.name()
+                );
+                // UNWRAP: safe because we checked above that the channel is still open
+                system.1.deploy_tx.try_send(data).unwrap();
+            } else {
+                log::trace!(
+                    "cancelling send of resource '{}' to async '{}'",
+                    data.type_name().unwrap_or("unknown"),
+                    system.name()
+                );
+            }
+        }
 
         fn tick(executor: &async_executor::Executor<'static>) {
             while executor.try_tick() {
@@ -406,9 +416,10 @@ impl<'a> IsBatch for AsyncBatch<'a> {
             } else {
                 tick(extra);
             }
+
             let resources_still_loaned = resource_manager.try_unify_resources("async batch")?;
             if resources_still_loaned {
-                log::warn!(
+                panic!(
                     "an async system is holding onto resources over an await point! systems:{:#?}",
                     self.systems()
                         .iter()

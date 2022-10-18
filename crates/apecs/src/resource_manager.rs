@@ -169,6 +169,9 @@ impl ResourceManager {
     /// and unwrapping shared references.
     ///
     /// Returns `Ok(true)` if resources are still on loan.
+    ///
+    /// Errs if a system returns a resource that was not loaned. This doesn't
+    /// actually happen.
     pub fn try_unify_resources(&mut self, label: &str) -> anyhow::Result<bool> {
         log::trace!("try unify resources {}", label);
         while let Ok((rez_id, resource)) = self.exclusive_return_chan.1.try_recv() {
@@ -192,12 +195,10 @@ impl ResourceManager {
                         "duplicate resources"
                     ),
                     Err(arc_rez) => {
-                        log::warn!(
+                        log::error!(
                             "could not retreive borrowed resource {:?}, it is still borrowed by \
-                             {} - for better performance, try not to hold loaned resources over \
-                             an await point",
-                            id.name,
-                            label,
+                             '{}' - do not to hold loaned resources over an await point",
+                            id.name, label,
                         );
                         let _ = self.loaned_refs.insert(id, arc_rez);
                     }

@@ -9,7 +9,7 @@
 #![allow(clippy::type_complexity)]
 
 use ::anyhow::Context;
-use chan::oneshot;
+use chan::spsc;
 use internal::{FetchReadyResource, LoanManager, Resource, ResourceId};
 use rayon::iter::IntoParallelIterator;
 use std::{
@@ -336,14 +336,15 @@ impl<T> Gen<T> for NoDefault {
 /// fetch will err if the resource doesn't already exist.
 ///
 /// After a successful fetch, the resource will be automatically sent back to
-/// the world on drop. For this reason, when writing async systems you must take
-/// care to drop the fetched resources before your code crosses an await point.
+/// the world on drop. To make sure that your async functions don't hold fetched
+/// resources over await points, [`Facade`] uses [`visit`](Facade::visit) which
+/// fetches inside a syncronous closure.
 ///
 /// `Write` has two type parameters:
 /// * `T` - The type of the resource.
 /// * `G` - The method by which the resource can be generated if it doesn't
-///   exist. By default this is [`SomeDefault`], which denotes creating the
-///   resource using its default instance. Another option is [`NoDefault`] which
+///   already exist. By default this is [`SomeDefault`], which denotes creating the
+///   resource using its default implementation. Another option is [`NoDefault`] which
 ///   fails to generate the resource.
 ///
 /// ```rust
@@ -449,8 +450,7 @@ impl<T: IsResource, G: Gen<T>> Write<T, G> {
 /// fetch will err if the resource doesn't already exist.
 ///
 /// After a successful fetch, the resource will be automatically sent back to
-/// the world on drop. For this reason, when writing async systems you must take
-/// care to drop the fetched resources before your code crosses an await point.
+/// the world on drop.
 ///
 /// `Read` has two type parameters:
 /// * `T` - The type of the resource.
@@ -523,7 +523,7 @@ impl<T: IsResource, G: Gen<T>> Read<T, G> {
 pub(crate) struct Request {
     pub borrows: Vec<internal::Borrow>,
     pub construct: fn(&mut LoanManager<'_>) -> anyhow::Result<Resource>,
-    pub deploy_tx: oneshot::Sender<Resource>,
+    pub deploy_tx: spsc::Sender<Resource>,
 }
 
 impl std::fmt::Debug for Request {

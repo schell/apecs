@@ -51,7 +51,8 @@ impl Facade {
         // request the resources from the world
         // these requests are gathered in World::tick_async into an AsyncSchedule
         // and then run with the executor and resource maanger
-        let (deploy_tx, deploy_rx) = oneshot::oneshot();
+        let (deploy_tx, deploy_rx) = spsc::bounded(1);
+        // UNWRAP: safe because the request channel is unbounded
         self.resource_request_tx
             .try_send(Request {
                 borrows,
@@ -65,13 +66,11 @@ impl Facade {
                 },
                 deploy_tx,
             })
-            .context("could not send request for resources")?;
-        log::trace!("'{}' requested", std::any::type_name::<D>());
-
+            .unwrap();
         let rez: Resource = deploy_rx
+            .recv()
             .await
-            .map_err(|_| anyhow::anyhow!("could not fetch resources"))?;
-        log::trace!("'{}' received", std::any::type_name::<D>());
+            .unwrap();
         let box_d: Box<D> = rez.downcast().map_err(|rez| {
             anyhow::anyhow!(
                 "Facade could not downcast resource '{}' to '{}'",
@@ -1419,5 +1418,15 @@ mod test {
             let deleted_strings = entities.deleted_iter_of::<String>().collect::<Vec<_>>();
             assert_eq!(9, deleted_strings[0].id());
         }
+    }
+
+    #[test]
+    fn spsc_drop_sanity() {
+        // ensure the spsc channel delivers messages when the sender was dropped after
+        // sending and before receiving
+        let (tx, rx) = spsc::bounded::<()>(1);
+        tx.try_send(()).unwrap();
+        drop(tx);
+        assert!(rx.try_recv().is_ok());
     }
 }
