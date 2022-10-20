@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::{any::Any, collections::VecDeque};
 
 use anyhow::Context;
+use async_executor::Task;
 use rustc_hash::FxHashSet;
 
 use crate::QueryGuard;
@@ -31,6 +32,7 @@ use crate::{
 pub struct Facade {
     // Unbounded. Sending a request from the system should not yield the async
     pub(crate) resource_request_tx: spsc::Sender<Request>,
+    pub(crate) async_task_executor: Arc<async_executor::Executor<'static>>,
 }
 
 impl Facade {
@@ -67,10 +69,7 @@ impl Facade {
                 deploy_tx,
             })
             .unwrap();
-        let rez: Resource = deploy_rx
-            .recv()
-            .await
-            .unwrap();
+        let rez: Resource = deploy_rx.recv().await.unwrap();
         let box_d: Box<D> = rez.downcast().map_err(|rez| {
             anyhow::anyhow!(
                 "Facade could not downcast resource '{}' to '{}'",
@@ -81,6 +80,14 @@ impl Facade {
         let d = *box_d;
         let t = f(d)?;
         Ok(t)
+    }
+
+    /// Spawn a task onto the world's async task executor.
+    pub fn spawn<T: Send + Sync + 'static>(
+        &self,
+        future: impl Future<Output = T> + Send + 'static,
+    ) -> Task<T> {
+        self.async_task_executor.spawn(future)
     }
 }
 
@@ -506,6 +513,7 @@ impl Entities {
 
 pub(crate) fn make_async_system_pack<F, Fut>(
     name: String,
+    async_task_executor: Arc<async_executor::Executor<'static>>,
     make_system_future: F,
 ) -> (AsyncSystem, AsyncSystemFuture)
 where
@@ -515,6 +523,7 @@ where
     let (resource_request_tx, resource_request_rx) = spsc::unbounded();
     let facade = Facade {
         resource_request_tx,
+        async_task_executor,
     };
     let system = AsyncSystem {
         name: name.clone(),
@@ -619,7 +628,7 @@ pub struct World {
     pub(crate) async_systems: Vec<AsyncSystem>,
     pub(crate) async_system_executor: async_executor::Executor<'static>,
     // executor for non-system futures
-    pub(crate) async_task_executor: async_executor::Executor<'static>,
+    pub(crate) async_task_executor: Arc<async_executor::Executor<'static>>,
     pub(crate) lazy_ops: (mpsc::Sender<LazyOp>, mpsc::Receiver<LazyOp>),
 }
 
@@ -708,7 +717,8 @@ impl World {
                 }
             }
 
-            let (sys, fut) = make_async_system_pack(asystem.0, asystem.1);
+            let (sys, fut) =
+                make_async_system_pack(asystem.0, self.async_task_executor.clone(), asystem.1);
             self.add_async_system_pack(sys, fut);
         }
 
@@ -836,7 +846,11 @@ impl World {
         F: FnOnce(Facade) -> Fut,
         Fut: Future<Output = anyhow::Result<()>> + Send + Sync + 'static,
     {
-        let (system, fut) = make_async_system_pack(name.as_ref().to_string(), make_system_future);
+        let (system, fut) = make_async_system_pack(
+            name.as_ref().to_string(),
+            self.async_task_executor.clone(),
+            make_system_future,
+        );
         self.add_async_system_pack(system, fut);
 
         self
