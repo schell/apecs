@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::{any::Any, collections::VecDeque};
 
 use anyhow::Context;
-use async_executor::Task;
+use async_executor::{Task, Executor};
 use rustc_hash::FxHashSet;
 
 use crate::QueryGuard;
@@ -91,6 +91,7 @@ impl Facade {
     }
 }
 
+/// A lazy mutation of the `World` and its result.
 pub struct LazyOp {
     op: Box<
         dyn FnOnce(&mut World) -> anyhow::Result<Arc<dyn Any + Send + Sync>>
@@ -99,6 +100,55 @@ pub struct LazyOp {
             + 'static,
     >,
     tx: chan::oneshot::Sender<Arc<dyn Any + Send + Sync>>,
+}
+
+/// A resource used to gain safe access to the entire world.
+///
+/// `LazyWorld` exists in the world automatically and should be fetched as
+/// `Read<LazyWorld, NoDefault>`.
+///
+/// This is used primarily from syncronous systems to spawn async actions
+/// but can also be used to alter anything inside the world.
+///
+/// Modifications made to the world through this resource are applied
+/// in [`World::tick_lazy`].
+pub struct LazyWorld {
+    op_sender: mpsc::Sender<LazyOp>,
+    async_task_executor: Arc<Executor<'static>>,
+}
+
+impl LazyWorld {
+    /// Conduct a mutation of the world.
+    ///
+    /// Sends the result on a [`oneshot::Receiver<T>`] after completion.
+    pub fn world_mut<T: Send + Sync + 'static>(
+        &self,
+        f: impl FnOnce(&mut World) -> T + Send + Sync + 'static,
+    ) -> oneshot::Receiver<T> {
+        let (mut tx, rx) = oneshot::oneshot();
+        let (dummy_tx,_ ) = oneshot::oneshot();
+        let op = Box::new(move |world: &mut World| {
+            let t = (f)(world);
+            let _ = tx.send(t);
+
+            let arc_any = Arc::new(()) as Arc<dyn Any + Send + Sync>;
+            Ok(arc_any)
+        });
+        // UNWRAP: safe because unbounded
+        self.op_sender.try_send(LazyOp {
+            op, tx: dummy_tx
+        }).unwrap();
+
+        rx
+    }
+
+    /// Spawn a task onto the world's async task executor.
+    pub fn spawn<T: Send + Sync + 'static>(
+        &self,
+        future: impl Future<Output = T> + Send + 'static,
+    ) -> Task<T> {
+        self.async_task_executor.spawn(future)
+    }
 }
 
 /// Associates a group of components within the world.
@@ -636,18 +686,26 @@ impl Default for World {
     fn default() -> Self {
         let lazy_ops = mpsc::unbounded();
         let entities = Entities::new(lazy_ops.0.clone());
+        let lazy_world = LazyWorld {
+            op_sender: lazy_ops.0.clone(),
+            async_task_executor: Default::default()
+        };
+
         let mut world = Self {
             resource_manager: ResourceManager::default(),
             sync_schedule: SyncSchedule::default(),
             async_systems: vec![],
             async_system_executor: Default::default(),
-            async_task_executor: Default::default(),
-            lazy_ops,
+            async_task_executor: lazy_world.async_task_executor.clone(),
+            lazy_ops
         };
+
         world
             .with_resource(entities)
             .unwrap()
             .with_resource(Components::default())
+            .unwrap()
+            .with_resource(lazy_world)
             .unwrap();
         world
     }

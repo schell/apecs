@@ -34,6 +34,7 @@ mod world;
 
 #[cfg(feature = "derive")]
 pub use apecs_derive::CanFetch;
+pub use async_executor::Task;
 #[cfg(feature = "derive")]
 pub use fetch::*;
 pub use plugin::Plugin;
@@ -43,7 +44,7 @@ pub use storage::{
     QueryGuard, QueryIter, Ref, Without,
 };
 pub use system::{current_iteration, end, err, ok, ShouldContinue};
-pub use world::{Entities, Entity, Facade, Parallelism, World};
+pub use world::{Entities, Entity, Facade, LazyWorld, Parallelism, World};
 
 #[cfg(doctest)]
 pub mod doctest {
@@ -343,9 +344,9 @@ impl<T> Gen<T> for NoDefault {
 /// `Write` has two type parameters:
 /// * `T` - The type of the resource.
 /// * `G` - The method by which the resource can be generated if it doesn't
-///   already exist. By default this is [`SomeDefault`], which denotes creating the
-///   resource using its default implementation. Another option is [`NoDefault`] which
-///   fails to generate the resource.
+///   already exist. By default this is [`SomeDefault`], which denotes creating
+///   the resource using its default implementation. Another option is
+///   [`NoDefault`] which fails to generate the resource.
 ///
 /// ```rust
 /// use apecs::*;
