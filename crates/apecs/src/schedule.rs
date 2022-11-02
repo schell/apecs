@@ -35,7 +35,7 @@ pub trait IsSystem: std::fmt::Debug {
 /// don't conflict).
 pub(crate) trait IsBatch: std::fmt::Debug + Default {
     type System: IsSystem + Send + Sync;
-    type ExtraRunData: Send + Sync + Clone;
+    type ExtraRunData<'a>: Send + Sync + Clone;
 
     fn contains_system(&self, name: &str) -> bool {
         for system in self.systems() {
@@ -78,7 +78,7 @@ pub(crate) trait IsBatch: std::fmt::Debug + Default {
     fn run(
         &mut self,
         parallelism: u32,
-        _: Self::ExtraRunData,
+        _: Self::ExtraRunData<'_>,
         resource_manager: &mut ResourceManager,
     ) -> anyhow::Result<()>;
 }
@@ -182,7 +182,7 @@ pub(crate) trait IsSchedule: std::fmt::Debug {
 
     fn run(
         &mut self,
-        extra: <Self::Batch as IsBatch>::ExtraRunData,
+        extra: <Self::Batch as IsBatch>::ExtraRunData<'_>,
         resource_manager: &mut ResourceManager,
     ) -> anyhow::Result<()> {
         resource_manager.unify_resources("IsSchedule::run before all")?;

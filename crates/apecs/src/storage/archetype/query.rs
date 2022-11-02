@@ -873,10 +873,6 @@ where
         let all = Read::<Components>::construct(loan_mngr)?;
         Ok(Query(Box::new(all), PhantomData))
     }
-
-    fn plugin() -> apecs::Plugin {
-        apecs::Plugin::default().with_resource::<Components>()
-    }
 }
 
 impl<Q> Query<Q>

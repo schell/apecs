@@ -8,13 +8,17 @@ async fn can_run_async() {
     let (tx, rx) = mpsc::bounded(1);
     let mut world = World::default();
     world
-        .with_async(async move {
+        .with_async("tx", |_| async move {
             tx.send(()).await.unwrap();
+            Ok(())
         })
-        .with_async(async move {
+        .unwrap()
+        .with_async("rx", |_| async move {
             rx.recv().await.unwrap();
-        });
-    world.run();
+            Ok(())
+        })
+        .unwrap();
+    world.run().unwrap();
 }
 
 #[wasm_bindgen_test]
@@ -56,9 +60,12 @@ fn parallelism() {
     world
         .with_resource(0u32)
         .unwrap()
-        .with_async_system("one", one)
-        .with_async_system("two", two)
-        .with_async_system("three", three)
+        .with_async("one", one)
+        .unwrap()
+        .with_async("two", two)
+        .unwrap()
+        .with_async("three", three)
+        .unwrap()
         .with_parallelism(Parallelism::Automatic);
-    world.run();
+    world.run().unwrap();
 }

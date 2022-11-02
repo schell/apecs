@@ -7,8 +7,8 @@ use std::sync::Arc;
 use std::{any::Any, collections::VecDeque};
 
 use anyhow::Context;
-use async_executor::{Task, Executor};
-use rustc_hash::FxHashSet;
+use async_executor::{Executor, Task};
+use rustc_hash::FxHashMap;
 
 use crate::QueryGuard;
 use crate::{
@@ -17,10 +17,7 @@ use crate::{
     resource_manager::{LoanManager, ResourceManager},
     schedule::{Dependency, IsSchedule},
     storage::{Components, Entry, IsBundle, IsQuery},
-    system::{
-        AsyncSchedule, AsyncSystem, AsyncSystemFuture, AsyncSystemRequest, ShouldContinue,
-        SyncSchedule, SyncSystem,
-    },
+    system::{AsyncSchedule, ShouldContinue, SyncSchedule, SyncSystem},
     CanFetch, IsResource, LazyResource, Request, Resource, ResourceId, Write,
 };
 
@@ -29,10 +26,11 @@ use crate::{
 /// A facade is a window into the world, by which an async system can interact
 /// with the world through [`Facade::visit`], without causing resource
 /// contention.
+#[derive(Clone)]
 pub struct Facade {
     // Unbounded. Sending a request from the system should not yield the async
-    pub(crate) resource_request_tx: spsc::Sender<Request>,
-    pub(crate) async_task_executor: Arc<async_executor::Executor<'static>>,
+    pub(crate) resource_request_tx: mpsc::Sender<Request>,
+    pub(crate) executor: Arc<async_executor::Executor<'static>>,
 }
 
 impl Facade {
@@ -87,7 +85,7 @@ impl Facade {
         &self,
         future: impl Future<Output = T> + Send + 'static,
     ) -> Task<T> {
-        self.async_task_executor.spawn(future)
+        self.executor.spawn(future)
     }
 }
 
@@ -102,55 +100,6 @@ pub struct LazyOp {
     tx: chan::oneshot::Sender<Arc<dyn Any + Send + Sync>>,
 }
 
-/// A resource used to gain safe access to the entire world.
-///
-/// `LazyWorld` exists in the world automatically and should be fetched as
-/// `Read<LazyWorld, NoDefault>`.
-///
-/// This is used primarily from syncronous systems to spawn async actions
-/// but can also be used to alter anything inside the world.
-///
-/// Modifications made to the world through this resource are applied
-/// in [`World::tick_lazy`].
-pub struct LazyWorld {
-    op_sender: mpsc::Sender<LazyOp>,
-    async_task_executor: Arc<Executor<'static>>,
-}
-
-impl LazyWorld {
-    /// Conduct a mutation of the world.
-    ///
-    /// Sends the result on a [`oneshot::Receiver<T>`] after completion.
-    pub fn world_mut<T: Send + Sync + 'static>(
-        &self,
-        f: impl FnOnce(&mut World) -> T + Send + Sync + 'static,
-    ) -> oneshot::Receiver<T> {
-        let (mut tx, rx) = oneshot::oneshot();
-        let (dummy_tx,_ ) = oneshot::oneshot();
-        let op = Box::new(move |world: &mut World| {
-            let t = (f)(world);
-            let _ = tx.send(t);
-
-            let arc_any = Arc::new(()) as Arc<dyn Any + Send + Sync>;
-            Ok(arc_any)
-        });
-        // UNWRAP: safe because unbounded
-        self.op_sender.try_send(LazyOp {
-            op, tx: dummy_tx
-        }).unwrap();
-
-        rx
-    }
-
-    /// Spawn a task onto the world's async task executor.
-    pub fn spawn<T: Send + Sync + 'static>(
-        &self,
-        future: impl Future<Output = T> + Send + 'static,
-    ) -> Task<T> {
-        self.async_task_executor.spawn(future)
-    }
-}
-
 /// Associates a group of components within the world.
 ///
 /// Entities are mostly just `usize` identifiers that help locate components,
@@ -163,21 +112,23 @@ impl LazyWorld {
 /// # use apecs::*;
 /// let mut world = World::default();
 /// // asynchronously create new entities from within an async system
-/// world.with_async_system("spawn-b-entity", |mut facade: Facade| async move {
-///     let mut b = facade
-///         .visit(|mut ents: Write<Entities>| {
-///             Ok(ents.create().with_bundle((123, "entity B", true)))
-///         })
-///         .await?;
-///     // after this await `b` has its bundle
-///     b.updates().await;
-///     // visit a component or bundle
-///     let did_visit = b
-///         .visit::<&&str, ()>(|name| assert_eq!("entity B", *name.value()))
-///         .await
-///         .is_some();
-///     Ok(())
-/// });
+/// world
+///     .with_async("spawn-b-entity", |mut facade: Facade| async move {
+///         let mut b = facade
+///             .visit(|mut ents: Write<Entities>| {
+///                 Ok(ents.create().with_bundle((123, "entity B", true)))
+///             })
+///             .await?;
+///         // after this await `b` has its bundle
+///         b.updates().await;
+///         // visit a component or bundle
+///         let did_visit = b
+///             .visit::<&&str, ()>(|name| assert_eq!("entity B", *name.value()))
+///             .await
+///             .is_some();
+///         Ok(())
+///     })
+///     .unwrap();
 /// world.run();
 /// ```
 /// Alternatively, if you have access to the [`Components`] resource you can
@@ -561,27 +512,27 @@ impl Entities {
     }
 }
 
-pub(crate) fn make_async_system_pack<F, Fut>(
-    name: String,
-    async_task_executor: Arc<async_executor::Executor<'static>>,
-    make_system_future: F,
-) -> (AsyncSystem, AsyncSystemFuture)
-where
-    F: FnOnce(Facade) -> Fut,
-    Fut: Future<Output = anyhow::Result<()>> + Send + Sync + 'static,
-{
-    let (resource_request_tx, resource_request_rx) = spsc::unbounded();
-    let facade = Facade {
-        resource_request_tx,
-        async_task_executor,
-    };
-    let system = AsyncSystem {
-        name: name.clone(),
-        resource_request_rx,
-    };
-    let asys = Box::pin((make_system_future)(facade));
-    (system, asys)
-}
+// pub(crate) fn make_async_system_pack<F, Fut>(
+//    name: String,
+//    async_task_executor: Arc<async_executor::Executor<'static>>,
+//    make_system_future: F,
+//) -> (AsyncSystem, AsyncSystemFuture)
+// where
+//    F: FnOnce(Facade) -> Fut,
+//    Fut: Future<Output = anyhow::Result<()>> + Send + Sync + 'static,
+//{
+//    let (resource_request_tx, resource_request_rx) = mpsc::unbounded();
+//    let facade = Facade {
+//        resource_request_tx,
+//        async_task_executor,
+//    };
+//    let system = AsyncSystem {
+//        name: name.clone(),
+//        resource_request_rx,
+//    };
+//    let asys = Box::pin((make_system_future)(facade));
+//    (system, asys)
+//}
 
 /// Defines the number of threads to use for inner and outer parallelism.
 pub enum Parallelism {
@@ -624,7 +575,7 @@ pub enum Parallelism {
 ///         },
 ///     )
 ///     .unwrap()
-///     .with_async_system("await_hello", |mut facade: Facade| async move {
+///     .with_async("await_hello", |mut facade: Facade| async move {
 ///         let mut rx = facade
 ///             .visit(|mut data: MyAppData| Ok(data.channel.new_receiver()))
 ///             .await?;
@@ -632,7 +583,8 @@ pub enum Parallelism {
 ///             println!("got message: {}", msg);
 ///         }
 ///         Ok(())
-///     });
+///     })
+///     .unwrap();
 /// world.run();
 /// ```
 ///
@@ -675,10 +627,10 @@ pub enum Parallelism {
 pub struct World {
     pub(crate) resource_manager: ResourceManager,
     pub(crate) sync_schedule: SyncSchedule,
-    pub(crate) async_systems: Vec<AsyncSystem>,
-    pub(crate) async_system_executor: async_executor::Executor<'static>,
-    // executor for non-system futures
-    pub(crate) async_task_executor: Arc<async_executor::Executor<'static>>,
+    pub(crate) async_systems: FxHashMap<String, oneshot::Receiver<anyhow::Result<()>>>,
+    pub(crate) facade: Facade,
+    // TODO: change this to a "command" receiver in which `Request` is just one variant
+    pub(crate) command_rx: mpsc::Receiver<Request>,
     pub(crate) lazy_ops: (mpsc::Sender<LazyOp>, mpsc::Receiver<LazyOp>),
 }
 
@@ -686,18 +638,19 @@ impl Default for World {
     fn default() -> Self {
         let lazy_ops = mpsc::unbounded();
         let entities = Entities::new(lazy_ops.0.clone());
-        let lazy_world = LazyWorld {
-            op_sender: lazy_ops.0.clone(),
-            async_task_executor: Default::default()
+        let async_task_executor = Arc::new(Executor::default());
+        let (tx, rx) = mpsc::unbounded();
+        let facade = Facade {
+            resource_request_tx: tx,
+            executor: async_task_executor,
         };
-
         let mut world = Self {
             resource_manager: ResourceManager::default(),
             sync_schedule: SyncSchedule::default(),
-            async_systems: vec![],
-            async_system_executor: Default::default(),
-            async_task_executor: lazy_world.async_task_executor.clone(),
-            lazy_ops
+            async_systems: FxHashMap::default(),
+            facade: facade.clone(),
+            command_rx: rx,
+            lazy_ops,
         };
 
         world
@@ -705,13 +658,23 @@ impl Default for World {
             .unwrap()
             .with_resource(Components::default())
             .unwrap()
-            .with_resource(lazy_world)
+            .with_resource(facade)
             .unwrap();
         world
     }
 }
 
 impl World {
+    /// Create a `Plugin` to build the world.
+    pub fn builder() -> Plugin {
+        Plugin::default()
+    }
+
+    /// Create a new facade
+    pub fn facade(&self) -> Facade {
+        self.facade.clone()
+    }
+
     pub fn with_default_resource<T: Default + IsResource>(&mut self) -> anyhow::Result<&mut Self> {
         let resource: T = T::default();
         self.with_resource(resource)
@@ -742,24 +705,31 @@ impl World {
     /// ## Errs
     /// Errs if the plugin requires resources that cannot be created by default.
     pub fn with_plugin(&mut self, plugin: impl Into<Plugin>) -> anyhow::Result<&mut Self> {
-        let plugin = plugin.into();
+        let plugin: Plugin = plugin.into();
 
-        let mut missing_required_resources: FxHashSet<ResourceId> = FxHashSet::default();
+        let mut missing_resources: FxHashMap<ResourceId, Vec<anyhow::Error>> = FxHashMap::default();
         for LazyResource { id, create } in plugin.resources.into_iter() {
             if !self.resource_manager.has_resource(&id) {
-                log::trace!("attempting to create missing resource {}...", id.name);
-                let resource = (create)(&mut self.resource_manager.as_mut_loan_manager())?;
-                missing_required_resources.remove(&id);
-                let _ = self.resource_manager.insert(id, resource);
+                log::debug!("attempting to create missing resource {}...", id.name);
+                match (create)(&mut self.resource_manager.as_mut_loan_manager()) {
+                    Ok(resource) => {
+                        missing_resources.remove(&id);
+                        let _ = self.resource_manager.insert(id, resource);
+                    }
+                    Err(err) => {
+                        let entry = missing_resources.entry(id).or_default();
+                        entry.push(err);
+                    }
+                }
                 self.resource_manager
                     .unify_resources("after building lazy dep")?;
             }
         }
 
         anyhow::ensure!(
-            missing_required_resources.is_empty(),
-            "missing required resources:\n{:#?}",
-            missing_required_resources
+            missing_resources.is_empty(),
+            "missing resources:\n{:#?}",
+            missing_resources
         );
 
         for system in plugin.sync_systems.into_iter() {
@@ -768,16 +738,12 @@ impl World {
             }
         }
 
-        'outer: for asystem in plugin.async_systems.into_iter() {
-            for asys in self.async_systems.iter() {
-                if asys.name == asystem.0 {
-                    continue 'outer;
-                }
+        for asystem in plugin.async_systems.into_iter() {
+            if self.async_systems.contains_key(&asystem.name) {
+                continue;
             }
 
-            let (sys, fut) =
-                make_async_system_pack(asystem.0, self.async_task_executor.clone(), asystem.1);
-            self.add_async_system_pack(sys, fut);
+            self.with_async(asystem.name, asystem.make_future).unwrap();
         }
 
         Ok(self)
@@ -873,53 +839,33 @@ impl World {
         self
     }
 
-    pub(crate) fn add_async_system_pack(&mut self, system: AsyncSystem, fut: AsyncSystemFuture) {
-        let name = system.name.clone();
-        self.async_systems.push(system);
-
-        let future = async move {
-            match fut.await {
-                Ok(()) => {}
-                Err(err) => {
-                    let msg = err
-                        .chain()
-                        .map(|err| format!("{}", err))
-                        .collect::<Vec<_>>()
-                        .join("\n  ");
-                    panic!("async system '{}' erred: {}", name, msg);
-                }
-            }
-        };
-
-        let task = self.async_system_executor.spawn(future);
-        task.detach();
-    }
-
-    pub fn with_async_system<F, Fut>(
+    /// Spawn an asyncronous task that takes a `Facade` as input.
+    pub fn with_async<F, Fut>(
         &mut self,
-        name: impl AsRef<str>,
+        name: impl Into<String>,
         make_system_future: F,
-    ) -> &mut Self
+    ) -> anyhow::Result<&mut Self>
     where
         F: FnOnce(Facade) -> Fut,
         Fut: Future<Output = anyhow::Result<()>> + Send + Sync + 'static,
     {
-        let (system, fut) = make_async_system_pack(
-            name.as_ref().to_string(),
-            self.async_task_executor.clone(),
-            make_system_future,
-        );
-        self.add_async_system_pack(system, fut);
+        let name = name.into();
+        if self.async_systems.contains_key(&name) {
+            anyhow::bail!("async system '{}' already exists", name);
+        }
 
-        self
-    }
+        let facade = self.facade.clone();
+        let (mut tx, rx) = oneshot::oneshot();
+        let fut = (make_system_future)(facade);
+        let task = self.facade.spawn(async move {
+            let result = fut.await;
+            // UNWRAP: if we can't unwrap this all is lost
+            tx.send(result).unwrap();
+        });
+        task.detach();
+        self.async_systems.insert(name, rx);
 
-    pub fn with_async(
-        &mut self,
-        future: impl Future<Output = ()> + Send + Sync + 'static,
-    ) -> &mut Self {
-        self.spawn(future);
-        self
+        Ok(self)
     }
 
     /// Returns whether a resources of the given type exists in the world.
@@ -929,7 +875,7 @@ impl World {
 
     /// Spawn an asynchronous task.
     pub fn spawn(&self, future: impl Future<Output = ()> + Send + Sync + 'static) {
-        let task = self.async_task_executor.spawn(future);
+        let task = self.facade.executor.spawn(future);
         task.detach();
     }
 
@@ -937,10 +883,21 @@ impl World {
     ///
     /// Calls `World::tick_async`, then `World::tick_sync`, then
     /// `World::tick_lazy`.
+    pub fn tick(&mut self) -> anyhow::Result<()> {
+        self.tick_async()?;
+        self.tick_sync()?;
+        self.tick_lazy()?;
+        Ok(())
+    }
+
+    /// Conduct a world tick, but panic if the result is not `Ok`.
+    ///
+    /// Calls `World::tick_async`, then `World::tick_sync`, then
+    /// `World::tick_lazy`.
     ///
     /// ## Panics
-    /// Panics if any sub-tick step returns an error
-    pub fn tick(&mut self) {
+    /// Panics if the result is not `Ok`
+    pub fn tock(&mut self) {
         self.tick_async().unwrap();
         self.tick_sync().unwrap();
         self.tick_lazy().unwrap();
@@ -967,51 +924,46 @@ impl World {
 
         // trim the systems that may request resources by checking their
         // resource request/return channels
-        self.async_systems.retain(|system| {
-            // if the channels are closed they have been dropped by the
-            // async system and we should no longer poll them for requests
-            if system.resource_request_rx.is_closed() {
-                log::trace!(
-                    "removing {} from the system resource requester pool, it has dropped its \
-                     request channel",
-                    system.name
-                );
-                false
-            } else {
-                true
+        for (name, rx) in std::mem::take(&mut self.async_systems).into_iter() {
+            // * if the channels are closed they have been dropped by the async system and
+            //   we should no longer poll them for requests
+            // * similarly, if they have finished we should no longer poll them
+            match rx.try_recv() {
+                Err(err) => match err {
+                    oneshot::TryRecvError::Empty(rx) => {
+                        self.async_systems.insert(name, rx);
+                    }
+                    oneshot::TryRecvError::Closed => {}
+                },
+                Ok(res) => res?,
             }
-        });
+        }
 
         // fetch all the requests for system resources and fold them into a schedule
-        let mut schedule =
-            self.async_systems
-                .iter()
-                .fold(AsyncSchedule::default(), |mut schedule, system| {
-                    if let Some(request) = system.resource_request_rx.try_recv().ok() {
-                        schedule.add_system(AsyncSystemRequest(&system, request));
-                    }
-                    schedule
-                });
-
+        let mut schedule = AsyncSchedule::default();
+        while let Ok(request) = self.command_rx.try_recv() {
+            schedule.add_system(request);
+        }
         if !schedule.is_empty() {
             log::trace!(
                 "async system execution:\n{}",
                 schedule.get_execution_order().join("\n")
             );
-            schedule.run(&self.async_system_executor, &mut self.resource_manager)?;
+            schedule.run(&self.facade.executor, &mut self.resource_manager)?;
         } else {
-            // do one tick anyway, because most async systems don't require scheduling
-            // (especially the first frame)
-            let _ = self.async_system_executor.try_tick();
-        }
-
-        // lastly tick all our non-system tasks
-        if !self.async_task_executor.is_empty() {
-            let mut ticks = 0;
-            while self.async_task_executor.try_tick() {
-                ticks += 1;
+            fn tick(executor: &Executor<'static>) {
+                while executor.try_tick() {}
             }
-            log::trace!("ticked {} futures", ticks);
+            // tick the executor
+            let parallelism = self.sync_schedule.get_parallelism();
+            if parallelism > 1 {
+                rayon::prelude::ParallelIterator::for_each(
+                    rayon::prelude::IntoParallelIterator::into_par_iter(0..parallelism as u32),
+                    |_| tick(&self.facade.executor),
+                );
+            } else {
+                tick(&self.facade.executor);
+            }
         }
 
         self.resource_manager.unify_resources("tick async")?;
@@ -1063,18 +1015,46 @@ impl World {
 
     /// Run all systems and futures until they have finished or one system has
     /// erred, whichever comes first.
-    pub fn run(&mut self) -> &mut Self {
+    pub fn run(&mut self) -> anyhow::Result<&mut Self> {
         loop {
-            self.tick();
+            self.tick()?;
             if self.async_systems.is_empty()
                 && self.sync_schedule.is_empty()
-                && self.async_task_executor.is_empty()
+                && self.facade.executor.is_empty()
             {
                 break;
             }
         }
 
-        self
+        Ok(self)
+    }
+
+    /// Run all systems and futures until the given async system ends, or the
+    /// world encounters an error.
+    pub fn run_while<T, F, Fut>(&mut self, make_system_future: F) -> anyhow::Result<T>
+    where
+        T: Send + Sync + 'static,
+        F: FnOnce(Facade) -> Fut,
+        Fut: Future<Output = T> + Send + Sync + 'static,
+    {
+        let (tx, rx) = spsc::bounded(1);
+        let fut = (make_system_future)(self.facade.clone());
+        self.spawn(async move {
+            let t = fut.await;
+            // UNWRAP: safe because we will not drop the receiver until after receiving
+            tx.try_send(t).unwrap();
+        });
+
+        loop {
+            self.tick()?;
+            match rx.try_recv() {
+                Ok(t) => return Ok(t),
+                Err(err) => match err {
+                    spsc::TryRecvError::Empty => {}
+                    spsc::TryRecvError::Closed => unreachable!("this should never happen"),
+                },
+            }
+        }
     }
 
     /// Attempt to get a reference to one resource.
@@ -1157,6 +1137,7 @@ mod test {
         world::*,
         CanFetch, Read, Write,
     };
+    use futures_lite::future;
     use rustc_hash::FxHashMap;
 
     #[derive(Default)]
@@ -1210,7 +1191,7 @@ mod test {
             archset.insert_component(2, F32s(100.0, 100.0));
         }
 
-        world.tick();
+        world.tock();
 
         let highest = rx.try_recv().unwrap();
         assert_eq!(F32s(100.0, 100.0), highest);
@@ -1259,17 +1240,18 @@ mod test {
         let (tx, rx) = spsc::bounded(1);
         let mut world = World::default();
         world
-            .with_async_system("create", |facade| async move { create(tx, facade).await })
+            .with_async("create", |facade| async move { create(tx, facade).await })
+            .unwrap()
             .with_system("maintain", maintain_map)
             .unwrap();
 
         // create system runs - sending on the channel and making the fetch request
-        world.tick();
+        world.tock();
         rx.try_recv().unwrap();
 
         // world sends resources to the create system which makes
         // entities+components, then the maintain system updates the book
-        world.tick();
+        world.tock();
 
         let book = world.fetch::<Read<MyMap>>().unwrap();
         for n in 0..100 {
@@ -1287,14 +1269,17 @@ mod test {
         let e = world.entity().with_bundle((DataA(0.0), DataB(0.0)));
         let id = e.id();
 
-        world.with_async(async move {
-            println!("updating entity");
-            e.with_bundle((DataA(666.0), DataB(666.0))).updates().await;
-            println!("done!");
-        });
+        world
+            .with_async("insert-bundle", |_| async move {
+                println!("updating entity");
+                e.with_bundle((DataA(666.0), DataB(666.0))).updates().await;
+                println!("done!");
+                Ok(())
+            })
+            .unwrap();
 
-        while !world.async_task_executor.is_empty() {
-            world.tick();
+        while !world.facade.executor.is_empty() {
+            world.tick().unwrap();
         }
 
         let data: Query<(&DataA, &DataB)> = world.fetch().unwrap();
@@ -1319,37 +1304,39 @@ mod test {
         let await_points = Arc::new(Mutex::new(vec![]));
         let awaits = await_points.clone();
         let mut world = World::default();
-        world.with_async_system("test", |mut facade| async move {
-            await_points.lock().unwrap().push(1);
-            let mut e = {
-                let e = facade
-                    .visit(|mut entities: Write<Entities>| Ok(entities.create()))
+        world
+            .with_async("test", |mut facade| async move {
+                await_points.lock().unwrap().push(1);
+                let mut e = {
+                    let e = facade
+                        .visit(|mut entities: Write<Entities>| Ok(entities.create()))
+                        .await
+                        .unwrap();
+                    await_points.lock().unwrap().push(2);
+                    e
+                };
+
+                e.insert_bundle((Name("ada"), Age(666)));
+                e.updates().await;
+                await_points.lock().unwrap().push(3);
+
+                let (name, age) = e
+                    .visit::<(&Name, &Age), _>(|(name, age)| {
+                        (name.value().clone(), age.value().clone())
+                    })
                     .await
                     .unwrap();
-                await_points.lock().unwrap().push(2);
-                e
-            };
+                await_points.lock().unwrap().push(4);
+                assert_eq!(Name("ada"), name);
+                assert_eq!(Age(666), age);
 
-            e.insert_bundle((Name("ada"), Age(666)));
-            e.updates().await;
-            await_points.lock().unwrap().push(3);
-
-            let (name, age) = e
-                .visit::<(&Name, &Age), _>(|(name, age)| {
-                    (name.value().clone(), age.value().clone())
-                })
-                .await
-                .unwrap();
-            await_points.lock().unwrap().push(4);
-            assert_eq!(Name("ada"), name);
-            assert_eq!(Age(666), age);
-
-            println!("done!");
-            Ok(())
-        });
+                println!("done!");
+                Ok(())
+            })
+            .unwrap();
 
         for i in 1..=5 {
-            world.tick();
+            world.tock();
             // there should only be 4 awaits because the system exits after the 4th
             let num_awaits = i.min(4);
             assert_eq!(Some(num_awaits), awaits.lock().unwrap().last().cloned());
@@ -1404,7 +1391,7 @@ mod test {
                 ok()
             })
             .unwrap();
-        world.tick();
+        world.tock();
     }
 
     #[test]
@@ -1416,7 +1403,7 @@ mod test {
 
         let mut world = World::default();
         world
-            .with_async_system("one", |mut facade: Facade| -> AsyncSystemFuture {
+            .with_async("one", |mut facade: Facade| -> AsyncSystemFuture {
                 Box::pin(async move {
                     facade
                         .visit(|mut number: Write<Number>| {
@@ -1426,7 +1413,8 @@ mod test {
                         .await
                 })
             })
-            .with_async_system("two", |mut facade: Facade| -> AsyncSystemFuture {
+            .unwrap()
+            .with_async("two", |mut facade: Facade| -> AsyncSystemFuture {
                 Box::pin(async move {
                     for _ in 0..2 {
                         facade
@@ -1439,7 +1427,8 @@ mod test {
                     Ok(())
                 })
             })
-            .with_async_system("three", |mut facade: Facade| -> AsyncSystemFuture {
+            .unwrap()
+            .with_async("three", |mut facade: Facade| -> AsyncSystemFuture {
                 Box::pin(async move {
                     for _ in 0..3 {
                         facade
@@ -1452,8 +1441,9 @@ mod test {
                     Ok(())
                 })
             })
+            .unwrap()
             .with_parallelism(Parallelism::Automatic);
-        world.run();
+        world.run().unwrap();
     }
 
     #[test]
@@ -1473,7 +1463,7 @@ mod test {
             });
             assert_eq!(10, entities.alive_len());
         }
-        world.tick();
+        world.tock();
         {
             let q: Query<&u32> = world.fetch().unwrap();
             assert_eq!(9, **q.query().find_one(9).unwrap());
@@ -1483,7 +1473,7 @@ mod test {
             let entity = entities.hydrate(9).unwrap();
             entities.destroy(entity);
         }
-        world.tick();
+        world.tock();
         {
             let entities: &Entities = world.resource().unwrap();
             assert_eq!(9, entities.alive_len());
@@ -1500,5 +1490,60 @@ mod test {
         tx.try_send(()).unwrap();
         drop(tx);
         assert!(rx.try_recv().is_ok());
+    }
+
+    #[test]
+    fn can_clone_facade() {
+        let mut world = World::default();
+        world
+            .with_async("async", |mut facade_a: Facade| async move {
+                let (tx, rx) = spsc::bounded(1);
+                let mut facade_b = facade_a.clone();
+
+                #[allow(unreachable_code)]
+                let send_loop = async move {
+                    loop {
+                        println!("send_loop visiting");
+                        let count = facade_a.visit(|count: Read<u32>| Ok(*count)).await?;
+                        println!("send_loop sending");
+                        tx.send(count).await.unwrap();
+                    }
+
+                    anyhow::Ok(())
+                };
+
+                #[allow(unreachable_code)]
+                let recv_loop = async move {
+                    loop {
+                        println!("recv_loop receiving");
+                        let recv_count: u32 = rx.recv().await.unwrap();
+                        println!("recv_loop visiting");
+                        facade_b
+                            .visit(|mut count: Write<u32>| {
+                                *count = recv_count + 1;
+                                println!("recv_loop updated count to {}", recv_count + 1);
+                                Ok(())
+                            })
+                            .await?;
+                    }
+
+                    anyhow::Ok(())
+                };
+
+                let _ = future::zip(send_loop, recv_loop).await;
+                Ok(())
+            })
+            .unwrap()
+            .run_while(|mut facade| async move {
+                loop {
+                    let count = facade.visit(|count: Read<u32>| Ok(*count)).await?;
+                    println!("run_while loop counted {}", count);
+                    if count >= 3 {
+                        return anyhow::Ok(());
+                    }
+                }
+            })
+            .unwrap()
+            .unwrap();
     }
 }

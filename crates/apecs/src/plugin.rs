@@ -10,7 +10,7 @@ use crate::{
     schedule::Dependency,
     system::{AsyncSystemFuture, ShouldContinue, SyncSystem},
     world::Facade,
-    CanFetch, IsResource, LazyResource,
+    CanFetch, IsResource, LazyResource, World,
 };
 
 pub struct SyncSystemWithDeps(pub SyncSystem);
@@ -42,19 +42,12 @@ impl SyncSystemWithDeps {
     }
 }
 
-pub struct LazyAsyncSystem(pub String, pub Box<dyn FnOnce(Facade) -> AsyncSystemFuture>);
-
-impl<A, B> From<(A, B)> for Plugin
-where
-    A: Into<Plugin>,
-    B: Into<Plugin>,
-{
-    fn from((a, b): (A, B)) -> Self {
-        a.into().with_plugin(b.into())
-    }
+pub struct LazyAsyncSystem {
+    pub name: String,
+    pub make_future: Box<dyn FnOnce(Facade) -> AsyncSystemFuture>,
 }
 
-/// A composition of resource requirements and systems.
+/// A builder of resource requirements and systems.
 ///
 /// A plugin can contain duplicate entries of resources and systems. At the time
 /// when the plugin is loaded into the world with
@@ -76,17 +69,6 @@ impl Plugin {
         self
     }
 
-    /// Add a dependency on a resource that can be created with
-    /// [`Default::default`].
-    ///
-    /// If this resource does not already exist in the world at the time this
-    /// plugin is instantiated, it will be inserted into the
-    /// [`World`](crate::World).
-    pub fn with_resource<T: IsResource + Default>(mut self) -> Self {
-        self.resources.push(LazyResource::new(|_| Ok(T::default())));
-        self
-    }
-
     /// Add a dependency on a resource that may be created using other existing
     /// and fetchable resources.
     ///
@@ -94,7 +76,7 @@ impl Plugin {
     /// plugin is instantiated, it will be inserted into the
     /// [`World`](crate::World), if possible - otherwise instantiation will
     /// err.
-    pub fn with_dependent_resource<S: CanFetch, T: IsResource>(
+    pub fn with_resource<S: CanFetch, T: IsResource>(
         mut self,
         create: impl FnOnce(S) -> anyhow::Result<T> + 'static,
     ) -> Self {
@@ -136,25 +118,33 @@ impl Plugin {
         self.with_plugin(T::plugin())
     }
 
-    pub fn with_async_system<Fut>(
+    pub fn with_async<Fut>(
         mut self,
-        name: &str,
+        name: impl Into<String>,
         system: impl FnOnce(Facade) -> Fut + 'static,
     ) -> Self
     where
         Fut: Future<Output = anyhow::Result<()>> + Send + Sync + 'static,
     {
-        self.async_systems.push(LazyAsyncSystem(
-            name.to_string(),
-            Box::new(move |facade| Box::pin(system(facade))),
-        ));
+        let name = name.into();
+        self.async_systems.push(LazyAsyncSystem {
+            name,
+            make_future: Box::new(move |facade| Box::pin(system(facade))),
+        });
         self
+    }
+
+    /// Build a world from this plugin.
+    pub fn build(self) -> anyhow::Result<World> {
+        let mut world = World::default();
+        world.with_plugin(self)?;
+        Ok(world)
     }
 }
 
 #[cfg(test)]
 mod test {
-    use crate::{self as apecs, storage::*, system::*, world::World, CanFetch, Plugin, Read};
+    use crate::{self as apecs, storage::*, system::*, world::World, Plugin, Read};
 
     #[derive(Default)]
     pub struct Number(u32);
@@ -177,9 +167,6 @@ mod test {
             ok()
         }
 
-        let plugin = MyData::plugin();
-        assert_eq!(1, plugin.resources.len());
-
         let mut world = World::default();
         world.with_system("my_system", my_system).unwrap();
 
@@ -189,7 +176,7 @@ mod test {
     #[test]
     fn can_build_dependent_resources() {
         let plugin = Plugin::default()
-            .with_dependent_resource::<Read<Number>, bool>(|num| Ok(num.inner().0 == 0));
+            .with_resource::<Read<Number>, bool>(|num| Ok(num.inner().0 == 0));
         let mut world = World::default();
         world.with_plugin(plugin).unwrap();
 

@@ -91,7 +91,8 @@ systems do the hot-path work that completes those async operations as fast as po
 
   let mut world = World::default();
   world
-      .with_async_system("demo", demo);
+      .with_async("demo", demo)
+      .unwrap();
   world.run();
   assert_eq!(Number(6), *world.resource::<Number>().unwrap());
   ```
@@ -100,7 +101,7 @@ systems do the hot-path work that completes those async operations as fast as po
   use apecs::*;
   let mut world = World::default();
   world
-      .with_async(async {
+      .spawn(async {
           log::trace!("hello");
       });
   world.run();

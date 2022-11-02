@@ -79,10 +79,11 @@ fn system_batch_drops_resources_after_racing_asyncs() {
     world
         .with_system("ticker", ticker)
         .unwrap()
-        .with_async_system("system", system);
+        .with_async("system", system)
+        .unwrap();
 
-    world.tick();
-    world.tick();
-    world.tick();
-    world.tick();
+    world.tick().unwrap();
+    world.tick().unwrap();
+    world.tick().unwrap();
+    world.tick().unwrap();
 }

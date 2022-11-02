@@ -4,7 +4,6 @@ use anyhow::Context;
 use rayon::prelude::*;
 
 use super::{
-    chan::spsc,
     resource_manager::{LoanManager, ResourceManager},
     schedule::{Borrow, Dependency, IsBatch, IsSchedule, IsSystem},
     CanFetch, Request, Resource,
@@ -31,15 +30,6 @@ pub(crate) fn increment_current_iteration() -> u64 {
 /// A future representing an async system.
 pub type AsyncSystemFuture =
     Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + Sync + 'static>>;
-
-#[derive(Debug)]
-pub(crate) struct AsyncSystem {
-    pub name: String,
-    // The system logic as a future.
-    // pub future: AsyncSystemFuture,
-    // Unbounded. Used to send resource requests from the system to the world.
-    pub resource_request_rx: spsc::Receiver<Request>,
-}
 
 /// Whether or not a system should continue execution.
 pub enum ShouldContinue {
@@ -146,7 +136,7 @@ pub struct SyncBatch(Vec<SyncSystem>, usize);
 
 impl IsBatch for SyncBatch {
     type System = SyncSystem;
-    type ExtraRunData = ();
+    type ExtraRunData<'a> = ();
 
     fn systems(&self) -> &[Self::System] {
         &self.0
@@ -183,7 +173,7 @@ impl IsBatch for SyncBatch {
     fn run(
         &mut self,
         parallelism: u32,
-        _: Self::ExtraRunData,
+        _: Self::ExtraRunData<'_>,
         resource_manager: &mut ResourceManager,
     ) -> anyhow::Result<()> {
         let mut loan_mngr = LoanManager(resource_manager);
@@ -287,17 +277,14 @@ impl IsSchedule for SyncSchedule {
     }
 }
 
-#[derive(Debug)]
-pub(crate) struct AsyncSystemRequest<'a>(pub &'a AsyncSystem, pub Request);
-
 /// In terms of system resource scheduling a request is a system.
-impl<'a> IsSystem for AsyncSystemRequest<'a> {
+impl IsSystem for Request {
     fn name(&self) -> &str {
-        &self.0.name
+        "async"
     }
 
     fn borrows(&self) -> &[Borrow] {
-        &self.1.borrows
+        &self.borrows
     }
 
     fn dependencies(&self) -> &[Dependency] {
@@ -311,7 +298,7 @@ impl<'a> IsSystem for AsyncSystemRequest<'a> {
     fn set_barrier(&mut self, _: usize) {}
 
     fn prep(&self, loan_mngr: &mut LoanManager<'_>) -> anyhow::Result<Resource> {
-        (self.1.construct)(loan_mngr)
+        (self.construct)(loan_mngr)
     }
 
     fn run(&mut self, data: Resource) -> anyhow::Result<ShouldContinue> {
@@ -319,17 +306,17 @@ impl<'a> IsSystem for AsyncSystemRequest<'a> {
         // receiver, eg cases where an async system had two asyncs being `race`d
         // and one of them won (and the one that lost had just called facade.visit and
         // was awaiting resources)
-        let _ = self.1.deploy_tx.send(data);
+        let _ = self.deploy_tx.send(data);
         ok()
     }
 }
 
 #[derive(Debug, Default)]
-pub struct AsyncBatch<'a>(Vec<AsyncSystemRequest<'a>>);
+pub struct AsyncBatch(Vec<Request>);
 
-impl<'a> IsBatch for AsyncBatch<'a> {
-    type System = AsyncSystemRequest<'a>;
-    type ExtraRunData = &'a async_executor::Executor<'static>;
+impl IsBatch for AsyncBatch {
+    type System = Request;
+    type ExtraRunData<'a> = &'a async_executor::Executor<'static>;
 
     fn systems(&self) -> &[Self::System] {
         self.0.as_slice()
@@ -364,7 +351,7 @@ impl<'a> IsBatch for AsyncBatch<'a> {
     fn run(
         &mut self,
         parallelism: u32,
-        extra: &'a async_executor::Executor<'static>,
+        extra: &async_executor::Executor<'static>,
         resource_manager: &mut ResourceManager,
     ) -> anyhow::Result<()> {
         let mut loan_mngr = LoanManager(resource_manager);
@@ -377,22 +364,15 @@ impl<'a> IsBatch for AsyncBatch<'a> {
 
         for system in systems.into_iter() {
             let data: Resource = data.pop_front().unwrap();
-            if system.0.resource_request_rx.is_closed() {
-                log::trace!(
-                    "system '{}' closed after requesting resources",
-                    system.name()
-                );
-                continue;
-            }
             // send the resources off, if need be
-            if !system.1.deploy_tx.is_closed() {
+            if !system.deploy_tx.is_closed() {
                 log::trace!(
                     "sending resource '{}' to async '{}'",
                     data.type_name().unwrap_or("unknown"),
                     system.name()
                 );
                 // UNWRAP: safe because we checked above that the channel is still open
-                system.1.deploy_tx.try_send(data).unwrap();
+                system.deploy_tx.try_send(data).unwrap();
             } else {
                 log::trace!(
                     "cancelling send of resource '{}' to async '{}'",
@@ -407,29 +387,24 @@ impl<'a> IsBatch for AsyncBatch<'a> {
                 let _ = increment_current_iteration();
             }
         }
-        // tick the executor until the loaned resources have been returned
-        loop {
-            if parallelism > 1 {
-                (0..parallelism as u32)
-                    .into_par_iter()
-                    .for_each(|_| tick(extra));
-            } else {
-                tick(extra);
-            }
+        // tick the executor
+        if parallelism > 1 {
+            (0..parallelism as u32)
+                .into_par_iter()
+                .for_each(|_| tick(extra));
+        } else {
+            tick(extra);
+        }
 
-            let resources_still_loaned = resource_manager.try_unify_resources("async batch")?;
-            if resources_still_loaned {
-                panic!(
-                    "an async system is holding onto resources over an await point! systems:{:#?}",
-                    self.systems()
-                        .iter()
-                        .map(|sys| sys.name())
-                        .collect::<Vec<_>>()
-                );
-            } else {
-                log::trace!("all resources returned");
-                break;
-            }
+        let resources_still_loaned = resource_manager.try_unify_resources("async batch")?;
+        if resources_still_loaned {
+            panic!(
+                "an async system is holding onto resources over an await point! systems:{:#?}",
+                self.systems()
+                    .iter()
+                    .map(|sys| sys.name())
+                    .collect::<Vec<_>>()
+            );
         }
 
         Ok(())
@@ -437,14 +412,14 @@ impl<'a> IsBatch for AsyncBatch<'a> {
 }
 
 #[derive(Debug, Default)]
-pub struct AsyncSchedule<'a> {
-    batches: Vec<AsyncBatch<'a>>,
+pub struct AsyncSchedule {
+    batches: Vec<AsyncBatch>,
     num_threads: u32,
 }
 
-impl<'a> IsSchedule for AsyncSchedule<'a> {
-    type System = AsyncSystemRequest<'a>;
-    type Batch = AsyncBatch<'a>;
+impl IsSchedule for AsyncSchedule {
+    type System = Request;
+    type Batch = AsyncBatch;
 
     fn batches_mut(&mut self) -> &mut Vec<Self::Batch> {
         &mut self.batches

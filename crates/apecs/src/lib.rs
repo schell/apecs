@@ -44,7 +44,7 @@ pub use storage::{
     QueryGuard, QueryIter, Ref, Without,
 };
 pub use system::{current_iteration, end, err, ok, ShouldContinue};
-pub use world::{Entities, Entity, Facade, LazyWorld, Parallelism, World};
+pub use world::{Entities, Entity, Facade, Parallelism, World};
 
 #[cfg(doctest)]
 pub mod doctest {
@@ -166,9 +166,19 @@ pub mod internal {
         }
 
         pub fn downcast<T: Any + Send + Sync + 'static>(self) -> Result<Box<T>, Resource> {
-            let Resource { data, type_name } = self;
-            data.downcast::<T>()
-                .map_err(|data| Resource { data, type_name })
+            self.data.downcast::<T>().map_err(|data| {
+                #[cfg(debug_assertions)]
+                {
+                    Resource {
+                        data,
+                        type_name: self.type_name,
+                    }
+                }
+                #[cfg(not(debug_assertions))]
+                {
+                    Resource { data }
+                }
+            })
         }
 
         pub fn downcast_ref<T: Any + Send + Sync + 'static>(&self) -> anyhow::Result<&T> {
@@ -522,6 +532,7 @@ impl<T: IsResource, G: Gen<T>> Read<T, G> {
 }
 
 pub(crate) struct Request {
+    // TODO: add a type_name field that could add in debugging
     pub borrows: Vec<internal::Borrow>,
     pub construct: fn(&mut LoanManager<'_>) -> anyhow::Result<Resource>,
     pub deploy_tx: spsc::Sender<Resource>,
@@ -603,10 +614,10 @@ impl<'a, T: IsResource, G: Gen<T> + IsResource> CanFetch for Write<T, G> {
     }
 
     fn plugin() -> Plugin {
-        Plugin::default().with_dependent_resource(|_: ()| {
+        Plugin::default().with_resource(|_: ()| {
             G::generate().with_context(|| {
                 format!(
-                    "could not generate {} with '{}'",
+                    "Write could not generate {} with '{}'",
                     std::any::type_name::<T>(),
                     std::any::type_name::<G>()
                 )
@@ -639,8 +650,15 @@ impl<'a, T: IsResource, G: Gen<T> + IsResource> CanFetch for Read<T, G> {
     }
 
     fn plugin() -> Plugin {
-        Plugin::default()
-            .with_dependent_resource(|_: ()| G::generate().context("could not generate"))
+        Plugin::default().with_resource(|_: ()| {
+            G::generate().with_context(|| {
+                format!(
+                    "Read could not generate '{}' with '{}'",
+                    std::any::type_name::<T>(),
+                    std::any::type_name::<G>()
+                )
+            })
+        })
     }
 }
 
