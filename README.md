@@ -346,8 +346,8 @@ cargo test
 wasm-pack test --firefox crates/apecs
 ```
 
-I like firefox, but you can use different browsers for the wasm tests. For the most part they're there
-just to make sure apecs works on wasm.
+I like firefox, but you can use different browsers for the wasm tests. The tests
+make sure apecs works on wasm.
 
 ## Benchmarks
 The `apecs` benchmarks measure itself against my favorite ECS libs:
@@ -357,5 +357,5 @@ The `apecs` benchmarks measure itself against my favorite ECS libs:
 cargo bench -p benchmarks
 ```
 
-# Caveats
-- `apecs` uses generic associated types. This means it can only be compiled with nightly.
+# Minimum supported Rust version 1.65
+`apecs` uses generic associated types for its component iteration traits.

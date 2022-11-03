@@ -710,7 +710,7 @@ impl World {
         let mut missing_resources: FxHashMap<ResourceId, Vec<anyhow::Error>> = FxHashMap::default();
         for LazyResource { id, create } in plugin.resources.into_iter() {
             if !self.resource_manager.has_resource(&id) {
-                log::debug!("attempting to create missing resource {}...", id.name);
+                log::debug!("attempting to create resource {}...", id.name);
                 match (create)(&mut self.resource_manager.as_mut_loan_manager()) {
                     Ok(resource) => {
                         missing_resources.remove(&id);
