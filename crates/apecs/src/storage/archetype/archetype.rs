@@ -112,16 +112,36 @@ impl<T> Entry<T> {
         self.changed >= iteration
     }
 
+    /// Determine if the component has changed after the given
+    /// iteration timestamp.
+    ///
+    /// This includes being added or being modified.
+    pub fn has_changed_after(&self, iteration: u64) -> bool {
+        self.changed > iteration
+    }
+
     /// Determine if the component has been added since the given
     /// iteration timestamp.
     pub fn was_added_since(&self, iteration: u64) -> bool {
         self.changed >= iteration && self.added
     }
 
+    /// Determine if the component was added after the given
+    /// iteration timestamp.
+    pub fn was_added_after(&self, iteration: u64) -> bool {
+        self.changed > iteration && self.added
+    }
+
     /// Determine if the component has been modified since the given
     /// iteration timestamp, but has not been added.
     pub fn was_modified_since(&self, iteration: u64) -> bool {
         self.changed >= iteration && !self.added
+    }
+
+    /// Determine if the component has been modified after the given
+    /// iteration timestamp, but has not been added.
+    pub fn was_modified_after(&self, iteration: u64) -> bool {
+        self.changed > iteration && !self.added
     }
 
     /// Return the last time this component was changed.
@@ -308,7 +328,7 @@ impl Archetype {
     // last_index).is_none());            self.index_lookup.push(entity_id);
     //            for (ty_index, mut component_vec) in
     // bundle.1.into_iter().enumerate() {                let mut data =
-    // self.data[ty_index].write();                
+    // self.data[ty_index].write();
     // debug_assert_eq!(component_vec.element_typeid(), data.element_typeid());
     //                data.push(component_vec.pop().unwrap());
     //                debug_assert!(data.len() == last_index + 1);
@@ -323,7 +343,7 @@ impl Archetype {
     // anyhow::Result<Option<B>> {    Ok(
     //        if let Some(prev) = self.remove_any_entry_bundle(entity_id)? {
     //            let prev: B::EntryBundle = <B::EntryBundle as
-    // IsBundle>::try_from_any_bundle(prev)?;            
+    // IsBundle>::try_from_any_bundle(prev)?;
     // Some(B::from_entry_bundle(prev))        } else {
     //            None
     //        },
