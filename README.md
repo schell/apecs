@@ -1,11 +1,21 @@
 # apecs
 **A**syncronous **P**arallel **E**ntity **C**omponent **S**ystem
 
-## Why
 `apecs` is an entity-component system written in Rust that supports traditional syncronous
 systems as well as asyncronous systems that can evolve over time. This makes it great for
 general applications, quick game prototypes, DIY engines and any simulation that has discrete
 steps.
+
+## Why
+
+Most ECS libraries (and game main-loops in general) are polling based. 
+This is great for certain tasks, but things get complicated when programming in the time domain.
+Async / await is great for programming in the time domain without explicitly spawning new threads or blocking, but it isn't supported by ECS libraries. `apecs` was designed to allow async / await programming within ECS systems. 
+
+## What and How
+
+At its core `apecs` is a library for sharing resources across disparate polling and async loops. 
+It uses derivable traits and channels to orchestrate systems' access to resources and uses rayon (where available) for concurrency.
 
 ### Asyncronous systems
 Async systems are system functions that are `async`. Specifically async systems have this type
