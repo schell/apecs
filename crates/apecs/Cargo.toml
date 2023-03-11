@@ -1,6 +1,6 @@
 [package]
 name = "apecs"
-version = "0.6.2"
+version = "0.7.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 keywords = ["gamedev", "ecs", "async"]
@@ -30,7 +30,7 @@ async-broadcast = "^0.4"
 async-channel = "^1.6"
 async-executor = "^1.4"
 async-oneshot = "^0.5"
-dagga = { git = "https://github.com/schell/dagga.git", default-features = false }
+dagga = { version = "^0.1", default-features = false }
 itertools = "^0.10"
 log = "^0.4"
 parking_lot = "^0.12"
