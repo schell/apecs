@@ -3,17 +3,22 @@
 //! Systems and resources can be composed together using the [`Plugin`] builder.
 //! The resulting plugin can then be instantiated with
 //! [`crate::World::with_plugin`].
-use std::future::Future;
+use std::{future::Future, any::TypeId};
+
+use dagga::Node;
 
 use crate::{
     resource_manager::LoanManager,
-    schedule::Dependency,
-    system::{AsyncSystemFuture, ShouldContinue, SyncSystem},
+    // schedule::Dependency,
+    system::{AsyncSystemFuture, ShouldContinue, System},
     world::Facade,
-    CanFetch, IsResource, LazyResource, World,
+    CanFetch,
+    IsResource,
+    LazyResource,
+    World,
 };
 
-pub struct SyncSystemWithDeps(pub SyncSystem);
+pub struct SyncSystemWithDeps(pub Node<System, TypeId>);
 
 impl SyncSystemWithDeps {
     pub fn new<T, F>(
@@ -26,19 +31,9 @@ impl SyncSystemWithDeps {
         F: FnMut(T) -> anyhow::Result<ShouldContinue> + Send + Sync + 'static,
         T: CanFetch + Send + Sync + 'static,
     {
-        let mut vs = vec![];
-        if let Some(names) = after_deps {
-            for name in names {
-                vs.push(Dependency::After(name.to_string()));
-            }
-        }
-        if let Some(names) = before_deps {
-            for name in names {
-                vs.push(Dependency::Before(name.to_string()));
-            }
-        }
-
-        SyncSystemWithDeps(SyncSystem::new(name, system, vs))
+        let run_after = after_deps.unwrap_or_default();
+        let run_before = before_deps.unwrap_or_default();
+        SyncSystemWithDeps(System::node(name, system, &run_after, &run_before))
     }
 }
 
@@ -175,8 +170,8 @@ mod test {
 
     #[test]
     fn can_build_dependent_resources() {
-        let plugin = Plugin::default()
-            .with_resource::<Read<Number>, bool>(|num| Ok(num.inner().0 == 0));
+        let plugin =
+            Plugin::default().with_resource::<Read<Number>, bool>(|num| Ok(num.inner().0 == 0));
         let mut world = World::default();
         world.with_plugin(plugin).unwrap();
 

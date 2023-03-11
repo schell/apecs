@@ -15,10 +15,16 @@ use crate::{
     chan::{self, mpsc, oneshot, spsc},
     plugin::Plugin,
     resource_manager::{LoanManager, ResourceManager},
-    schedule::{Dependency, IsSchedule},
+    schedule::{RequestSchedule, SystemSchedule},
     storage::{Components, Entry, IsBundle, IsQuery},
-    system::{AsyncSchedule, ShouldContinue, SyncSchedule, SyncSystem},
-    CanFetch, IsResource, LazyResource, Request, Resource, ResourceId, Write,
+    system::{ShouldContinue, System},
+    CanFetch,
+    IsResource,
+    LazyResource,
+    Request,
+    Resource,
+    ResourceId,
+    Write,
 };
 
 /// Visits world resources from async systems.
@@ -626,7 +632,7 @@ pub enum Parallelism {
 ///   operation together into an easy-to-integrate package
 pub struct World {
     pub(crate) resource_manager: ResourceManager,
-    pub(crate) sync_schedule: SyncSchedule,
+    pub(crate) system_schedule: SystemSchedule,
     pub(crate) async_systems: FxHashMap<String, oneshot::Receiver<anyhow::Result<()>>>,
     pub(crate) facade: Facade,
     // TODO: change this to a "command" receiver in which `Request` is just one variant
@@ -646,7 +652,7 @@ impl Default for World {
         };
         let mut world = Self {
             resource_manager: ResourceManager::default(),
-            sync_schedule: SyncSchedule::default(),
+            system_schedule: SystemSchedule::default(),
             async_systems: FxHashMap::default(),
             facade: facade.clone(),
             command_rx: rx,
@@ -733,8 +739,8 @@ impl World {
         );
 
         for system in plugin.sync_systems.into_iter() {
-            if !self.sync_schedule.contains_system(&system.0.name) {
-                self.sync_schedule.add_system(system.0);
+            if !self.system_schedule.contains_system(system.0.name()) {
+                self.system_schedule.add_system(system.0);
             }
         }
 
@@ -778,35 +784,26 @@ impl World {
         &mut self,
         name: impl AsRef<str>,
         sys_fn: F,
-        after_deps: &[&str],
-        before_deps: &[&str],
+        runs_after: &[&str],
+        runs_before: &[&str],
     ) -> anyhow::Result<&mut Self>
     where
         F: FnMut(T) -> anyhow::Result<ShouldContinue> + Send + Sync + 'static,
         T: CanFetch + 'static,
     {
-        let mut deps = after_deps
-            .iter()
-            .map(|dep| Dependency::After(dep.to_string()))
-            .collect::<Vec<_>>();
-        deps.extend(
-            before_deps
-                .iter()
-                .map(|dep| Dependency::Before(dep.to_string())),
-        );
-        let system = SyncSystem::new(name, sys_fn, deps);
+        let system_node = System::node(name, sys_fn, runs_before, runs_after);
 
         self.with_plugin(T::plugin())?;
-        self.sync_schedule.add_system(system);
+        self.system_schedule.add_system(system_node);
         Ok(self)
     }
 
-    /// Add a syncronous system barrier.
+    /// Add a syncronous system barriera
     ///
     /// Any systems added after the barrier will be scheduled after the systems
     /// added before the barrier.
     pub fn with_system_barrier(&mut self) -> &mut Self {
-        self.sync_schedule.add_barrier();
+        self.system_schedule.add_barrier();
         self
     }
 
@@ -835,7 +832,7 @@ impl World {
                 }
             }
         };
-        self.sync_schedule.set_parallelism(num_threads);
+        self.system_schedule.set_parallelism(num_threads);
         self
     }
 
@@ -906,14 +903,10 @@ impl World {
     /// Just tick the synchronous systems.
     pub fn tick_sync(&mut self) -> anyhow::Result<()> {
         log::trace!("tick sync");
-        // run the scheduled sync systems
-        log::trace!(
-            "execution:\n{}",
-            self.sync_schedule.get_execution_order().join("\n")
-        );
-        self.sync_schedule.run((), &mut self.resource_manager)?;
-
         self.resource_manager.unify_resources("tick sync")?;
+        // run the scheduled sync systems
+        self.system_schedule.run(&mut self.resource_manager)?;
+
         Ok(())
     }
 
@@ -921,6 +914,8 @@ impl World {
     /// systems.
     pub fn tick_async(&mut self) -> anyhow::Result<()> {
         log::trace!("tick async");
+
+        self.resource_manager.unify_resources("tick async")?;
 
         // trim the systems that may request resources by checking their
         // resource request/return channels
@@ -940,22 +935,22 @@ impl World {
         }
 
         // fetch all the requests for system resources and fold them into a schedule
-        let mut schedule = AsyncSchedule::default();
+        let mut schedule = RequestSchedule::default();
         while let Ok(request) = self.command_rx.try_recv() {
-            schedule.add_system(request);
+            schedule.add_request(request);
         }
         if !schedule.is_empty() {
-            log::trace!(
-                "async system execution:\n{}",
-                schedule.get_execution_order().join("\n")
-            );
-            schedule.run(&self.facade.executor, &mut self.resource_manager)?;
+            schedule.run(
+                self.system_schedule.get_parallelism(),
+                &self.facade.executor,
+                &mut self.resource_manager,
+            )?;
         } else {
             fn tick(executor: &Executor<'static>) {
                 while executor.try_tick() {}
             }
             // tick the executor
-            let parallelism = self.sync_schedule.get_parallelism();
+            let parallelism = self.system_schedule.get_parallelism();
             if parallelism > 1 {
                 rayon::prelude::ParallelIterator::for_each(
                     rayon::prelude::IntoParallelIterator::into_par_iter(0..parallelism as u32),
@@ -965,8 +960,6 @@ impl World {
                 tick(&self.facade.executor);
             }
         }
-
-        self.resource_manager.unify_resources("tick async")?;
         Ok(())
     }
 
@@ -1019,7 +1012,7 @@ impl World {
         loop {
             self.tick()?;
             if self.async_systems.is_empty()
-                && self.sync_schedule.is_empty()
+                && self.system_schedule.is_empty()
                 && self.facade.executor.is_empty()
             {
                 break;
@@ -1115,13 +1108,16 @@ impl World {
         components.get_component::<T>(id)
     }
 
-    pub fn get_schedule_description(&self) -> String {
-        format!("{:#?}", self.sync_schedule)
-    }
-
     /// Returns the scheduled systems' names, collated by batch.
-    pub fn get_sync_schedule_names(&self) -> Vec<Vec<&str>> {
-        self.sync_schedule.get_schedule_names()
+    pub fn get_sync_schedule_names(&mut self) -> Vec<Vec<&str>> {
+        if !self.system_schedule.unscheduled_systems.is_empty() {
+            self.system_schedule.reschedule().unwrap();
+        }
+        self.system_schedule
+            .scheduled_systems
+            .iter()
+            .map(|batch| batch.iter().map(|sys| sys.name()).collect::<Vec<_>>())
+            .collect::<Vec<_>>()
     }
 }
 
@@ -1545,5 +1541,69 @@ mod test {
             })
             .unwrap()
             .unwrap();
+    }
+
+    #[test]
+    fn system_barrier() {
+        fn one(mut u32_number: Write<u32>) -> anyhow::Result<ShouldContinue> {
+            *u32_number += 1;
+            end()
+        }
+
+        fn two(mut u32_number: Write<u32>) -> anyhow::Result<ShouldContinue> {
+            *u32_number += 1;
+            end()
+        }
+
+        fn exit_on_three(mut f32_number: Write<f32>) -> anyhow::Result<ShouldContinue> {
+            *f32_number += 1.0;
+            if *f32_number == 3.0 {
+                end()
+            } else {
+                ok()
+            }
+        }
+
+        fn lastly(
+            (u32_number, f32_number): (Read<u32>, Read<f32>),
+        ) -> anyhow::Result<ShouldContinue> {
+            if *u32_number == 2 && *f32_number == 3.0 {
+                end()
+            } else {
+                ok()
+            }
+        }
+
+        let mut world = World::default();
+        world
+            // one should run before two
+            .with_system_with_dependencies("one", one, &[], &["two"])
+            .unwrap()
+            // two should run after one - this is redundant but good for illustration
+            .with_system_with_dependencies("two", two, &["one"], &[])
+            .unwrap()
+            // exit_on_three has no dependencies
+            .with_system("exit_on_three", exit_on_three)
+            .unwrap()
+            // all systems after a barrier run after the systems before a barrier
+            .with_system_barrier()
+            .with_system("lastly", lastly)
+            .unwrap();
+
+        assert_eq!(
+            vec![vec!["one", "exit_on_three"], vec!["two"], vec!["lastly"],],
+            world.get_sync_schedule_names()
+        );
+
+        world.tick().unwrap();
+
+        assert_eq!(
+            vec![vec!["exit_on_three"], vec!["lastly"],],
+            world.get_sync_schedule_names()
+        );
+
+        world.tick().unwrap();
+        world.tick().unwrap();
+        assert!(world.get_sync_schedule_names().is_empty());
     }
 }

@@ -157,7 +157,9 @@ systems do the hot-path work that completes those async operations as fast as po
       }
   }
 
-  fn lastly((u32_number, f32_number): (Read<u32>, Read<f32>)) -> anyhow::Result<ShouldContinue> {
+  fn lastly(
+      (u32_number, f32_number): (Read<u32>, Read<f32>),
+  ) -> anyhow::Result<ShouldContinue> {
       if *u32_number == 2 && *f32_number == 3.0 {
           end()
       } else {
@@ -168,35 +170,37 @@ systems do the hot-path work that completes those async operations as fast as po
   let mut world = World::default();
   world
       // one should run before two
-      .with_system_with_dependencies("one", one, &[], &["two"]).unwrap()
+      .with_system_with_dependencies("one", one, &[], &["two"])
+      .unwrap()
       // two should run after one - this is redundant but good for illustration
-      .with_system_with_dependencies("two", two, &["one"], &[]).unwrap()
+      .with_system_with_dependencies("two", two, &["one"], &[])
+      .unwrap()
       // exit_on_three has no dependencies
-      .with_system("run_thrice_and_leave", exit_on_three).unwrap()
+      .with_system("exit_on_three", exit_on_three)
+      .unwrap()
       // all systems after a barrier run after the systems before a barrier
       .with_system_barrier()
-      .with_system("lastly", lastly).unwrap();
+      .with_system("lastly", lastly)
+      .unwrap();
 
   assert_eq!(
       vec![
-          vec!["one"],
-          vec!["run_thrice_and_leave", "two"],
+          vec!["one", "exit_on_three"],
+          vec!["two"],
           vec!["lastly"],
       ],
       world.get_sync_schedule_names()
   );
 
-  world.tick();
+  world.tick().unwrap();
+
   assert_eq!(
-      vec![
-          vec!["run_thrice_and_leave"],
-          vec!["lastly"],
-      ],
+      vec![vec!["exit_on_three"], vec!["lastly"],],
       world.get_sync_schedule_names()
   );
 
-  world.tick();
-  world.tick();
+  world.tick().unwrap();
+  world.tick().unwrap();
   assert!(world.get_sync_schedule_names().is_empty());
   ```
 - component storage
