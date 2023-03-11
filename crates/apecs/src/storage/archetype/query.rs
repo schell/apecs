@@ -10,7 +10,7 @@ use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterato
 use crate as apecs;
 use crate::{
     resource_manager::LoanManager,
-    schedule::Borrow,
+    internal::Borrow,
     storage::{
         archetype::{Archetype, Components},
         Entry,

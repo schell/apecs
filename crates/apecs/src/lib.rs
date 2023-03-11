@@ -128,7 +128,31 @@ pub mod internal {
     use anyhow::Context;
 
     pub use super::resource_manager::LoanManager;
-    pub use super::schedule::Borrow;
+
+    /// Describes borrowing of system resources at runtime. For internal use,
+    /// mostly.
+    #[derive(Clone, Debug)]
+    pub struct Borrow {
+        pub id: ResourceId,
+        pub is_exclusive: bool,
+    }
+
+    impl Borrow {
+        /// The resource id
+        pub fn rez_id(&self) -> ResourceId {
+            self.id.clone()
+        }
+
+        /// The type name of the resource
+        pub fn name(&self) -> &str {
+            self.id.name
+        }
+
+        /// Whether this borrow is mutable (`true`) or immutable (`false`).
+        pub fn is_exclusive(&self) -> bool {
+            self.is_exclusive
+        }
+    }
 
     /// A type-erased resource.
     pub struct Resource {
@@ -531,8 +555,7 @@ impl<T: IsResource, G: Gen<T>> Read<T, G> {
     }
 }
 
-pub(crate) struct Request {
-    // TODO: add a type_name field that could add in debugging
+pub struct Request {
     pub borrows: Vec<internal::Borrow>,
     pub construct: fn(&mut LoanManager<'_>) -> anyhow::Result<Resource>,
     pub deploy_tx: spsc::Sender<Resource>,

@@ -10,8 +10,7 @@ use crate::Gen;
 
 use super::{
     chan::mpsc,
-    internal::{FetchReadyResource, Resource},
-    schedule::Borrow,
+    internal::{FetchReadyResource, Resource, Borrow},
     IsResource, ResourceId,
 };
 
@@ -22,7 +21,7 @@ pub struct ExclusiveResourceReturnChan(
 );
 
 /// Performs loans on behalf of the world.
-pub(crate) struct ResourceManager {
+pub struct ResourceManager {
     // Resources held for the world's systems
     pub world_resources: FxHashMap<ResourceId, Resource>,
     // Resources currently on loan from this struct to the world's systems
