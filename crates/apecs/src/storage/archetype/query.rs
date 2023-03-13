@@ -15,7 +15,7 @@ use crate::{
         archetype::{Archetype, Components},
         Entry,
     },
-    CanFetch, Read, ResourceId,
+    CanFetch, Read, TypeKey,
 };
 
 use super::IsBundle;
@@ -79,7 +79,7 @@ impl<'s, T: Send + Sync + 'static> IsQuery for &'s T {
 
     fn borrows() -> Vec<Borrow> {
         vec![Borrow {
-            id: ResourceId::new::<ComponentColumn<T>>(),
+            id: TypeKey::new::<ComponentColumn<T>>(),
             is_exclusive: false,
         }]
     }
@@ -157,7 +157,7 @@ impl<'s, T: Send + Sync + 'static> IsQuery for &'s mut T {
 
     fn borrows() -> Vec<Borrow> {
         vec![Borrow {
-            id: ResourceId::new::<ComponentColumn<T>>(),
+            id: TypeKey::new::<ComponentColumn<T>>(),
             is_exclusive: true,
         }]
     }

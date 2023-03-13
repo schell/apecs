@@ -6,10 +6,9 @@ use anyhow::Context;
 use dagga::{Dag, Node, Schedule};
 use itertools::Itertools;
 use rayon::prelude::*;
-use std::any::TypeId;
 
 use crate::{
-    internal::Resource,
+    internal::{TypeKey, TypeValue},
     system::{self, System},
     Request,
 };
@@ -23,8 +22,8 @@ use super::{
 pub struct SystemSchedule {
     num_threads: u32,
     current_barrier: usize,
-    pub(crate) unscheduled_systems: Vec<Node<System, TypeId>>,
-    pub(crate) scheduled_systems: Vec<Vec<Node<System, TypeId>>>,
+    pub(crate) unscheduled_systems: Vec<Node<System, TypeKey>>,
+    pub(crate) scheduled_systems: Vec<Vec<Node<System, TypeKey>>>,
 }
 
 impl SystemSchedule {
@@ -40,7 +39,7 @@ impl SystemSchedule {
         self.current_barrier += 1;
     }
 
-    pub fn add_system(&mut self, mut node: Node<System, TypeId>) {
+    pub fn add_system(&mut self, mut node: Node<System, TypeKey>) {
         node.set_barrier(self.current_barrier);
         self.unscheduled_systems.push(node);
     }
@@ -71,7 +70,7 @@ impl SystemSchedule {
         let unscheduled_systems = std::mem::take(&mut self.unscheduled_systems);
         let dag = previously_scheduled_systems
             .chain(unscheduled_systems)
-            .fold(Dag::<System, TypeId>::default(), Dag::with_node);
+            .fold(Dag::<System, TypeKey>::default(), Dag::with_node);
         self.scheduled_systems = dag
             .build_schedule()
             .context("can't build schedule")?
@@ -180,14 +179,14 @@ impl RequestSchedule {
     ) -> anyhow::Result<()> {
         let requests = std::mem::take(&mut self.requests);
         let request_len = requests.len();
-        let mut dag: Dag<Request, TypeId> = Dag::default();
+        let mut dag: Dag<Request, TypeKey> = Dag::default();
 
         for (i, req) in requests.into_iter().enumerate() {
             let (writes, reads): (Vec<_>, Vec<_>) = req.borrows.iter().partition_map(|borrow| {
                 if borrow.is_exclusive() {
-                    itertools::Either::Left(borrow.rez_id().type_id)
+                    itertools::Either::Left(borrow.rez_id())
                 } else {
-                    itertools::Either::Right(borrow.rez_id().type_id)
+                    itertools::Either::Right(borrow.rez_id())
                 }
             });
             dag.add_node(
@@ -198,7 +197,7 @@ impl RequestSchedule {
             );
         }
 
-        let schedule: Schedule<Node<Request, TypeId>> = dag.build_schedule().unwrap();
+        let schedule: Schedule<Node<Request, TypeKey>> = dag.build_schedule().unwrap();
         let schedule: Schedule<Request> = schedule.map(|node| node.into_inner());
 
         fn tick(executor: &async_executor::Executor<'static>) {
@@ -213,7 +212,7 @@ impl RequestSchedule {
             let mut loan_mngr = LoanManager(resource_manager);
             for (j, req) in batch.into_iter().enumerate() {
                 // construct the response to each request
-                let data: Resource = (req.construct)(&mut loan_mngr)?;
+                let data: TypeValue = (req.construct)(&mut loan_mngr)?;
                 // send the resources off, if need be
                 if !req.deploy_tx.is_closed() {
                     log::trace!(

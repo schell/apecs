@@ -3,7 +3,7 @@
 //! Systems and resources can be composed together using the [`Plugin`] builder.
 //! The resulting plugin can then be instantiated with
 //! [`crate::World::with_plugin`].
-use std::{future::Future, any::TypeId};
+use std::future::Future;
 
 use dagga::Node;
 
@@ -12,13 +12,14 @@ use crate::{
     // schedule::Dependency,
     system::{AsyncSystemFuture, ShouldContinue, System},
     world::Facade,
+    internal::TypeKey,
     CanFetch,
     IsResource,
     LazyResource,
     World,
 };
 
-pub struct SyncSystemWithDeps(pub Node<System, TypeId>);
+pub struct SyncSystemWithDeps(pub Node<System, TypeKey>);
 
 impl SyncSystemWithDeps {
     pub fn new<T, F>(

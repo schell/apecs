@@ -22,8 +22,8 @@ use crate::{
     IsResource,
     LazyResource,
     Request,
-    Resource,
-    ResourceId,
+    TypeValue,
+    TypeKey,
     Write,
 };
 
@@ -67,13 +67,13 @@ impl Facade {
                         format!("could not construct {}", std::any::type_name::<D>())
                     })?;
                     let my_d_in_a_box: Box<D> = Box::new(my_d);
-                    let rez = Resource::from(my_d_in_a_box);
+                    let rez = TypeValue::from(my_d_in_a_box);
                     Ok(rez)
                 },
                 deploy_tx,
             })
             .unwrap();
-        let rez: Resource = deploy_rx.recv().await.unwrap();
+        let rez: TypeValue = deploy_rx.recv().await.unwrap();
         let box_d: Box<D> = rez.downcast().map_err(|rez| {
             anyhow::anyhow!(
                 "Facade could not downcast resource '{}' to '{}'",
@@ -713,10 +713,10 @@ impl World {
     pub fn with_plugin(&mut self, plugin: impl Into<Plugin>) -> anyhow::Result<&mut Self> {
         let plugin: Plugin = plugin.into();
 
-        let mut missing_resources: FxHashMap<ResourceId, Vec<anyhow::Error>> = FxHashMap::default();
+        let mut missing_resources: FxHashMap<TypeKey, Vec<anyhow::Error>> = FxHashMap::default();
         for LazyResource { id, create } in plugin.resources.into_iter() {
             if !self.resource_manager.has_resource(&id) {
-                log::debug!("attempting to create resource {}...", id.name);
+                log::debug!("attempting to create resource {}...", id.name());
                 match (create)(&mut self.resource_manager.as_mut_loan_manager()) {
                     Ok(resource) => {
                         missing_resources.remove(&id);
@@ -867,7 +867,7 @@ impl World {
 
     /// Returns whether a resources of the given type exists in the world.
     pub fn has_resource<T: IsResource>(&self) -> bool {
-        self.resource_manager.has_resource(&ResourceId::new::<T>())
+        self.resource_manager.has_resource(&TypeKey::new::<T>())
     }
 
     /// Spawn an asynchronous task.
@@ -1052,8 +1052,7 @@ impl World {
 
     /// Attempt to get a reference to one resource.
     pub fn resource<T: IsResource>(&self) -> anyhow::Result<&T> {
-        let id = ResourceId::new::<T>();
-        self.resource_manager.get(&id)
+        self.resource_manager.get()
     }
 
     /// Attempt to get a mutable reference to one resource.
@@ -1490,6 +1489,11 @@ mod test {
 
     #[test]
     fn can_clone_facade() {
+        let _ = env_logger::builder()
+            .is_test(true)
+            .filter_module("apecs", log::LevelFilter::Trace)
+            .try_init();
+
         let mut world = World::default();
         world
             .with_async("async", |mut facade_a: Facade| async move {

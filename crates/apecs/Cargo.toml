@@ -30,6 +30,7 @@ async-broadcast = "^0.4"
 async-channel = "^1.6"
 async-executor = "^1.4"
 async-oneshot = "^0.5"
+broomdog = { path = "../../../broomdog" }
 dagga = { version = "^0.1", default-features = false }
 itertools = "^0.10"
 log = "^0.4"
