@@ -34,8 +34,8 @@ mod world;
 
 #[cfg(feature = "derive")]
 pub use apecs_derive::CanFetch;
-pub use async_executor::Task;
 #[cfg(feature = "derive")]
+#[allow(unused_imports)]
 pub use fetch::*;
 pub use plugin::Plugin;
 pub use rustc_hash::FxHashMap;

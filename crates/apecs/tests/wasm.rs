@@ -1,71 +1,55 @@
-use apecs::{anyhow, chan::mpsc, Facade, Parallelism, World, Write};
+use apecs::{World, Write};
 use wasm_bindgen_test::*;
 
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
 
 #[wasm_bindgen_test]
-async fn can_run_async() {
-    let (tx, rx) = mpsc::bounded(1);
-    let mut world = World::default();
-    world
-        .with_async("tx", |_| async move {
-            tx.send(()).await.unwrap();
-            Ok(())
-        })
-        .unwrap()
-        .with_async("rx", |_| async move {
-            rx.recv().await.unwrap();
-            Ok(())
-        })
-        .unwrap();
-    world.run().unwrap();
-}
-
-#[wasm_bindgen_test]
-fn parallelism() {
+fn can_run() {
     #[derive(Default)]
-    struct Number(u32);
+    pub struct Number(pub u32);
 
-    async fn one(mut facade: Facade) -> anyhow::Result<()> {
+    let mut world = World::default();
+
+    let mut facade = world.facade();
+    wasm_bindgen_futures::spawn_local(async move {
         facade
             .visit(|mut number: Write<Number>| {
                 number.0 = 1;
                 Ok(())
             })
             .await
-    }
-    async fn two(mut facade: Facade) -> anyhow::Result<()> {
+            .unwrap()
+    });
+
+    let mut facade = world.facade();
+    wasm_bindgen_futures::spawn_local(async move {
         for _ in 0..2 {
             facade
                 .visit(|mut number: Write<Number>| {
                     number.0 = 2;
                     Ok(())
                 })
-                .await?;
+                .await
+                .unwrap();
         }
-        Ok(())
-    }
-    async fn three(mut facade: Facade) -> anyhow::Result<()> {
+    });
+
+    let mut facade = world.facade();
+    wasm_bindgen_futures::spawn_local(async move {
         for _ in 0..3 {
             facade
                 .visit(|mut number: Write<Number>| {
                     number.0 = 3;
                     Ok(())
                 })
-                .await?;
+                .await
+                .unwrap();
         }
-        Ok(())
+    });
+
+    while world.facade_count() > 1 {
+        world.run().unwrap();
     }
-    let mut world = World::default();
-    world
-        .with_resource(0u32)
-        .unwrap()
-        .with_async("one", one)
-        .unwrap()
-        .with_async("two", two)
-        .unwrap()
-        .with_async("three", three)
-        .unwrap()
-        .with_parallelism(Parallelism::Automatic);
-    world.run().unwrap();
+
+    println!("done!");
 }

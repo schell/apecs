@@ -9,8 +9,8 @@ use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterato
 
 use crate as apecs;
 use crate::{
-    resource_manager::LoanManager,
     internal::Borrow,
+    resource_manager::LoanManager,
     storage::{
         archetype::{Archetype, Components},
         Entry,
@@ -634,7 +634,7 @@ impl Components {
     {
         let types = B::EntryBundle::ordered_types().unwrap();
         let archetype_index;
-        let mut arch;
+        let arch;
         if let Some((i, a)) = self.get_archetype_mut(&types) {
             archetype_index = i;
             arch = a;
@@ -655,7 +655,6 @@ impl Components {
             );
         }
         arch.index_lookup = index_lookup.clone();
-        drop(arch);
 
         if max_id >= self.entity_lookup.len() {
             self.entity_lookup.resize_with(max_id + 1, Default::default);

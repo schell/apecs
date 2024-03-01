@@ -1,7 +1,24 @@
 //! Tests for bugs we've encountered.
-use ::anyhow::Context;
+use std::sync::Arc;
+
 use apecs::{anyhow, chan::mpmc::Channel, ok, Facade, Read, ShouldContinue, World, Write};
 use futures_lite::StreamExt;
+
+fn new_executor() -> Arc<async_executor::Executor<'static>> {
+    let executor = Arc::new(async_executor::Executor::new());
+    let _execution_loop = {
+        let executor = executor.clone();
+        std::thread::spawn(move || loop {
+            match Arc::strong_count(&executor) {
+                1 => break,
+                _ => {
+                    let _ = executor.try_tick();
+                }
+            }
+        })
+    };
+    executor
+}
 
 #[test]
 fn system_batch_drops_resources_after_racing_asyncs() {
@@ -27,8 +44,8 @@ fn system_batch_drops_resources_after_racing_asyncs() {
         ok()
     }
 
-    // loops acquiring a unit resource and reading it
-    async fn loser(facade: &mut Facade) -> anyhow::Result<()> {
+    // This function loops, acquiring a unit resource and reading it
+    async fn loser(facade: &mut Facade) {
         loop {
             println!("loser awaiting Read<()>");
             facade
@@ -37,30 +54,31 @@ fn system_batch_drops_resources_after_racing_asyncs() {
                     let () = *unit;
                     Ok(())
                 })
-                .await?;
+                .await
+                .unwrap();
         }
     }
 
     // * races the losing async against awaiting an event from ticker
     // * after ticker wins the race it should be able to access the unit
     //   resource, because the async batch runner has dropped it
-    async fn system(mut facade: Facade) -> anyhow::Result<()> {
+    async fn race(mut facade: Facade) {
         let mut rx = facade
             .visit(|chan: Read<Channel<()>>| Ok(chan.new_receiver()))
-            .await?;
+            .await
+            .unwrap();
 
         {
             futures_lite::future::or(
                 async {
-                    rx.next().await.context("impossible")?;
-                    anyhow::Ok(())
+                    rx.next().await.unwrap();
                 },
                 async {
-                    loser(&mut facade).await?;
+                    loser(&mut facade).await;
                     panic!("this was supposed to lose the race");
                 },
             )
-                .await?;
+            .await;
         }
 
         println!("race is over");
@@ -70,20 +88,19 @@ fn system_batch_drops_resources_after_racing_asyncs() {
                 let () = *unit;
                 Ok(())
             })
-            .await?;
-
-        Ok(())
+            .await
+            .unwrap();
     }
 
+    let executor = new_executor();
     let mut world = World::default();
-    world
-        .with_system("ticker", ticker)
-        .unwrap()
-        .with_async("system", system)
-        .unwrap();
+    let facade = world.facade();
+    executor.spawn(race(facade)).detach();
+    world.with_system("ticker", ticker).unwrap();
 
-    world.tick().unwrap();
-    world.tick().unwrap();
-    world.tick().unwrap();
-    world.tick().unwrap();
+    while !executor.is_empty() {
+        world.run().unwrap();
+        let mut facade_schedule = world.take_facade_schedule().unwrap();
+        while facade_schedule.tick().unwrap() {}
+    }
 }

@@ -32,10 +32,6 @@ impl SystemSchedule {
         self.num_threads = threads;
     }
 
-    pub fn get_parallelism(&self) -> u32 {
-        self.num_threads
-    }
-
     pub fn add_barrier(&mut self) {
         self.current_barrier += 1;
     }
@@ -158,12 +154,23 @@ impl SystemSchedule {
     }
 }
 
-#[derive(Default)]
-pub struct RequestSchedule {
+/// A fulfillment schedule of requests of world resources, coming from the [`World`]'s
+/// [`Facade`]s.
+pub struct FacadeSchedule<'a> {
     requests: Vec<Request>,
+    schedule: Schedule<Request>,
+    resource_manager: &'a mut ResourceManager,
 }
 
-impl RequestSchedule {
+impl<'a> FacadeSchedule<'a> {
+    pub fn new(resource_manager: &'a mut ResourceManager) -> Self {
+        Self {
+            requests: vec![],
+            schedule: Schedule { batches: vec![] },
+            resource_manager,
+        }
+    }
+
     pub fn add_request(&mut self, req: Request) {
         self.requests.push(req);
     }
@@ -172,14 +179,11 @@ impl RequestSchedule {
         self.requests.is_empty()
     }
 
-    pub fn run(
-        &mut self,
-        parallelism: u32,
-        extra: &async_executor::Executor<'static>,
-        resource_manager: &mut ResourceManager,
-    ) -> anyhow::Result<()> {
-        let requests = std::mem::take(&mut self.requests);
-        let request_len = requests.len();
+    /// Collects all incoming requests into system batches and schedules a DAG for their
+    /// execution.
+    pub fn reschedule(&mut self) -> anyhow::Result<()> {
+        let mut requests = self.schedule.batches.drain(0..).concat();
+        requests.extend(self.requests.drain(0..));
         let mut dag: Dag<Request, TypeId> = Dag::default();
 
         for (i, req) in requests.into_iter().enumerate() {
@@ -199,54 +203,59 @@ impl RequestSchedule {
         }
 
         let schedule: Schedule<Node<Request, TypeId>> = dag.build_schedule().unwrap();
-        let schedule: Schedule<Request> = schedule.map(|node| node.into_inner());
+        self.schedule = schedule.map(|node| node.into_inner());
+        Ok(())
+    }
 
-        fn tick(executor: &async_executor::Executor<'static>) {
-            while executor.try_tick() {
-                let _ = system::increment_current_iteration();
-            }
+    /// Pop off the next batch in the schedule.
+    pub fn next_batch(&mut self) -> Option<Vec<Request>> {
+        if self.schedule.batches.is_empty() {
+            None
+        } else {
+            self.schedule.batches.drain(0..1).next()
+        }
+    }
+
+    /// Sends out resources to fulfill the given batch of `Request`s, if possible.  
+    pub fn run_batch(&mut self, batch: Vec<Request>) -> anyhow::Result<()> {
+        let resources_still_loaned = self
+            .resource_manager
+            .try_unify_resources("run async batch")?;
+        if resources_still_loaned {
+            self.schedule.batches.insert(0, batch);
+            anyhow::bail!("an async system is holding onto resources over an await point!");
         }
 
-        let num_batches = schedule.batches.len();
-        for (i, batch) in schedule.batches.into_iter().enumerate() {
-            let batch_len = batch.len();
-            let mut loan_mngr = LoanManager(resource_manager);
-            for (j, req) in batch.into_iter().enumerate() {
-                // construct the response to each request
-                let data: Resource = (req.construct)(&mut loan_mngr)?;
-                // send the resources off, if need be
-                if !req.deploy_tx.is_closed() {
-                    log::trace!(
-                        "sending resource '{}' to batch {i}/{num_batches} async request \
-                         {j}/{batch_len}/{request_len}",
-                        data.type_name().unwrap_or("unknown"),
-                    );
-                    // UNWRAP: safe because we checked above that the channel is still open
-                    req.deploy_tx.try_send(data).unwrap();
-                } else {
-                    log::trace!(
-                        "cancelling send of resource '{}' to batch {i} async request {j}",
-                        data.type_name().unwrap_or("unknown"),
-                    );
-                }
-            }
-            drop(loan_mngr);
-
-            // tick the executor
-            if parallelism > 1 {
-                (0..parallelism as u32)
-                    .into_par_iter()
-                    .for_each(|_| tick(extra));
+        let batch_len = batch.len();
+        let mut loan_mngr = LoanManager(self.resource_manager);
+        for (j, req) in batch.into_iter().enumerate() {
+            // construct the response to each request
+            let data: Resource = (req.construct)(&mut loan_mngr)?;
+            // send the resources off, if need be
+            if !req.deploy_tx.is_closed() {
+                log::trace!(
+                    "sending resource '{}' to a batch async request {j}/{batch_len}",
+                    data.type_name().unwrap_or("unknown"),
+                );
+                // UNWRAP: safe because we checked above that the channel is still open
+                req.deploy_tx.try_send(data).unwrap();
             } else {
-                tick(extra);
-            }
-
-            let resources_still_loaned = resource_manager.try_unify_resources("async batch")?;
-            if resources_still_loaned {
-                panic!("an async system is holding onto resources over an await point!",);
+                log::trace!(
+                    "cancelling send of resource '{}' to batch, async request {j}",
+                    data.type_name().unwrap_or("unknown"),
+                );
             }
         }
 
         Ok(())
+    }
+
+    /// Send out resources for the next batch of the schedule and return whether there are
+    /// more batches to run.
+    pub fn tick(&mut self) -> anyhow::Result<bool> {
+        if let Some(batch) = self.next_batch() {
+            self.run_batch(batch)?;
+        }
+        Ok(!self.schedule.batches.is_empty())
     }
 }

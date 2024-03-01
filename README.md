@@ -51,8 +51,29 @@ systems do the hot-path work that completes those async operations as fast as po
 * observability
 * very well rounded performance, competitive with inspirational ECS libraries
   - like `specs`, `bevy_ecs`, `hecs`, `legion`, `shipyard`, `planck_ecs`
+  - backed by criterion benchmarks
 
 ## Features
+
+Here is a quick table of features compared to other ECSs.
+
+| Feature           | apecs    | bevy_ecs | hecs     | legion   | planck_ecs | shipyard | specs     |
+|-------------------|----------|----------|----------|----------|------------|----------|-----------|
+| storage           |archetypal|  hybrid  |archetypal|archetypal| separated  |  sparse  | separated |
+|-------------------|----------|----------|----------|----------|------------|----------|-----------|
+| system scheduling | ✔️        | ✔️        |          | ✔️        | ✔️          | ✔️        | ✔️         |
+|-------------------|----------|----------|----------|----------|------------|----------|-----------|
+| early exit systems| ✔️        |          |          |          |            |          |           |
+|-------------------|----------|----------|----------|----------|------------|----------|-----------|
+| parallel systems  | ✔️        | ✔️        | ✔️        | ✔️        |            | ✔️        | ✔️         |
+|-------------------|----------|----------|----------|----------|------------|----------|-----------|
+| change tracking   | ✔️        | ✔️        |          | kinda    |            | ✔️        | ✔️         |
+|-------------------|----------|----------|----------|----------|------------|----------|-----------|
+| async support     | ✔️        |          |          |          |            |          |           |
+|-------------------|----------|----------|----------|----------|------------|----------|-----------|
+
+### Feature examples
+
 - syncronous systems with early exit and failure
   ```rust
   use apecs::*;
