@@ -170,8 +170,7 @@ impl Components {
                     .resize_with(entity_id + 1, Default::default);
             }
             self.entity_lookup[entity_id] = Some((archetype_index, component_index));
-            let new_arch =
-                Archetype::try_from_any_entry_bundle(Some(entity_id), entry_bundle).unwrap();
+            let new_arch = Archetype::from_any_entry_bundle(Some(entity_id), entry_bundle);
             self.archetypes.push(new_arch);
         }
     }

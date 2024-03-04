@@ -3,19 +3,14 @@ use std::ops::Deref;
 use std::{any::TypeId, marker::PhantomData};
 
 use any_vec::{traits::*, AnyVec};
-use anyhow::Context;
+use moongraph::{Edges, GraphError, TypeKey, TypeMap, View};
 use parking_lot::{RwLockReadGuard, RwLockWriteGuard};
 use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 
 use crate as apecs;
-use crate::{
-    internal::Borrow,
-    resource_manager::LoanManager,
-    storage::{
-        archetype::{Archetype, Components},
-        Entry,
-    },
-    CanFetch, Read, ResourceId,
+use crate::storage::{
+    archetype::{Archetype, Components},
+    Entry,
 };
 
 use super::IsBundle;
@@ -40,7 +35,9 @@ pub trait IsQuery {
     /// The iterator item.
     type QueryRow<'a>: Send + Sync;
 
-    fn borrows() -> Vec<Borrow>;
+    fn reads() -> Vec<TypeKey>;
+
+    fn writes() -> Vec<TypeKey>;
 
     /// Find and acquire a "lock" on the columns for reading or writing.
     fn lock_columns<'a>(arch: &'a Archetype) -> Self::LockedColumns<'a>;
@@ -77,11 +74,12 @@ impl<'s, T: Send + Sync + 'static> IsQuery for &'s T {
     type ParQueryResult<'a> = rayon::slice::Iter<'a, Entry<T>>;
     type QueryRow<'a> = &'a Entry<T>;
 
-    fn borrows() -> Vec<Borrow> {
-        vec![Borrow {
-            id: ResourceId::new::<ComponentColumn<T>>(),
-            is_exclusive: false,
-        }]
+    fn reads() -> Vec<TypeKey> {
+        vec![TypeKey::new::<ComponentColumn<T>>()]
+    }
+
+    fn writes() -> Vec<TypeKey> {
+        vec![]
     }
 
     #[inline]
@@ -104,14 +102,7 @@ impl<'s, T: Send + Sync + 'static> IsQuery for &'s T {
     fn iter_mut<'a, 'b>(locked: &'b mut Self::LockedColumns<'a>) -> Self::QueryResult<'b> {
         locked.as_ref().map_or_else(
             || (&[]).into_iter(),
-            |data| {
-                data.downcast_ref::<Entry<T>>()
-                    .with_context(|| {
-                        format!("can't downcast to {}", std::any::type_name::<Entry<T>>())
-                    })
-                    .unwrap()
-                    .into_iter()
-            },
+            |data| data.downcast_ref::<Entry<T>>().unwrap().into_iter(),
         )
     }
 
@@ -155,11 +146,12 @@ impl<'s, T: Send + Sync + 'static> IsQuery for &'s mut T {
     type ParQueryResult<'a> = rayon::slice::IterMut<'a, Entry<T>>;
     type QueryRow<'a> = &'a mut Entry<T>;
 
-    fn borrows() -> Vec<Borrow> {
-        vec![Borrow {
-            id: ResourceId::new::<ComponentColumn<T>>(),
-            is_exclusive: true,
-        }]
+    fn reads() -> Vec<TypeKey> {
+        vec![]
+    }
+
+    fn writes() -> Vec<TypeKey> {
+        vec![TypeKey::new::<ComponentColumn<T>>()]
     }
 
     #[inline]
@@ -266,8 +258,12 @@ impl<'s, T: Send + Sync + 'static> IsQuery for Maybe<&'s T> {
     >;
     type QueryRow<'a> = Option<&'a Entry<T>>;
 
-    fn borrows() -> Vec<Borrow> {
-        <&mut T as IsQuery>::borrows()
+    fn reads() -> Vec<TypeKey> {
+        <&T as IsQuery>::reads()
+    }
+
+    fn writes() -> Vec<TypeKey> {
+        <&T as IsQuery>::writes()
     }
 
     fn lock_columns<'a>(arch: &'a Archetype) -> Self::LockedColumns<'a> {
@@ -366,8 +362,12 @@ impl<'s, T: Send + Sync + 'static> IsQuery for Maybe<&'s mut T> {
     >;
     type QueryRow<'a> = Option<&'a mut Entry<T>>;
 
-    fn borrows() -> Vec<Borrow> {
-        <&mut T as IsQuery>::borrows()
+    fn reads() -> Vec<TypeKey> {
+        <&mut T as IsQuery>::reads()
+    }
+
+    fn writes() -> Vec<TypeKey> {
+        <&mut T as IsQuery>::writes()
     }
 
     fn lock_columns<'a>(arch: &'a Archetype) -> Self::LockedColumns<'a> {
@@ -457,8 +457,12 @@ impl<T: Send + Sync + 'static> IsQuery for Without<T> {
     type ParQueryResult<'a> = rayon::iter::RepeatN<()>;
     type QueryRow<'a> = ();
 
-    fn borrows() -> Vec<Borrow> {
-        <&T as IsQuery>::borrows()
+    fn reads() -> Vec<TypeKey> {
+        <&T as IsQuery>::reads()
+    }
+
+    fn writes() -> Vec<TypeKey> {
+        <&T as IsQuery>::writes()
     }
 
     fn lock_columns<'a>(arch: &'a Archetype) -> Self::LockedColumns<'a> {
@@ -511,8 +515,12 @@ where
     type ParQueryResult<'a> = A::ParQueryResult<'a>;
     type QueryRow<'a> = A::QueryRow<'a>;
 
-    fn borrows() -> Vec<Borrow> {
-        A::borrows()
+    fn reads() -> Vec<TypeKey> {
+        A::reads()
+    }
+
+    fn writes() -> Vec<TypeKey> {
+        A::writes()
     }
 
     #[inline]
@@ -559,9 +567,15 @@ where
     type ParQueryResult<'a> = rayon::iter::Zip<A::ParQueryResult<'a>, B::ParQueryResult<'a>>;
     type QueryRow<'a> = (A::QueryRow<'a>, B::QueryRow<'a>);
 
-    fn borrows() -> Vec<Borrow> {
-        let mut bs = A::borrows();
-        bs.extend(B::borrows());
+    fn reads() -> Vec<TypeKey> {
+        let mut bs = A::reads();
+        bs.extend(B::reads());
+        bs
+    }
+
+    fn writes() -> Vec<TypeKey> {
+        let mut bs = A::writes();
+        bs.extend(B::writes());
         bs
     }
 
@@ -858,18 +872,28 @@ pub struct Query<T>(
 where
     T: IsQuery + ?Sized;
 
-impl<T> CanFetch for Query<T>
+impl<T> Edges for Query<T>
 where
     T: IsQuery + Send + Sync + ?Sized,
 {
-    fn borrows() -> Vec<Borrow> {
-        let mut bs = <T as IsQuery>::borrows();
-        bs.extend(Read::<Components>::borrows());
+    fn reads() -> Vec<TypeKey> {
+        let mut bs = <T as IsQuery>::reads();
+        bs.extend(View::<Components>::reads());
         bs
     }
 
-    fn construct(loan_mngr: &mut LoanManager) -> anyhow::Result<Self> {
-        let all = Read::<Components>::construct(loan_mngr)?;
+    fn writes() -> Vec<TypeKey> {
+        let mut bs = <T as IsQuery>::writes();
+        bs.extend(View::<Components>::writes());
+        bs
+    }
+
+    fn moves() -> Vec<TypeKey> {
+        vec![]
+    }
+
+    fn construct(loan_mngr: &mut TypeMap) -> Result<Self, GraphError> {
+        let all: View<Components> = View::construct(loan_mngr)?;
         Ok(Query(Box::new(all), PhantomData))
     }
 }

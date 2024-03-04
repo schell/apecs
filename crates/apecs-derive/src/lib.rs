@@ -163,9 +163,16 @@ pub fn impl_isquery_tuple(input: proc_macro::TokenStream) -> proc_macro::TokenSt
             type QueryRow<'a> = (#(#tys::QueryRow<'a>),*);
 
             #[inline]
-            fn borrows() -> Vec<Borrow> {
+            fn reads() -> Vec<TypeKey> {
                 let mut bs = vec![];
-                #(bs.extend(#tys::borrows());)*
+                #(bs.extend(#tys::reads());)*
+                bs
+            }
+
+            #[inline]
+            fn writes() -> Vec<TypeKey> {
+                let mut bs = vec![];
+                #(bs.extend(#tys::writes());)*
                 bs
             }
 
@@ -242,7 +249,7 @@ pub fn impl_isbundle_tuple(input: proc_macro::TokenStream) -> proc_macro::TokenS
                 ]
             }
 
-            fn try_from_any_bundle(mut bundle: AnyBundle) -> anyhow::Result<Self> {
+            fn try_from_any_bundle(mut bundle: AnyBundle) -> Result<Self, BundleError> {
                 Ok((
                     #(bundle.remove::<#tys>(&TypeId::of::<#tys>())?),*
                 ))

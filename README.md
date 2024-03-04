@@ -1,49 +1,24 @@
 # apecs
-**A**syncronous **P**arallel **E**ntity **C**omponent **S**ystem
+**A**sync-friendly and **P**leasant **E**ntity **C**omponent **S**ystem
 
-`apecs` is an entity-component system written in Rust that supports traditional syncronous
-systems as well as asyncronous systems that can evolve over time. This makes it great for
-general applications, quick game prototypes, DIY engines and any simulation that has discrete
-steps.
+`apecs` is an entity-component system written in Rust that can share world resources with 
+futures run in any async runtime. This makes it great for general applications, 
+quick game prototypes, DIY engines and any simulation that has discrete steps in time.
 
 ## Why
 
 Most ECS libraries (and game main-loops in general) are polling based. 
 This is great for certain tasks, but things get complicated when programming in the time domain.
-Async / await is great for programming in the time domain without explicitly spawning new threads or blocking, but it isn't supported by ECS libraries. `apecs` was designed to allow async / await programming within ECS systems. 
+Async / await is great for programming in the time domain without explicitly spawning new threads 
+or blocking, but it isn't supported by ECS libraries. 
+
+`apecs` was designed to to be an ECS that plays nice with async / await. 
 
 ## What and How
 
 At its core `apecs` is a library for sharing resources across disparate polling and async loops. 
-It uses derivable traits and channels to orchestrate systems' access to resources and uses rayon (where available) for concurrency.
-
-### Asyncronous systems
-Async systems are system functions that are `async`. Specifically async systems have this type
-signature:
-```rust
-use apecs::{Facade, anyhow};
-
-async fn my_system(mut facade: Facade) -> anyhow::Result<()> {
-    //...
-    Ok(())
-}
-```
-The `Facade` type is like a window into the world. It can visit bundles of resources in the
-world asyncronously. This allows your async system to affect different parts of the
-world at different times.
-
-Syncronous systems are great for tight loops that are always iterating over the same
-data. In other words sync systems are highly optimized algorithms that run in the hot path.
-But they don't quite fit in situations where the system's focus changes over time, or when
-the system needs to wait for some condition before doing something different. Async systems are a
-good fit for these situations. Async systems are therefore a good fit for high-level orchestration.
-
-For example you might use an async system to setup your title screen, wait for user input and then
-start the main game simulation by injecting your game entities.
-
-Another example might be an app that has a dependency graph of work to complete. An Async system
-can hold the dependencies as a series of async operations that it is awaiting, while syncronous
-systems do the hot-path work that completes those async operations as fast as possible.
+It uses derivable traits and channels to orchestrate systems' access to resources and uses rayon 
+(where available) for concurrency.
 
 ## Goals
 * productivity
@@ -74,33 +49,32 @@ Here is a quick table of features compared to other ECSs.
 
 ### Feature examples
 
-- syncronous systems with early exit and failure
+- systems with early exit and failure
   ```rust
   use apecs::*;
 
   #[derive(Clone, Copy, Debug, Default, PartialEq)]
   struct Number(u32);
 
-  let mut world = World::default();
-  world
-      .with_system("demo", |mut u32_number: Write<Number>| -> anyhow::Result<ShouldContinue> {
-          u32_number.0 += 1;
-          if u32_number.0 == 3 {
-              end()
-          } else {
-              ok()
-          }
-      })
-      .unwrap();
-  world.run();
-  assert_eq!(Number(3), *world.resource::<Number>().unwrap());
+  fn demo_system(mut u32_number: ViewMut<Number>) -> Result<(), GraphError> {
+      u32_number.0 += 1;
+      if u32_number.0 == 3 {
+          end()
+      } else {
+          ok()
+      }
+  }
+  let world = World::default()
+      .with_subgraph(graph!(demo_system));
+  world.run_loop().unwrap();
+  assert_eq!(Number(3), *world.get_resource::<Number>().unwrap());
   ```
-- async systems, ie systems that end and/or change over time (for scenes, stories, etc)
-  - fetch and visit resources from the world asyncronously. If they have not been added and can be
-    created by default, they will be. `Write` and `Read` will create default resources
-    during fetching if possible.
+
+- async futures can access world resources
+  - futures visit world resources with a closure. 
+  - `View` and `ViewMut` are resource accessors. 
+  - create default resources during fetching if possible.
   - resources are acquired without lifetimes
-  - when fetched resources are dropped they are sent back into the world
   ```rust
   use apecs::*;
 

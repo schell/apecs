@@ -7,5 +7,7 @@ members = [
     "crates/xtask",
 ]
 
+resolver = "2"
+
 [profile.bench]
 debug = true

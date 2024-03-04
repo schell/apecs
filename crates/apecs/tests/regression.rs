@@ -1,12 +1,11 @@
 //! Tests for bugs we've encountered.
-use std::sync::Arc;
+use std::{sync::Arc, thread::JoinHandle};
 
-use apecs::{anyhow, chan::mpmc::Channel, ok, Facade, Read, ShouldContinue, World, Write};
-use futures_lite::StreamExt;
+use apecs::{graph, ok, Facade, Graph, GraphError, View, ViewMut, World};
 
-fn new_executor() -> Arc<async_executor::Executor<'static>> {
+fn new_executor() -> (Arc<async_executor::Executor<'static>>, JoinHandle<()>) {
     let executor = Arc::new(async_executor::Executor::new());
-    let _execution_loop = {
+    let execution_loop = {
         let executor = executor.clone();
         std::thread::spawn(move || loop {
             match Arc::strong_count(&executor) {
@@ -17,7 +16,32 @@ fn new_executor() -> Arc<async_executor::Executor<'static>> {
             }
         })
     };
-    executor
+    (executor, execution_loop)
+}
+
+struct Channel<T> {
+    tx: async_broadcast::Sender<T>,
+    rx: async_broadcast::Receiver<T>,
+    ok_to_drop: bool,
+}
+
+impl<T> Default for Channel<T> {
+    fn default() -> Self {
+        let (tx, rx) = async_broadcast::broadcast(3);
+        Channel {
+            tx,
+            rx,
+            ok_to_drop: false,
+        }
+    }
+}
+
+impl<T> Drop for Channel<T> {
+    fn drop(&mut self) {
+        if !self.ok_to_drop {
+            panic!("channel should not be dropped");
+        }
+    }
 }
 
 #[test]
@@ -26,33 +50,33 @@ fn system_batch_drops_resources_after_racing_asyncs() {
     // an async that is awaiting Facade::visit, but then gets
     // cancelled
 
-    //let _ = env_logger::builder()
-    //    .is_test(true)
-    //    .filter_level(log::LevelFilter::Trace)
-    //    .try_init();
+    let _ = env_logger::builder()
+        .is_test(true)
+        .filter_level(log::LevelFilter::Trace)
+        .try_init();
 
     // * each tick this increments a counter by 1
     // * when the counter reaches 3 it fires an event
-    fn ticker(
-        (mut chan, mut tick): (Write<Channel<()>>, Write<usize>),
-    ) -> anyhow::Result<ShouldContinue> {
+    fn ticker((chan, mut tick): (ViewMut<Channel<()>>, ViewMut<usize>)) -> Result<(), GraphError> {
         *tick += 1;
-        println!("ticked {}", *tick);
+        log::info!("ticked {}", *tick);
         if *tick == 3 {
-            chan.try_send(()).unwrap();
+            chan.tx.try_broadcast(()).unwrap();
+        } else if *tick > 100 {
+            panic!("really shouldn't have taken this long");
         }
         ok()
     }
 
-    // This function loops, acquiring a unit resource and reading it
+    // This function infinitely loops, acquiring a unit resource and reading it
     async fn loser(facade: &mut Facade) {
+        log::info!("running loser");
         loop {
-            println!("loser awaiting Read<()>");
+            log::info!("loser awaiting View<()>");
             facade
-                .visit(|unit: Read<()>| {
-                    println!("loser got Read<()>");
+                .visit(|unit: View<()>| {
+                    log::info!("loser got View<()>");
                     let () = *unit;
-                    Ok(())
                 })
                 .await
                 .unwrap();
@@ -60,18 +84,20 @@ fn system_batch_drops_resources_after_racing_asyncs() {
     }
 
     // * races the losing async against awaiting an event from ticker
-    // * after ticker wins the race it should be able to access the unit
-    //   resource, because the async batch runner has dropped it
+    // * after ticker wins the race, we should be able to access the unit
+    //   resource, because the async executor has dropped the future which
+    //   required it
     async fn race(mut facade: Facade) {
+        log::info!("starting the race, awaiting View<Channel<()>>");
         let mut rx = facade
-            .visit(|chan: Read<Channel<()>>| Ok(chan.new_receiver()))
+            .visit(|chan: View<Channel<()>>| chan.rx.clone())
             .await
             .unwrap();
-
+        log::info!("race got View<Channel<()>> and is done with it");
         {
             futures_lite::future::or(
                 async {
-                    rx.next().await.unwrap();
+                    rx.recv().await.expect("tx was dropped");
                 },
                 async {
                     loser(&mut facade).await;
@@ -81,26 +107,55 @@ fn system_batch_drops_resources_after_racing_asyncs() {
             .await;
         }
 
-        println!("race is over");
+        log::info!("race is over");
 
         facade
-            .visit(|unit: Read<()>| {
+            .visit(|(unit, mut channel): (View<()>, ViewMut<Channel<()>>)| {
                 let () = *unit;
-                Ok(())
+                channel.ok_to_drop = true;
             })
             .await
             .unwrap();
     }
 
-    let executor = new_executor();
+    let (executor, _execution_loop) = new_executor();
     let mut world = World::default();
     let facade = world.facade();
     executor.spawn(race(facade)).detach();
-    world.with_system("ticker", ticker).unwrap();
+    world.add_subgraph(graph!(ticker));
 
     while !executor.is_empty() {
-        world.run().unwrap();
+        world.run_loop().unwrap();
         let mut facade_schedule = world.take_facade_schedule().unwrap();
-        while facade_schedule.tick().unwrap() {}
+        facade_schedule.run().unwrap();
     }
+    log::info!("executor is empty, ending the test");
+}
+
+#[test]
+fn readme() {
+    use apecs::*;
+    let mut world = World::default();
+    let entities = world.get_entities_mut();
+    // Nearly any type can be used as a component with zero boilerplate
+    let a = entities.create().with_bundle((123i32, true, "abc"));
+    let b = entities.create().with_bundle((42i32, false));
+
+    // Query the world for all matching bundles
+    let mut query = world.get_components_mut().query::<(&mut i32, &bool)>();
+    for (number, flag) in query.iter_mut() {
+        if **flag {
+            **number *= 2;
+        }
+    }
+
+    // Perform random access within the same query by using the entity.
+    // TODO: this is failing - it might be because of the changes made to query
+    let b_i32 = **query.find_one(b.id()).unwrap().0;
+    assert_eq!(b_i32, 42);
+
+    // Track changes to individual components
+    let a_entry: &Entry<i32> = query.find_one(a.id()).unwrap().0;
+    assert_eq!(**a_entry, 246);
+    assert_eq!(apecs::current_iteration(), a_entry.last_changed());
 }

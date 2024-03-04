@@ -17,7 +17,7 @@ pub struct Velocity(Vector3<f32>);
 pub struct Benchmark(Components);
 
 impl Benchmark {
-    pub fn new() -> anyhow::Result<Self> {
+    pub fn new() -> Result<Self, GraphError> {
         let mut archs = Components::default();
         archs.extend::<(Transform, Position, Rotation, Velocity)>((
             Box::new(

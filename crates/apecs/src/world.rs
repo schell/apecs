@@ -1,96 +1,48 @@
 //! The [`World`] contains resources and is responsible for ticking
 //! systems.
-use std::any::TypeId;
-use std::ops::Deref;
-use std::sync::Arc;
-use std::{any::Any, collections::VecDeque};
-
-use anyhow::Context;
-use rustc_hash::FxHashMap;
-
-use crate::QueryGuard;
-use crate::{
-    chan::{self, mpsc, oneshot, spsc},
-    plugin::Plugin,
-    resource_manager::{LoanManager, ResourceManager},
-    schedule::{FacadeSchedule, SystemSchedule},
-    storage::{Components, Entry, IsBundle, IsQuery},
-    system::{ShouldContinue, System},
-    CanFetch, IsResource, LazyResource, Request, Resource, ResourceId, Write,
+use std::{
+    any::{Any, TypeId},
+    collections::VecDeque,
+    ops::Deref,
+    sync::atomic::AtomicU64,
+    sync::Arc,
 };
 
-/// Visits world resources from async systems.
+use moongraph::{Edges, Graph, GraphError, ViewMut};
+
+use crate::{
+    //plugin::Plugin,
+    facade::{Facade, FacadeSchedule, Request},
+    storage::{Components, Entry, IsBundle, IsQuery},
+};
+
+static SYSTEM_ITERATION: AtomicU64 = AtomicU64::new(0);
+
+#[inline]
+/// Get the current system iteration timestamp.
 ///
-/// A facade is a window into the world, by which an async system can interact
-/// with the world through [`Facade::visit`], without causing resource
-/// contention.
-#[derive(Clone)]
-pub struct Facade {
-    // Unbounded. Sending a request from the facade will not yield the future.
-    // In other words, it will not cause the async to stop at an await point.
-    pub(crate) request_tx: mpsc::Sender<Request>,
+/// This can be used to track changes in components over time with
+/// [`Entry::has_changed_since`](crate::Entry::has_changed_since) and similar
+/// functions.
+pub fn current_iteration() -> u64 {
+    SYSTEM_ITERATION.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-impl Facade {
-    /// Asyncronously visit system resources using a closure.
-    ///
-    /// The closure may return data to the caller.
-    ///
-    /// **Note**: Using a closure ensures that no fetched system resources are
-    /// held over an await point, which would preclude world systems and other
-    /// [`Facade`]s from accessing them and susequently being able to run.
-    pub async fn visit<D: CanFetch + Send + Sync + 'static, T: Send + Sync + 'static>(
-        &mut self,
-        f: impl FnOnce(D) -> anyhow::Result<T>,
-    ) -> anyhow::Result<T> {
-        let borrows = D::borrows();
-        // request the resources from the world
-        // these requests are gathered in World::tick_async into an AsyncSchedule
-        // and then run with the executor and resource maanger
-        let (deploy_tx, deploy_rx) = spsc::bounded(1);
-        // UNWRAP: safe because the request channel is unbounded
-        self.request_tx
-            .try_send(Request {
-                borrows,
-                construct: |loan_mngr: &mut LoanManager| {
-                    let my_d = D::construct(loan_mngr).with_context(|| {
-                        format!("could not construct {}", std::any::type_name::<D>())
-                    })?;
-                    let my_d_in_a_box: Box<D> = Box::new(my_d);
-                    let rez = Resource::from(my_d_in_a_box);
-                    Ok(rez)
-                },
-                deploy_tx,
-            })
-            .unwrap();
-        let rez: Resource = deploy_rx.recv().await.unwrap();
-        let box_d: Box<D> = rez.downcast().map_err(|rez| {
-            anyhow::anyhow!(
-                "Facade could not downcast resource '{}' to '{}'",
-                rez.type_name().unwrap_or("unknown"),
-                std::any::type_name::<D>()
-            )
-        })?;
-        let d = *box_d;
-        let t = f(d)?;
-        Ok(t)
-    }
-
-    /// Return the total number of facades.
-    pub fn count(&self) -> usize {
-        self.request_tx.sender_count()
-    }
+/// Increment the system iteration counter, returning the previous value.
+#[inline]
+fn increment_current_iteration() -> u64 {
+    SYSTEM_ITERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// A lazy mutation of the `World` and its result.
 pub struct LazyOp {
     op: Box<
-        dyn FnOnce(&mut World) -> anyhow::Result<Arc<dyn Any + Send + Sync>>
+        dyn FnOnce(&mut World) -> Result<Arc<dyn Any + Send + Sync>, GraphError>
             + Send
             + Sync
             + 'static,
     >,
-    tx: chan::oneshot::Sender<Arc<dyn Any + Send + Sync>>,
+    tx: async_channel::Sender<Arc<dyn Any + Send + Sync>>,
 }
 
 /// Associates a group of components within the world.
@@ -129,8 +81,8 @@ pub struct LazyOp {
 pub struct Entity {
     id: usize,
     gen: usize,
-    op_sender: mpsc::Sender<LazyOp>,
-    op_receivers: Vec<chan::oneshot::Receiver<Arc<dyn Any + Send + Sync>>>,
+    op_sender: async_channel::Sender<LazyOp>,
+    op_receivers: Vec<async_channel::Receiver<Arc<dyn Any + Send + Sync>>>,
 }
 
 impl std::fmt::Debug for Entity {
@@ -181,13 +133,10 @@ impl Entity {
     /// This entity will have the associated components after the next tick.
     pub fn insert_bundle<B: IsBundle + Send + Sync + 'static>(&mut self, bundle: B) {
         let id = self.id;
-        let (tx, rx) = oneshot::oneshot();
+        let (tx, rx) = async_channel::bounded(1);
         let op = LazyOp {
             op: Box::new(move |world: &mut World| {
-                if !world.has_resource::<Components>() {
-                    world.with_resource(Components::default()).unwrap();
-                }
-                let all: &mut Components = world.resource_mut()?;
+                let all = world.get_components_mut();
                 let _ = all.insert_bundle(id, bundle);
                 Ok(Arc::new(()) as Arc<dyn Any + Send + Sync>)
             }),
@@ -204,13 +153,10 @@ impl Entity {
     /// This entity will have the associated component after the next tick.
     pub fn insert_component<T: Send + Sync + 'static>(&mut self, component: T) {
         let id = self.id;
-        let (tx, rx) = oneshot::oneshot();
+        let (tx, rx) = async_channel::bounded(1);
         let op = LazyOp {
             op: Box::new(move |world: &mut World| {
-                if !world.has_resource::<Components>() {
-                    world.with_resource(Components::default()).unwrap();
-                }
-                let all: &mut Components = world.resource_mut()?;
+                let all = world.get_components_mut();
                 let _ = all.insert_component(id, component);
                 Ok(Arc::new(()) as Arc<dyn Any + Send + Sync>)
             }),
@@ -227,34 +173,28 @@ impl Entity {
     /// This entity will have lost the associated component after the next tick.
     pub fn remove_component<T: Send + Sync + 'static>(&mut self) {
         let id = self.id;
-        let (tx, rx) = oneshot::oneshot();
+        let (tx, rx) = async_channel::bounded(1);
         let op = LazyOp {
             op: Box::new(move |world: &mut World| {
-                if !world.has_resource::<Components>() {
-                    world.with_resource(Components::default()).unwrap();
-                }
-                let all: &mut Components = world.resource_mut()?;
+                let all = world.get_components_mut();
                 let _ = all.remove_component::<T>(id);
                 Ok(Arc::new(()) as Arc<dyn Any + Send + Sync>)
             }),
             tx,
         };
-        self.op_sender
-            .try_send(op)
-            .expect("could not send entity op");
+        // UNWRAP: safe because this channel is unbounded
+        self.op_sender.try_send(op).unwrap();
         self.op_receivers.push(rx);
     }
 
     /// Await a future that completes after all lazy updates have been
     /// performed.
     pub async fn updates(&mut self) {
-        let updates: Vec<chan::oneshot::Receiver<Arc<dyn Any + Send + Sync>>> =
+        let updates: Vec<async_channel::Receiver<Arc<dyn Any + Send + Sync>>> =
             std::mem::take(&mut self.op_receivers);
         for update in updates.into_iter() {
-            let _ = update
-                .await
-                .map_err(|_| anyhow::anyhow!("updates oneshot is closed"))
-                .unwrap();
+            // TODO: explain why this unwrap is safe...
+            let _ = update.recv().await.unwrap();
         }
     }
 
@@ -267,31 +207,29 @@ impl Entity {
         f: impl FnOnce(Q::QueryRow<'_>) -> T + Send + Sync + 'static,
     ) -> Option<T> {
         let id = self.id();
-        let (tx, rx) = oneshot::oneshot();
+        let (tx, rx) = async_channel::bounded(1);
+        // UNWRAP: safe because this channel is unbounded
         self.op_sender
             .try_send(LazyOp {
-                op: Box::new(move |world: &mut World| {
-                    if !world.has_resource::<Components>() {
-                        world.with_resource(Components::default())?;
-                    }
-                    let mut storage: Write<Components> = world.fetch()?;
+                op: Box::new(move |world: &mut World| -> Result<_, GraphError> {
+                    let storage = world.get_components_mut();
                     let mut q = storage.query::<Q>();
                     Ok(Arc::new(q.find_one(id).map(f)) as Arc<dyn Any + Send + Sync>)
                 }),
                 tx,
             })
-            .context("could not send entity op")
             .unwrap();
         let arc: Arc<dyn Any + Send + Sync> = rx
+            .recv()
             .await
-            .map_err(|_| anyhow::anyhow!("could not receive get request"))
+            .map_err(|_| log::error!("could not receive get request"))
             .unwrap();
         let arc_c: Arc<Option<T>> = arc
             .downcast()
-            .map_err(|_| anyhow::anyhow!("could not downcast"))
+            .map_err(|_| log::error!("could not downcast '{}'", std::any::type_name::<T>()))
             .unwrap();
         let c: Option<T> = Arc::try_unwrap(arc_c)
-            .map_err(|_| anyhow::anyhow!("could not unwrap"))
+            .map_err(|_| log::error!("could not unwrap '{}'", std::any::type_name::<T>()))
             .unwrap();
         c
     }
@@ -313,15 +251,18 @@ pub struct Entities {
     pub(crate) next_k: usize,
     pub(crate) generations: Vec<usize>,
     pub(crate) recycle: Vec<usize>,
-    pub(crate) delete_tx: spsc::Sender<usize>,
-    pub(crate) delete_rx: spsc::Receiver<usize>,
+    // unbounded
+    pub(crate) delete_tx: async_channel::Sender<usize>,
+    // unbounded
+    pub(crate) delete_rx: async_channel::Receiver<usize>,
     pub(crate) deleted: VecDeque<(u64, Vec<(usize, smallvec::SmallVec<[TypeId; 4]>)>)>,
-    pub(crate) lazy_op_sender: mpsc::Sender<LazyOp>,
+    // unbounded
+    pub(crate) lazy_op_sender: async_channel::Sender<LazyOp>,
 }
 
 impl Default for Entities {
     fn default() -> Self {
-        let (delete_tx, delete_rx) = spsc::unbounded();
+        let (delete_tx, delete_rx) = async_channel::unbounded();
         Self {
             next_k: Default::default(),
             generations: vec![],
@@ -329,13 +270,13 @@ impl Default for Entities {
             delete_rx,
             delete_tx,
             deleted: Default::default(),
-            lazy_op_sender: mpsc::unbounded().0,
+            lazy_op_sender: async_channel::unbounded().0,
         }
     }
 }
 
 impl Entities {
-    pub fn new(lazy_op_sender: mpsc::Sender<LazyOp>) -> Self {
+    fn new(lazy_op_sender: async_channel::Sender<LazyOp>) -> Self {
         Self {
             lazy_op_sender,
             ..Default::default()
@@ -505,80 +446,134 @@ impl Entities {
     }
 }
 
-// pub(crate) fn make_async_system_pack<F, Fut>(
-//    name: String,
-//    async_task_executor: Arc<async_executor::Executor<'static>>,
-//    make_system_future: F,
-//) -> (AsyncSystem, AsyncSystemFuture)
-// where
-//    F: FnOnce(Facade) -> Fut,
-//    Fut: Future<Output = anyhow::Result<()>> + Send + Sync + 'static,
-//{
-//    let (resource_request_tx, resource_request_rx) = mpsc::unbounded();
-//    let facade = Facade {
-//        resource_request_tx,
-//        async_task_executor,
-//    };
-//    let system = AsyncSystem {
-//        name: name.clone(),
-//        resource_request_rx,
-//    };
-//    let asys = Box::pin((make_system_future)(facade));
-//    (system, asys)
-//}
-
 /// Defines the number of threads to use for inner and outer parallelism.
 pub enum Parallelism {
     Automatic,
     Explicit(u32),
 }
 
+// Only used internally and purposefully kept **out** of the graph, so that
+// it won't hang up `World::run_loop`, which depends on checking to see if
+// there are any systems in the graph (if not, it can exit).
+#[derive(Edges)]
+struct EntityUpkeepSystem {
+    entities: ViewMut<Entities>,
+    components: ViewMut<Components>,
+}
+
+impl EntityUpkeepSystem {
+    fn tick(mut self) -> Result<(), GraphError> {
+        let dead_ids: Vec<usize> = {
+            let mut dead_ids = vec![];
+            while let Some(id) = self.entities.delete_rx.try_recv().ok() {
+                dead_ids.push(id);
+            }
+            dead_ids
+        };
+        if !dead_ids.is_empty() {
+            let ids_and_types: Vec<(usize, smallvec::SmallVec<[TypeId; 4]>)> = {
+                let ids_and_types = self.components.upkeep(&dead_ids);
+                ids_and_types
+            };
+            self.entities
+                .recycle
+                .extend(ids_and_types.iter().map(|(id, _)| *id));
+            self.entities
+                .deleted
+                .push_front((crate::world::current_iteration(), ids_and_types));
+            // listeners have 3 frames to check for deleted things
+            while self.entities.deleted.len() > 3 {
+                let _ = self.entities.deleted.pop_back();
+            }
+        }
+
+        Ok(())
+    }
+}
+
 /// A collection of resources and systems.
 ///
-/// The `World` is the executor of your systems and async computations.
+/// The `World` holds all resources, entities, components and systems.
 ///
 /// Most applications will create and configure a `World` in their main
-/// function, finally [`run`](World::run)ning it or [`tick`](World::tick)ing
-/// it in a loop.
+/// function and call [`World::run_loop`] or [`World::tick`] or [`World::tock`]
+/// to run all systems.
+///
+/// How to run async futures is up to you, but those futures can interact with
+/// with the [`World`] through a [`Facade`].
 ///
 /// ```rust
 /// use apecs::*;
-///
-/// #[derive(CanFetch)]
-/// struct MyAppData {
-///     channel: Read<chan::mpmc::Channel<String>>,
-///     count: Write<usize>,
-/// }
-///
-/// let mut world = World::default();
-/// world
-///     .with_system(
-///         "compute_hello",
-///         |mut data: MyAppData| -> anyhow::Result<ShouldContinue> {
-///             if *data.count >= 3 {
-///                 data.channel
-///                     .tx
-///                     .try_broadcast("hello world".to_string())
-///                     .unwrap();
-///                 end()
-///             } else {
-///                 *data.count += 1;
-///                 ok()
+/// let executor = std::sync::Arc::new(async_executor::Executor::new());
+/// let _execution_loop = {
+///     let executor = executor.clone();
+///     std::thread::spawn(move || loop {
+///         match std::sync::Arc::strong_count(&executor) {
+///             1 => break,
+///             _ => {
+///                 let _ = executor.try_tick();
 ///             }
-///         },
-///     )
-///     .unwrap()
-///     .with_async("await_hello", |mut facade: Facade| async move {
+///         }
+///     })
+/// };
+/// struct Channel<T> {
+///     tx: async_broadcast::Sender<T>,
+///     rx: async_broadcast::Receiver<T>,
+/// }
+/// impl<T> Default for Channel<T> {
+///     fn default() -> Self {
+///         let (tx, rx) = async_broadcast::broadcast(3);
+///         Channel { tx, rx }
+///     }
+/// }
+/// /// Anything that derives `Edges` can be used as system parameters
+/// /// and visited by a `Facade`.
+/// ///
+/// /// Its fields will be stored in the `World` as individual resources.
+/// #[derive(Edges)]
+/// struct MyAppData {
+///     channel: View<Channel<String>>,
+///     count: ViewMut<usize>,
+/// }
+/// /// `compute_hello` is a system that visits `MyAppData`, accumlates a count and
+/// /// sends a message into a channel the third time it is run.
+/// fn compute_hello(mut data: MyAppData) -> Result<(), GraphError> {
+///     if *data.count >= 3 {
+///         data.channel
+///             .tx
+///             .try_broadcast("hello world".to_string())
+///             .unwrap();
+///         end()
+///     } else {
+///         *data.count += 1;
+///         ok()
+///     }
+/// }
+/// let mut world = World::default();
+/// world.add_subgraph(graph!(compute_hello));
+/// // Create a facade to move into an async future that awaits a message from the
+/// // `compute_hello` system.
+/// let mut facade = world.facade();
+/// executor
+///     .spawn(async move {
+///         // Visit the world's `MyAppData` to get the receiver.
 ///         let mut rx = facade
-///             .visit(|mut data: MyAppData| Ok(data.channel.new_receiver()))
-///             .await?;
+///             .visit(|data: MyAppData| data.channel.rx.clone())
+///             .await
+///             .unwrap();
 ///         if let Ok(msg) = rx.recv().await {
 ///             println!("got message: {}", msg);
 ///         }
-///         Ok(())
 ///     })
-///     .unwrap();
-/// world.run();
+///     .detach();
+/// while !executor.is_empty() {
+///     // `tick` progresses the world by one frame
+///     world.tick().unwrap();
+///     // send out any requests the facade may have made from a future running in our
+///     // executor
+///     let mut facade_schedule = world.take_facade_schedule().unwrap();
+///     facade_schedule.run().unwrap();
+/// }
 /// ```
 ///
 /// `World` is the outermost object of `apecs`, as it contains all systems and
@@ -586,25 +581,29 @@ pub enum Parallelism {
 /// You can create entities, attach components and query them from outside the
 /// world if desired:
 ///
-/// ```
-/// # use apecs::*;
+/// ```rust
+/// use apecs::*;
 /// let mut world = World::default();
+/// let entities = world.get_entities_mut();
 /// // Nearly any type can be used as a component with zero boilerplate
-/// let a = world.entity_with_bundle((123, true, "abc"));
-/// let b = world.entity_with_bundle((42, false));
+/// let a = entities.create().with_bundle((123, true, "abc"));
+/// let b = entities.create().with_bundle((42, false));
 ///
 /// // Query the world for all matching bundles
-/// let mut query = world.query::<(&mut i32, &bool)>();
+/// let mut query = world.get_components_mut().query::<(&mut i32, &bool)>();
 /// for (number, flag) in query.iter_mut() {
 ///     if **flag {
 ///         **number *= 2;
 ///     }
 /// }
 ///
-/// // Perform random access within the same query
+/// // Perform random access within the same query by using the entity.
+/// let b_i32 = **query.find_one(b.id()).unwrap().0;
+/// assert_eq!(b_i32, 42);
+///
+/// // Track changes to individual components
 /// let a_entry: &Entry<i32> = query.find_one(a.id()).unwrap().0;
 /// assert_eq!(**a_entry, 246);
-/// // Track changes to individual components
 /// assert_eq!(apecs::current_iteration(), a_entry.last_changed());
 /// ```
 ///
@@ -614,46 +613,46 @@ pub enum Parallelism {
 /// * [`Entry`] for info on tracking changes to individual components
 /// * [`Query`](crate::Query) for info on querying bundles of components
 /// * [`Facade`] for info on interacting with the `World` from a future
-/// * [`Plugin`] for info on how to bundle systems and resources of common
 ///   operations together into an easy-to-integrate package
 pub struct World {
-    pub(crate) resource_manager: ResourceManager,
-    pub(crate) system_schedule: SystemSchedule,
+    pub(crate) graph: Graph,
     pub(crate) facade: Facade,
-    pub(crate) facade_requests: mpsc::Receiver<Request>,
-    pub(crate) lazy_ops: (mpsc::Sender<LazyOp>, mpsc::Receiver<LazyOp>),
+    pub(crate) facade_requests: async_channel::Receiver<Request>,
+    pub(crate) facade_graph: Graph,
+    pub(crate) lazy_ops: (
+        async_channel::Sender<LazyOp>,
+        async_channel::Receiver<LazyOp>,
+    ),
 }
 
 impl Default for World {
     fn default() -> Self {
-        let lazy_ops = mpsc::unbounded();
+        let lazy_ops = async_channel::unbounded();
         let entities = Entities::new(lazy_ops.0.clone());
-        let (tx, rx) = mpsc::unbounded();
+        let (tx, rx) = async_channel::unbounded();
         let facade = Facade { request_tx: tx };
         let mut world = Self {
-            resource_manager: ResourceManager::default(),
-            system_schedule: SystemSchedule::default(),
+            graph: Graph::default(),
             facade: facade.clone(),
             facade_requests: rx,
+            facade_graph: Graph::default(),
             lazy_ops,
         };
 
         world
-            .with_resource(entities)
-            .unwrap()
-            .with_resource(Components::default())
-            .unwrap()
-            .with_resource(facade)
-            .unwrap();
+            .add_resource(entities)
+            .add_resource(Components::default())
+            .add_resource(facade);
+
         world
     }
 }
 
 impl World {
-    /// Create a `Plugin` to build the world.
-    pub fn builder() -> Plugin {
-        Plugin::default()
-    }
+    // /// Create a `Plugin` to build the world.
+    // pub fn builder() -> Plugin {
+    //     Plugin::default()
+    // }
 
     /// Create a new facade
     pub fn facade(&self) -> Facade {
@@ -665,126 +664,137 @@ impl World {
         self.facade.count()
     }
 
-    pub fn with_default_resource<T: Default + IsResource>(&mut self) -> anyhow::Result<&mut Self> {
-        let resource: T = T::default();
-        self.with_resource(resource)
-    }
-
-    pub fn with_resource<T: IsResource>(&mut self, resource: T) -> anyhow::Result<&mut Self> {
-        if self.resource_manager.add(resource).is_some() {
-            anyhow::bail!("resource {} already exists", std::any::type_name::<T>());
-        }
-
-        Ok(self)
-    }
-
-    pub fn set_resource<T: IsResource>(&mut self, resource: T) -> anyhow::Result<Option<T>> {
-        if let Some(prev) = self.resource_manager.add(resource) {
-            match prev.downcast::<T>() {
-                Ok(t) => Ok(Some(*t)),
-                Err(_) => Err(anyhow::anyhow!("could not downcast previous resource")),
-            }
-        } else {
-            Ok(None)
-        }
-    }
-
-    /// Add a plugin to the world, instantiating any missing resources or
-    /// systems.
-    ///
-    /// ## Errs
-    /// Errs if the plugin requires resources that cannot be created by default.
-    pub fn with_plugin(&mut self, plugin: impl Into<Plugin>) -> anyhow::Result<&mut Self> {
-        let plugin: Plugin = plugin.into();
-
-        let mut missing_resources: FxHashMap<ResourceId, Vec<anyhow::Error>> = FxHashMap::default();
-        for LazyResource { id, create } in plugin.resources.into_iter() {
-            if !self.resource_manager.has_resource(&id) {
-                log::debug!("attempting to create resource {}...", id.name);
-                match (create)(&mut self.resource_manager.as_mut_loan_manager()) {
-                    Ok(resource) => {
-                        missing_resources.remove(&id);
-                        let _ = self.resource_manager.insert(id, resource);
-                    }
-                    Err(err) => {
-                        let entry = missing_resources.entry(id).or_default();
-                        entry.push(err);
-                    }
-                }
-                self.resource_manager
-                    .unify_resources("after building lazy dep")?;
-            }
-        }
-
-        anyhow::ensure!(
-            missing_resources.is_empty(),
-            "missing resources:\n{:#?}",
-            missing_resources
-        );
-
-        for system in plugin.sync_systems.into_iter() {
-            if !self.system_schedule.contains_system(system.0.name()) {
-                self.system_schedule.add_system(system.0);
-            }
-        }
-
-        Ok(self)
-    }
-
-    pub fn with_data<T: CanFetch>(&mut self) -> anyhow::Result<&mut Self> {
-        self.with_plugin(T::plugin())
-    }
-
-    /// Add a syncronous system.
-    ///
-    /// ## Errs
-    /// Errs if expected resources must first be added to the world.
-    pub fn with_system<T, F>(
-        &mut self,
-        name: impl AsRef<str>,
-        sys_fn: F,
-    ) -> anyhow::Result<&mut Self>
-    where
-        F: FnMut(T) -> anyhow::Result<ShouldContinue> + Send + Sync + 'static,
-        T: CanFetch + 'static,
-    {
-        self.with_system_with_dependencies(name, sys_fn, &[], &[])
-    }
-
-    /// Add a syncronous system that has a dependency on one or more other
-    /// syncronous systems.
-    ///
-    /// ## Errs
-    /// Errs if expected resources must first be added to the world.
-    pub fn with_system_with_dependencies<T, F>(
-        &mut self,
-        name: impl AsRef<str>,
-        sys_fn: F,
-        runs_after: &[&str],
-        runs_before: &[&str],
-    ) -> anyhow::Result<&mut Self>
-    where
-        F: FnMut(T) -> anyhow::Result<ShouldContinue> + Send + Sync + 'static,
-        T: CanFetch + 'static,
-    {
-        let system_node = System::node(name, sys_fn, runs_before, runs_after);
-
-        self.with_plugin(T::plugin())?;
-        self.system_schedule.add_system(system_node);
-        Ok(self)
-    }
-
-    /// Add a syncronous system barriera
-    ///
-    /// Any systems added after the barrier will be scheduled after the systems
-    /// added before the barrier.
-    pub fn with_system_barrier(&mut self) -> &mut Self {
-        self.system_schedule.add_barrier();
+    pub fn add_subgraph(&mut self, graph: Graph) -> &mut Self {
+        self.graph.add_subgraph(graph);
+        let _ = self.graph.reschedule_if_necessary();
         self
     }
 
+    pub fn interleave_subgraph(&mut self, graph: Graph) -> &mut Self {
+        self.graph.interleave_subgraph(graph);
+        let _ = self.graph.reschedule_if_necessary();
+        self
+    }
+
+    pub fn contains_resource<T: Any + Send + Sync>(&self) -> bool {
+        self.graph.contains_resource::<T>()
+    }
+
+    pub fn add_resource<T: Any + Send + Sync>(&mut self, t: T) -> &mut Self {
+        self.graph.add_resource(t);
+        self
+    }
+
+    pub fn get_resource<T: Any + Send + Sync>(&self) -> Option<&T> {
+        // UNWRAP: if T cannot be downcast we want to panic
+        self.graph.get_resource::<T>().unwrap()
+    }
+
+    pub fn get_resource_mut<T: Any + Send + Sync>(&mut self) -> Option<&mut T> {
+        // UNWRAP: if T cannot be downcast we want to panic
+        self.graph.get_resource_mut::<T>().unwrap()
+    }
+
+    /// Visit world resources with a closure.
+    ///
+    /// This is like running a one-off system, but `S` does not get packed
+    /// into the world as a result resource, instead it is given back to the
+    /// callsite.
+    ///
+    /// ## Note
+    /// By design, visiting the world with a type that uses `Move` in one of its
+    /// fields will result in the wrapped type of that field being `move`d
+    /// **out** of the world. The resource will no longer be available
+    /// within the world.
+    ///
+    /// ```rust
+    /// use apecs::*;
+    /// use snafu::prelude::*;
+    ///
+    /// #[derive(Debug, Snafu)]
+    /// enum TestError {}
+    ///
+    /// #[derive(Edges)]
+    /// struct Input {
+    ///     num_usize: View<usize>,
+    ///     num_f32: ViewMut<f32>,
+    ///     num_f64: Move<f64>,
+    /// }
+    ///
+    /// // pack the graph with resources
+    /// let mut graph = Graph::default()
+    ///     .with_resource(0usize)
+    ///     .with_resource(0.0f32)
+    ///     .with_resource(0.0f64);
+    ///
+    /// // visit the graph, reading, modifying and _moving_!
+    /// let num_usize = graph.visit(|mut input: Input| {
+    ///     *input.num_f32 = 666.0;
+    ///     *input.num_f64 += 10.0;
+    ///     *input.num_usize
+    /// }).unwrap();
+    ///
+    /// // observe we read usize
+    /// assert_eq!(0, num_usize);
+    /// assert_eq!(0, *graph.get_resource::<usize>().unwrap().unwrap());
+    ///
+    /// // observe we modified f32
+    /// assert_eq!(666.0, *graph.get_resource::<f32>().unwrap().unwrap());
+    ///
+    /// // observe we moved f64 out of the graph and it is no longer present
+    /// assert!(!graph.contains_resource::<f64>());
+    pub fn visit<T: Edges, S>(&mut self, f: impl FnOnce(T) -> S) -> Result<S, GraphError> {
+        self.graph.visit(f)
+    }
+
+    // /// Add a plugin to the world, instantiating any missing resources or
+    // /// systems.
+    // ///
+    // /// ## Errs
+    // /// Errs if the plugin requires resources that cannot be created by default.
+    // pub fn with_plugin(&mut self, plugin: impl Into<Plugin>) -> anyhow::Result<&mut Self> {
+    //     let plugin: Plugin = plugin.into();
+
+    //     let mut missing_resources: FxHashMap<ResourceId, Vec<anyhow::Error>> = FxHashMap::default();
+    //     for LazyResource { id, create } in plugin.resources.into_iter() {
+    //         if !self.resource_manager.has_resource(&id) {
+    //             log::debug!("attempting to create resource {}...", id.name);
+    //             match (create)(&mut self.resource_manager.as_mut_loan_manager()) {
+    //                 Ok(resource) => {
+    //                     missing_resources.remove(&id);
+    //                     let _ = self.resource_manager.insert(id, resource);
+    //                 }
+    //                 Err(err) => {
+    //                     let entry = missing_resources.entry(id).or_default();
+    //                     entry.push(err);
+    //                 }
+    //             }
+    //             self.resource_manager
+    //                 .unify_resources("after building lazy dep")?;
+    //         }
+    //     }
+
+    //     anyhow::ensure!(
+    //         missing_resources.is_empty(),
+    //         "missing resources:\n{:#?}",
+    //         missing_resources
+    //     );
+
+    //     for system in plugin.sync_systems.into_iter() {
+    //         if !self.system_schedule.contains_system(system.0.name()) {
+    //             self.system_schedule.add_system(system.0);
+    //         }
+    //     }
+
+    //     Ok(self)
+    // }
+
+    // pub fn with_data<T: CanFetch>(&mut self) -> anyhow::Result<&mut Self> {
+    //     self.with_plugin(T::plugin())
+    // }
+
     pub fn with_parallelism(&mut self, parallelism: Parallelism) -> &mut Self {
-        let num_threads = match parallelism {
+        match parallelism {
             Parallelism::Automatic => {
                 #[cfg(target_arch = "wasm32")]
                 {
@@ -808,43 +818,59 @@ impl World {
                 }
             }
         };
-        self.system_schedule.set_parallelism(num_threads);
         self
     }
 
-    /// Returns whether a resources of the given type exists in the world.
-    pub fn has_resource<T: IsResource>(&self) -> bool {
-        self.resource_manager.has_resource(&ResourceId::new::<T>())
-    }
-
     /// Conduct a world tick.
-    ///
-    /// Calls `World::tick_async`, then `World::tick_sync`, then
-    /// `World::tick_lazy`.
-    pub fn tick(&mut self) -> anyhow::Result<()> {
+    pub fn tick(&mut self) -> Result<(), GraphError> {
+        self.visit(EntityUpkeepSystem::tick)??;
+
         self.tick_sync()?;
         self.tick_lazy()?;
+
         Ok(())
     }
 
     /// Conduct a world tick, but panic if the result is not `Ok`.
     ///
-    /// Calls `World::tick_async`, then `World::tick_sync`, then
-    /// `World::tick_lazy`.
-    ///
     /// ## Panics
     /// Panics if the result is not `Ok`
     pub fn tock(&mut self) {
-        self.tick_sync().unwrap();
-        self.tick_lazy().unwrap();
+        self.tick().unwrap()
     }
 
     /// Just tick the synchronous systems.
-    pub fn tick_sync(&mut self) -> anyhow::Result<()> {
+    pub fn tick_sync(&mut self) -> Result<(), GraphError> {
         log::trace!("tick sync");
-        self.resource_manager.unify_resources("tick sync")?;
-        // run the scheduled sync systems
-        self.system_schedule.run(&mut self.resource_manager)?;
+        // This is basically `moongraph::run_with_local` but with our own
+        // system::increment_system_counter interleaved so we can track component
+        // changes.
+        self.graph.reschedule_if_necessary()?;
+
+        let mut local: Option<fn(_) -> Result<_, _>> = None;
+        let mut got_trimmed = false;
+        let mut batches = self.graph.batches();
+        while let Some(batch) = batches.next_batch() {
+            let batch_result = batch.run(&mut local)?;
+            let did_trim_batch = batch_result.save(true)?;
+            got_trimmed = got_trimmed || did_trim_batch;
+            let _ = increment_current_iteration();
+        }
+        if got_trimmed {
+            self.graph.reschedule()?;
+        }
+
+        Ok(())
+    }
+
+    /// Applies lazy world updates and runs component entity / archetype upkeep.
+    pub fn tick_lazy(&mut self) -> Result<(), GraphError> {
+        log::trace!("tick lazy");
+
+        while let Ok(LazyOp { op, tx }) = self.lazy_ops.1.try_recv() {
+            let t = (op)(self)?;
+            let _ = tx.try_send(t);
+        }
 
         Ok(())
     }
@@ -855,60 +881,21 @@ impl World {
         !self.facade_requests.is_empty()
     }
 
-    /// Build a schedule from all current async system requests.
-    ///
-    /// Errors if any system resources are still out on loan to async system requests.
-    pub fn take_facade_schedule(&mut self) -> anyhow::Result<FacadeSchedule> {
-        self.resource_manager.unify_resources("tick async")?;
+    pub fn take_facade_schedule(&mut self) -> Result<FacadeSchedule, GraphError> {
+        self.facade_graph = Graph::default();
 
         // fetch all the requests for system resources and fold them into a schedule
-        let mut schedule = FacadeSchedule::new(&mut self.resource_manager);
+        let mut i = 0;
         while let Ok(request) = self.facade_requests.try_recv() {
-            schedule.add_request(request);
+            let node = moongraph::Node::from(request).with_name(format!("request-{}", i));
+            self.facade_graph.add_node(node);
+            i += 1;
         }
-        schedule.reschedule()?;
-        Ok(schedule)
-    }
+        self.facade_graph.reschedule()?;
 
-    /// Applies lazy world updates and runs component entity / archetype upkeep.
-    pub fn tick_lazy(&mut self) -> anyhow::Result<()> {
-        log::trace!("tick lazy");
-
-        while let Ok(LazyOp { op, mut tx }) = self.lazy_ops.1.try_recv() {
-            self.resource_manager.unify_resources("World::tick_lazy")?;
-            let t = (op)(self)?;
-            let _ = tx.send(t);
-        }
-
-        self.resource_manager.unify_resources("World::tick_lazy")?;
-        let dead_ids: Vec<usize> = {
-            let entities: &Entities = self.resource()?;
-            let mut dead_ids = vec![];
-            while let Some(id) = entities.delete_rx.try_recv().ok() {
-                dead_ids.push(id);
-            }
-            dead_ids
-        };
-        if !dead_ids.is_empty() {
-            let ids_and_types: Vec<(usize, smallvec::SmallVec<[TypeId; 4]>)> = {
-                let archset: &mut Components = self.resource_mut()?;
-                let ids_and_types = archset.upkeep(&dead_ids);
-                ids_and_types
-            };
-            let entities: &mut Entities = self.resource_mut()?;
-            entities
-                .recycle
-                .extend(ids_and_types.iter().map(|(id, _)| *id));
-            entities
-                .deleted
-                .push_front((crate::system::current_iteration(), ids_and_types));
-            // listeners have 3 frames to check for deleted things
-            while entities.deleted.len() > 3 {
-                let _ = entities.deleted.pop_back();
-            }
-        }
-
-        Ok(())
+        let mut batches = self.facade_graph.batches();
+        batches.set_resources(self.graph._resources_mut());
+        Ok(FacadeSchedule { batches })
     }
 
     /// Run all systems until one of the following conditions have been met:
@@ -922,22 +909,23 @@ impl World {
     /// systems, followed by [`World::take_facade_schedule`] and [`RequestSchedule::tick`].
     ///
     /// ```rust
-    /// use apecs::{World, RequestSchedule};
+    /// use apecs::{World, FacadeSchedule};
     ///
     /// let mut world = World::default();
     /// //...populate the world
     ///
-    /// // run sync systems
-    /// world.tock().unwrap();
+    /// // run systems until the facade makes a request for resources
+    /// world.run_loop().unwrap();
     ///
-    /// // answer requests for world resources from asyncs  
-    /// let mut async_schedule = world.take_async_schedule().unwrap();
-    /// while async_schedule.tick().unwrap() {}
+    /// // answer requests for world resources from external futures
+    /// // until all requests are met
+    /// let mut facade_schedule = world.take_facade_schedule().unwrap();
+    /// facade_schedule.run().unwrap();
     /// ```
-    pub fn run(&mut self) -> anyhow::Result<&mut Self> {
+    pub fn run_loop(&mut self) -> Result<&mut Self, GraphError> {
         loop {
             self.tick()?;
-            if self.has_facade_requests() || self.system_schedule.is_empty() {
+            if self.has_facade_requests() || self.graph.node_len() == 0 {
                 break;
             }
         }
@@ -945,485 +933,32 @@ impl World {
         Ok(self)
     }
 
-    /// Attempt to get a reference to one resource.
-    pub fn resource<T: IsResource>(&self) -> anyhow::Result<&T> {
-        let id = ResourceId::new::<T>();
-        self.resource_manager.get(&id)
+    /// Return a reference to [`Components`].
+    pub fn get_components(&self) -> &Components {
+        // UNWRAP: safe because we always have Components
+        self.get_resource::<Components>().unwrap()
     }
 
-    /// Attempt to get a mutable reference to one resource.
-    pub fn resource_mut<T: IsResource>(&mut self) -> anyhow::Result<&mut T> {
-        self.resource_manager.get_mut::<T>()
+    /// Return a mutable reference to [`Components`].
+    pub fn get_components_mut(&mut self) -> &mut Components {
+        // UNWRAP: safe because we always have Components
+        self.get_resource_mut::<Components>().unwrap()
     }
 
-    pub fn fetch<T: CanFetch>(&mut self) -> anyhow::Result<T> {
-        self.resource_manager.unify_resources("World::fetch")?;
-        T::construct(&mut LoanManager(&mut self.resource_manager))
+    /// Return a reference to [`Entities`].
+    pub fn get_entities(&self) -> &Entities {
+        // UNWRAP: safe because we always have Entities
+        self.get_resource::<Entities>().unwrap()
     }
 
-    /// Create a new entity.
-    pub fn entity(&mut self) -> Entity {
-        let mut entities = self.fetch::<Write<Entities>>().unwrap();
-        entities.create()
-    }
-
-    /// Create a new entity and immediately attach the bundle of components to
-    /// it.
-    pub fn entity_with_bundle<B: IsBundle>(&mut self, bundle: B) -> Entity {
-        let entity = self.resource_mut::<Entities>().unwrap().create();
-        self.resource_mut::<Components>()
-            .unwrap()
-            .insert_bundle(entity.id(), bundle);
-        entity
-    }
-
-    pub fn query<Q: IsQuery + 'static>(&mut self) -> QueryGuard<'_, Q> {
-        self.resource_mut::<Components>().unwrap().query::<Q>()
-    }
-
-    pub fn insert_component<T: Send + Sync + 'static>(
-        &mut self,
-        id: usize,
-        component: T,
-    ) -> Option<T> {
-        let components = self.resource_mut::<Components>().unwrap();
-        components.insert_component(id, component)
-    }
-
-    pub fn insert_bundle<B: IsBundle>(&mut self, id: usize, bundle: B) {
-        let components = self.resource_mut::<Components>().unwrap();
-        components.insert_bundle(id, bundle);
-    }
-
-    pub fn get_component<T: Send + Sync + 'static>(
-        &self,
-        id: usize,
-    ) -> Option<impl Deref<Target = T> + '_> {
-        let components = self.resource::<Components>().unwrap();
-        components.get_component::<T>(id)
+    /// Return a mutable reference to [`Entities`].
+    pub fn get_entities_mut(&mut self) -> &mut Entities {
+        // UNWRAP: safe because we always have Entities
+        self.get_resource_mut::<Entities>().unwrap()
     }
 
     /// Returns the scheduled systems' names, collated by batch.
-    pub fn get_sync_schedule_names(&mut self) -> Vec<Vec<&str>> {
-        if !self.system_schedule.unscheduled_systems.is_empty() {
-            self.system_schedule.reschedule().unwrap();
-        }
-        self.system_schedule
-            .scheduled_systems
-            .iter()
-            .map(|batch| batch.iter().map(|sys| sys.name()).collect::<Vec<_>>())
-            .collect::<Vec<_>>()
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use crate::{
-        self as apecs, anyhow,
-        chan::spsc,
-        storage::{Components, Query},
-        system::*,
-        world::*,
-        CanFetch, Read, Write,
-    };
-    use rustc_hash::FxHashMap;
-
-    #[derive(Default)]
-    struct MyMap(FxHashMap<String, u32>);
-
-    #[derive(Default)]
-    struct Number(u32);
-
-    #[test]
-    fn can_closure_system() {
-        #[derive(Copy, Clone, Debug, PartialEq)]
-        struct F32s(f32, f32);
-
-        #[derive(CanFetch)]
-        struct StatefulSystemData {
-            positions: Query<&'static F32s>,
-        }
-
-        fn mk_stateful_system(
-            tx: spsc::Sender<F32s>,
-        ) -> impl FnMut(StatefulSystemData) -> anyhow::Result<ShouldContinue> {
-            println!("making stateful system");
-            let mut highest_pos: F32s = F32s(0.0, f32::NEG_INFINITY);
-
-            move |data: StatefulSystemData| {
-                println!("running stateful system: highest_pos:{:?}", highest_pos);
-                for pos in data.positions.query().iter_mut() {
-                    if pos.1 > highest_pos.1 {
-                        highest_pos = *pos.value();
-                        println!("set new highest_pos: {:?}", highest_pos);
-                    }
-                }
-
-                println!("sending highest_pos: {:?}", highest_pos);
-                tx.try_send(highest_pos)?;
-
-                ok()
-            }
-        }
-
-        let (tx, rx) = spsc::bounded(1);
-
-        let mut world = World::default();
-        world
-            .with_system("stateful", mk_stateful_system(tx))
-            .unwrap();
-        {
-            let mut archset: Write<Components> = world.fetch().unwrap();
-            archset.insert_component(0, F32s(20.0, 30.0));
-            archset.insert_component(1, F32s(0.0, 0.0));
-            archset.insert_component(2, F32s(100.0, 100.0));
-        }
-
-        world.tock();
-
-        let highest = rx.try_recv().unwrap();
-        assert_eq!(F32s(100.0, 100.0), highest);
-    }
-
-    fn new_executor() -> Arc<async_executor::Executor<'static>> {
-        let executor = Arc::new(async_executor::Executor::new());
-        let _execution_loop = {
-            let executor = executor.clone();
-            std::thread::spawn(move || loop {
-                match Arc::strong_count(&executor) {
-                    1 => break,
-                    _ => {
-                        let _ = executor.try_tick();
-                    }
-                }
-            })
-        };
-        executor
-    }
-
-    #[test]
-    fn async_run_and_return_resources() {
-        let _ = env_logger::builder()
-            .is_test(true)
-            .filter_level(log::LevelFilter::Trace)
-            .try_init();
-
-        fn maintain_map(
-            mut data: (Query<(&String, &u32)>, Write<MyMap>),
-        ) -> anyhow::Result<ShouldContinue> {
-            for (name, number) in data.0.query().iter_mut() {
-                if !data.1.inner().0.contains_key(name.value()) {
-                    let _ = data
-                        .1
-                        .inner_mut()
-                        .0
-                        .insert(name.to_string(), *number.value());
-                }
-            }
-
-            ok()
-        }
-
-        let (tx, rx) = spsc::bounded(1);
-        let mut world = World::default();
-        let mut facade = world.facade();
-
-        let executor = new_executor();
-        executor
-            .spawn(async move {
-                log::info!("create running");
-                tx.try_send(()).unwrap();
-                facade
-                    .visit(
-                        |(mut entities, mut archset): (Write<Entities>, Write<Components>)| {
-                            for n in 0..100u32 {
-                                let e = entities.create();
-                                archset.insert_bundle(e.id(), (format!("entity_{}", n), n));
-                            }
-
-                            Ok(())
-                        },
-                    )
-                    .await
-                    .unwrap();
-                log::info!("async done");
-            })
-            .detach();
-
-        world.with_system("maintain", maintain_map).unwrap();
-
-        // should tick once and yield for the facade request
-        world.run().unwrap();
-        rx.try_recv().unwrap();
-        log::info!("received");
-
-        while !executor.is_empty() {
-            // world sends resources to the "create" async which makes
-            // entities+components
-            {
-                let mut facade_schedule = world.take_facade_schedule().unwrap();
-                loop {
-                    let tick_again = facade_schedule.tick().unwrap();
-                    if !tick_again {
-                        log::info!("schedule exhausted");
-                        break;
-                    }
-                }
-            }
-
-            world.tock();
-        }
-
-        let book = world.fetch::<Read<MyMap>>().unwrap();
-        for n in 0..100 {
-            assert_eq!(book.0.get(&format!("entity_{}", n)), Some(&n));
-        }
-    }
-
-    #[test]
-    fn can_create_entities_and_build_convenience() {
-        struct DataA(f32);
-        struct DataB(f32);
-
-        let mut world = World::default();
-        assert!(world.has_resource::<Entities>(), "missing entities");
-        let e = world.entity().with_bundle((DataA(0.0), DataB(0.0)));
-        let id = e.id();
-
-        let executor = new_executor();
-        executor
-            .spawn(async move {
-                println!("updating entity");
-                e.with_bundle((DataA(666.0), DataB(666.0))).updates().await;
-                println!("done!");
-            })
-            .detach();
-
-        world.run().unwrap();
-        let mut facade_schedule = world.take_facade_schedule().unwrap();
-        while facade_schedule.tick().unwrap() {}
-        assert!(executor.is_empty());
-
-        let data: Query<(&DataA, &DataB)> = world.fetch().unwrap();
-        let mut q = data.query();
-        let (a, b) = q.find_one(id).unwrap();
-        assert_eq!(666.0, a.0);
-        assert_eq!(666.0, b.0);
-    }
-
-    #[test]
-    fn entities_can_lazy_add_and_get() {
-        #[derive(Debug, Clone, PartialEq)]
-        struct Name(&'static str);
-
-        #[derive(Debug, Clone, PartialEq)]
-        struct Age(u32);
-
-        // this tests that we can use an Entity to set components and
-        // await those component updates.
-        let await_points = Arc::new(std::sync::atomic::AtomicU32::new(0));
-        let awaits = await_points.clone();
-        let executor = new_executor();
-        let mut world = World::default();
-        let mut facade = world.facade();
-        executor
-            .spawn(async move {
-                await_points.store(1, std::sync::atomic::Ordering::Relaxed);
-                let mut e = {
-                    let e = facade
-                        .visit(|mut entities: Write<Entities>| Ok(entities.create()))
-                        .await
-                        .unwrap();
-                    await_points.store(2, std::sync::atomic::Ordering::Relaxed);
-                    e
-                };
-
-                e.insert_bundle((Name("ada"), Age(666)));
-                e.updates().await;
-                await_points.store(3, std::sync::atomic::Ordering::Relaxed);
-
-                let (name, age) = e
-                    .visit::<(&Name, &Age), _>(|(name, age)| {
-                        (name.value().clone(), age.value().clone())
-                    })
-                    .await
-                    .unwrap();
-                await_points.store(4, std::sync::atomic::Ordering::Relaxed);
-                assert_eq!(Name("ada"), name);
-                assert_eq!(Age(666), age);
-
-                println!("done!");
-            })
-            .detach();
-
-        world.run().unwrap();
-        assert_eq!(1, awaits.load(std::sync::atomic::Ordering::Relaxed));
-        let mut facade_schedule = world.take_facade_schedule().unwrap();
-        while facade_schedule.tick().unwrap() {}
-
-        while !executor.is_empty() {
-            world.tick().unwrap();
-        }
-
-        let ages = world.fetch::<Query<&Age>>().unwrap();
-        let mut q = ages.query();
-        let age = q.find_one(0).unwrap();
-        assert_eq!(&Age(666), age.value());
-    }
-
-    #[test]
-    fn plugin_inserts_resources_from_canfetch_in_systems() {
-        #[derive(Default)]
-        struct MyStr(&'static str);
-
-        let _ = env_logger::builder()
-            .is_test(true)
-            .filter_level(log::LevelFilter::Trace)
-            .try_init();
-
-        let mut world = World::default();
-        world.with_system("test", |_: Write<MyStr>| ok()).unwrap();
-        let s = world.resource_mut::<MyStr>().unwrap();
-        s.0 = "blah";
-    }
-
-    #[test]
-    fn sanity_channel_ref() {
-        let f = 0.0f32;
-        let (tx, rx) = mpsc::unbounded();
-        tx.try_send(&f).unwrap();
-        assert_eq!(&0.0, rx.try_recv().unwrap());
-    }
-
-    #[test]
-    fn can_query_empty_ref_archetypes_in_same_batch() {
-        let _ = env_logger::builder()
-            .is_test(true)
-            .filter_level(log::LevelFilter::Trace)
-            .try_init();
-
-        let mut world = World::default();
-        world
-            .with_system("one", |q: Query<(&f32, &bool)>| {
-                for (_f, _b) in q.query().iter_mut() {}
-                ok()
-            })
-            .unwrap()
-            .with_system("two", |q: Query<(&f32, &bool)>| {
-                for (_f, _b) in q.query().iter_mut() {}
-                ok()
-            })
-            .unwrap();
-        world.tock();
-    }
-
-    #[test]
-    fn deleted_entities() {
-        let _ = env_logger::builder()
-            .is_test(true)
-            .filter_level(log::LevelFilter::Trace)
-            .try_init();
-
-        let mut world = World::default();
-        {
-            let entities: &mut Entities = world.resource_mut().unwrap();
-            (0..10u32).for_each(|i| {
-                entities
-                    .create()
-                    .insert_bundle(("hello".to_string(), false, i))
-            });
-            assert_eq!(10, entities.alive_len());
-        }
-        world.tock();
-        {
-            let q: Query<&u32> = world.fetch().unwrap();
-            assert_eq!(9, **q.query().find_one(9).unwrap());
-        }
-        {
-            let entities: &Entities = world.resource().unwrap();
-            let entity = entities.hydrate(9).unwrap();
-            entities.destroy(entity);
-        }
-        world.tock();
-        {
-            let entities: &Entities = world.resource().unwrap();
-            assert_eq!(9, entities.alive_len());
-            let deleted_strings = entities.deleted_iter_of::<String>().collect::<Vec<_>>();
-            assert_eq!(9, deleted_strings[0].id());
-        }
-    }
-
-    #[test]
-    fn spsc_drop_sanity() {
-        // ensure the spsc channel delivers messages when the sender was dropped after
-        // sending and before receiving
-        let (tx, rx) = spsc::bounded::<()>(1);
-        tx.try_send(()).unwrap();
-        drop(tx);
-        assert!(rx.try_recv().is_ok());
-    }
-
-    #[test]
-    fn system_barrier() {
-        fn one(mut u32_number: Write<u32>) -> anyhow::Result<ShouldContinue> {
-            *u32_number += 1;
-            end()
-        }
-
-        fn two(mut u32_number: Write<u32>) -> anyhow::Result<ShouldContinue> {
-            *u32_number += 1;
-            end()
-        }
-
-        fn exit_on_three(mut f32_number: Write<f32>) -> anyhow::Result<ShouldContinue> {
-            *f32_number += 1.0;
-            if *f32_number == 3.0 {
-                end()
-            } else {
-                ok()
-            }
-        }
-
-        fn lastly(
-            (u32_number, f32_number): (Read<u32>, Read<f32>),
-        ) -> anyhow::Result<ShouldContinue> {
-            if *u32_number == 2 && *f32_number == 3.0 {
-                end()
-            } else {
-                ok()
-            }
-        }
-
-        let mut world = World::default();
-        world
-            // one should run before two
-            .with_system_with_dependencies("one", one, &[], &["two"])
-            .unwrap()
-            // two should run after one - this is redundant but good for illustration
-            .with_system_with_dependencies("two", two, &["one"], &[])
-            .unwrap()
-            // exit_on_three has no dependencies
-            .with_system("exit_on_three", exit_on_three)
-            .unwrap()
-            // all systems after a barrier run after the systems before a barrier
-            .with_system_barrier()
-            .with_system("lastly", lastly)
-            .unwrap();
-
-        assert_eq!(
-            vec![vec!["one", "exit_on_three"], vec!["two"], vec!["lastly"],],
-            world.get_sync_schedule_names()
-        );
-
-        world.tick().unwrap();
-
-        assert_eq!(
-            vec![vec!["exit_on_three"], vec!["lastly"],],
-            world.get_sync_schedule_names()
-        );
-
-        world.tick().unwrap();
-        world.tick().unwrap();
-        assert!(world.get_sync_schedule_names().is_empty());
+    pub fn get_schedule_names(&mut self) -> Vec<Vec<&str>> {
+        self.graph.get_schedule()
     }
 }

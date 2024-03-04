@@ -16,7 +16,7 @@ pub struct Velocity(Vector3<f32>);
 pub struct Benchmark(Components);
 
 impl Benchmark {
-    pub fn new() -> anyhow::Result<Self> {
+    pub fn new() -> Result<Self, GraphError> {
         let ts = Box::new(
             (0..10000).map(|id| Entry::new(id, Transform(Matrix4::<f32>::from_scale(1.0)))),
         );

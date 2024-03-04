@@ -2,11 +2,30 @@
 use std::any::TypeId;
 
 use any_vec::AnyVec;
-use anyhow::Context;
 use smallvec::{smallvec, SmallVec};
+use snafu::prelude::*;
 
 use crate as apecs;
 use crate::storage::Entry;
+
+/// Component bundle errors.
+#[derive(Debug, Snafu)]
+pub enum BundleError {
+    #[snafu(display("Attempted to allocate entity with duplicate components"))]
+    DuplicateComponent,
+
+    #[snafu(display("Type info is unsorted"))]
+    Unsorted,
+
+    #[snafu(display("No index of {type_name}"))]
+    MissingIndex { type_name: &'static str },
+
+    #[snafu(display("Could not downcast to {type_name}"))]
+    Downcast { type_name: &'static str },
+
+    #[snafu(display("Missing '{type_name}' component"))]
+    MissingComponent { type_name: &'static str },
+}
 
 pub(crate) trait AnyVecExt: Sized {
     fn anyvec_from_iter<C, I>(iter: I) -> Self
@@ -54,7 +73,7 @@ pub trait IsBundle: Sized {
     /// Produces a list of types in a bundle, ordered ascending.
     ///
     /// Errors if the bundle contains duplicate types.
-    fn ordered_types() -> anyhow::Result<SmallVec<[TypeId; 4]>> {
+    fn ordered_types() -> Result<SmallVec<[TypeId; 4]>, BundleError> {
         let mut types = Self::unordered_types();
         types.sort();
         ensure_type_info(&types)?;
@@ -65,7 +84,7 @@ pub trait IsBundle: Sized {
     /// components, with the given capacity.
     fn empty_vecs() -> SmallVec<[AnyVec<dyn Send + Sync + 'static>; 4]>;
 
-    fn empty_any_bundle() -> anyhow::Result<AnyBundle> {
+    fn empty_any_bundle() -> Result<AnyBundle, BundleError> {
         let types = Self::ordered_types()?;
         let mut vecs = Self::empty_vecs();
         vecs.sort_by(|a, b| a.element_typeid().cmp(&b.element_typeid()));
@@ -81,14 +100,14 @@ pub trait IsBundle: Sized {
     ///
     /// ## Errs
     /// Errs if the tuple contains duplicate types.
-    fn try_into_any_bundle(self) -> anyhow::Result<AnyBundle> {
+    fn try_into_any_bundle(self) -> Result<AnyBundle, BundleError> {
         let types = Self::ordered_types()?;
         let mut vecs = self.into_vecs();
         vecs.sort_by(|a, b| a.element_typeid().cmp(&b.element_typeid()));
         Ok(AnyBundle(types, vecs))
     }
 
-    fn try_from_any_bundle(bundle: AnyBundle) -> anyhow::Result<Self>;
+    fn try_from_any_bundle(bundle: AnyBundle) -> Result<Self, BundleError>;
 
     fn into_entry_bundle(self, entity_id: usize) -> Self::EntryBundle;
 
@@ -111,7 +130,7 @@ impl<A: Send + Sync + 'static> IsBundle for (A,) {
         smallvec![AnyVec::wrap(self.0)]
     }
 
-    fn try_from_any_bundle(mut bundle: AnyBundle) -> anyhow::Result<Self> {
+    fn try_from_any_bundle(mut bundle: AnyBundle) -> Result<Self, BundleError> {
         Ok((bundle.remove::<A>(&TypeId::of::<A>())?,))
     }
 
@@ -136,17 +155,12 @@ apecs_derive::impl_isbundle_tuple!((A, B, C, D, E, F, G, H, I, J));
 apecs_derive::impl_isbundle_tuple!((A, B, C, D, E, F, G, H, I, J, K));
 apecs_derive::impl_isbundle_tuple!((A, B, C, D, E, F, G, H, I, J, K, L));
 
-fn ensure_type_info(types: &[TypeId]) -> anyhow::Result<()> {
+fn ensure_type_info(types: &[TypeId]) -> Result<(), BundleError> {
     for x in types.windows(2) {
         match x[0].cmp(&x[1]) {
             core::cmp::Ordering::Less => (),
-            core::cmp::Ordering::Equal => {
-                anyhow::bail!(
-                    "attempted to allocate entity with duplicate components; each type must occur \
-                     at most once!"
-                )
-            }
-            core::cmp::Ordering::Greater => anyhow::bail!("type info is unsorted"),
+            core::cmp::Ordering::Equal => return DuplicateComponentSnafu.fail(),
+            core::cmp::Ordering::Greater => return UnsortedSnafu.fail(),
         }
     }
     Ok(())
@@ -221,11 +235,11 @@ impl AnyBundle {
     }
 
     /// Remove a component from the bundle and return it.
-    pub fn remove<T: 'static>(&mut self, ty: &TypeId) -> anyhow::Result<T> {
+    pub fn remove<T: 'static>(&mut self, ty: &TypeId) -> Result<T, BundleError> {
         // find the index
-        let index = self
-            .index_of(ty)
-            .with_context(|| format!("no index of {}", std::any::type_name::<T>()))?;
+        let index = self.index_of(ty).with_context(|| MissingIndexSnafu {
+            type_name: std::any::type_name::<T>(),
+        })?;
         // remove the type
         let _ = self.0.remove(index);
         // remove the component type-erased vec
@@ -233,10 +247,12 @@ impl AnyBundle {
         // remove the component from the vec
         let mut head_vec = any_head_vec
             .downcast_mut::<T>()
-            .with_context(|| format!("could not downcast to {}", std::any::type_name::<T>()))?;
-        let head = head_vec
-            .pop()
-            .with_context(|| format!("missing '{}' component", std::any::type_name::<T>()))?;
+            .with_context(|| DowncastSnafu {
+                type_name: std::any::type_name::<T>(),
+            })?;
+        let head = head_vec.pop().with_context(|| MissingComponentSnafu {
+            type_name: std::any::type_name::<T>(),
+        })?;
         Ok(head)
     }
 
@@ -245,11 +261,11 @@ impl AnyBundle {
         &self.0
     }
 
-    pub fn try_into_tuple<B: IsBundle>(self) -> anyhow::Result<B> {
+    pub fn try_into_tuple<B: IsBundle>(self) -> Result<B, BundleError> {
         B::try_from_any_bundle(self)
     }
 
-    pub fn try_from_tuple<B: IsBundle>(tuple: B) -> anyhow::Result<Self> {
+    pub fn try_from_tuple<B: IsBundle>(tuple: B) -> Result<Self, BundleError> {
         tuple.try_into_any_bundle()
     }
 }

@@ -1,4 +1,4 @@
-use apecs::{World, Write};
+use apecs::{ViewMut, World};
 use wasm_bindgen_test::*;
 
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
@@ -13,9 +13,8 @@ fn can_run() {
     let mut facade = world.facade();
     wasm_bindgen_futures::spawn_local(async move {
         facade
-            .visit(|mut number: Write<Number>| {
+            .visit(|mut number: ViewMut<Number>| {
                 number.0 = 1;
-                Ok(())
             })
             .await
             .unwrap()
@@ -25,9 +24,8 @@ fn can_run() {
     wasm_bindgen_futures::spawn_local(async move {
         for _ in 0..2 {
             facade
-                .visit(|mut number: Write<Number>| {
+                .visit(|mut number: ViewMut<Number>| {
                     number.0 = 2;
-                    Ok(())
                 })
                 .await
                 .unwrap();
@@ -38,9 +36,8 @@ fn can_run() {
     wasm_bindgen_futures::spawn_local(async move {
         for _ in 0..3 {
             facade
-                .visit(|mut number: Write<Number>| {
+                .visit(|mut number: ViewMut<Number>| {
                     number.0 = 3;
-                    Ok(())
                 })
                 .await
                 .unwrap();
@@ -48,7 +45,7 @@ fn can_run() {
     });
 
     while world.facade_count() > 1 {
-        world.run().unwrap();
+        world.run_loop().unwrap();
     }
 
     println!("done!");

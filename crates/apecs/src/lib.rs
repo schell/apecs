@@ -8,43 +8,21 @@
 //! just want some examples please check out the [readme](https://github.com/schell/apecs#readme)
 #![allow(clippy::type_complexity)]
 
-use ::anyhow::Context;
-use chan::spsc;
-use internal::{FetchReadyResource, LoanManager, Resource, ResourceId};
-use rayon::iter::IntoParallelIterator;
-use std::{
-    any::Any,
-    marker::PhantomData,
-    ops::{Deref, DerefMut},
-    sync::Arc,
-};
-
-pub mod anyhow {
-    //! Re-export of the anyhow error handling library.
-    pub use anyhow::*;
-}
-
-mod fetch;
-mod plugin;
-mod resource_manager;
-mod schedule;
+//mod plugin;
+mod facade;
 mod storage;
-mod system;
 mod world;
 
-#[cfg(feature = "derive")]
-pub use apecs_derive::CanFetch;
-#[cfg(feature = "derive")]
-#[allow(unused_imports)]
-pub use fetch::*;
-pub use plugin::Plugin;
+pub use facade::{Facade, FacadeSchedule};
+pub use moongraph::{
+    end, err, graph, ok, Edges, Graph, GraphError, Move, NodeResults, View, ViewMut,
+};
 pub use rustc_hash::FxHashMap;
 pub use storage::{
     Components, Entry, IsBundle, IsQuery, LazyComponents, Maybe, MaybeMut, MaybeRef, Mut, Query,
     QueryGuard, QueryIter, Ref, Without,
 };
-pub use system::{current_iteration, end, err, ok, ShouldContinue};
-pub use world::{Entities, Entity, Facade, Parallelism, World};
+pub use world::{current_iteration, Entities, Entity, Parallelism, World};
 
 #[cfg(doctest)]
 pub mod doctest {
@@ -52,718 +30,404 @@ pub mod doctest {
     pub struct ReadmeDoctests;
 }
 
-pub mod chan {
-    //! A few flavors of channels to help writing async code
-    pub mod oneshot {
-        //! Oneshot channel
-        pub use async_oneshot::*;
-    }
-
-    pub mod mpsc {
-        //! Multiple producer, single consumer channel
-        pub use async_channel::*;
-    }
-
-    pub mod spsc {
-        //! Single producer, single consumer channel
-        pub use async_channel::*;
-    }
-
-    pub mod mpmc {
-        //! Multiple producer, multiple consumer "broadcast" channel
-        pub use async_broadcast::*;
-
-        /// A broadcast channel with an inactive receiver
-        #[derive(Clone)]
-        pub struct Channel<T> {
-            pub tx: Sender<T>,
-            pub rx: InactiveReceiver<T>,
-        }
-
-        /// By default a channel is created with a capacity of `1`.
-        impl<T: Clone> Default for Channel<T> {
-            fn default() -> Self {
-                Self::new_with_capacity(1)
-            }
-        }
-
-        impl<T: Clone> Channel<T> {
-            pub fn new_with_capacity(cap: usize) -> Self {
-                let (mut tx, rx) = broadcast(cap);
-                tx.set_overflow(true);
-                let rx = rx.deactivate();
-                Channel { tx, rx }
-            }
-
-            pub fn new_receiver(&self) -> Receiver<T> {
-                self.rx.activate_cloned()
-            }
-
-            pub fn try_send(&mut self, msg: T) -> anyhow::Result<()> {
-                match self.tx.try_broadcast(msg) {
-                    Ok(me) => match me {
-                        Some(e) => {
-                            self.tx.set_capacity(self.tx.capacity() + 1);
-                            self.try_send(e)
-                        }
-                        None => Ok(()),
-                    },
-                    Err(e) => match e {
-                        // nobody is listening so it doesn't matter
-                        TrySendError::Inactive(_) => Ok(()),
-                        _ => Err(anyhow::anyhow!("{}", e)),
-                    },
-                }
-            }
-        }
-    }
-}
-
-pub mod internal {
-    //! Types used internally for deriving [`CanFetch`](crate::CanFetch) and
-    //! other macros.
-    use std::any::TypeId;
-    use std::{any::Any, sync::Arc};
-
-    use anyhow::Context;
-
-    pub use super::resource_manager::LoanManager;
-
-    /// Describes borrowing of system resources at runtime. For internal use,
-    /// mostly.
-    #[derive(Clone, Debug)]
-    pub struct Borrow {
-        pub id: ResourceId,
-        pub is_exclusive: bool,
-    }
-
-    impl Borrow {
-        /// The resource id
-        pub fn rez_id(&self) -> ResourceId {
-            self.id.clone()
-        }
-
-        /// The type name of the resource
-        pub fn name(&self) -> &str {
-            self.id.name
-        }
-
-        /// Whether this borrow is mutable (`true`) or immutable (`false`).
-        pub fn is_exclusive(&self) -> bool {
-            self.is_exclusive
-        }
-    }
-
-    /// A type-erased resource.
-    pub struct Resource {
-        data: Box<dyn Any + Send + Sync + 'static>,
-        #[cfg(debug_assertions)]
-        type_name: &'static str,
-    }
-
-    impl<T: Any + Send + Sync + 'static> From<Box<T>> for Resource {
-        fn from(data: Box<T>) -> Self {
-            #[cfg(debug_assertions)]
-            {
-                Resource {
-                    data,
-                    type_name: std::any::type_name::<T>(),
-                }
-            }
-            #[cfg(not(debug_assertions))]
-            {
-                Resource { data }
-            }
-        }
-    }
-
-    impl Resource {
-        pub fn type_name(&self) -> Option<&'static str> {
-            #[cfg(debug_assertions)]
-            {
-                Some(self.type_name)
-            }
-            #[cfg(not(debug_assertions))]
-            {
-                None
-            }
-        }
-
-        pub fn downcast<T: Any + Send + Sync + 'static>(self) -> Result<Box<T>, Resource> {
-            self.data.downcast::<T>().map_err(|data| {
-                #[cfg(debug_assertions)]
-                {
-                    Resource {
-                        data,
-                        type_name: self.type_name,
-                    }
-                }
-                #[cfg(not(debug_assertions))]
-                {
-                    Resource { data }
-                }
-            })
-        }
-
-        pub fn downcast_ref<T: Any + Send + Sync + 'static>(&self) -> anyhow::Result<&T> {
-            self.data.downcast_ref::<T>().with_context(|| {
-                format!(
-                    "could not downcast_ref '{}'",
-                    self.type_name().unwrap_or("unknown")
-                )
-            })
-        }
-
-        pub fn downcast_mut<T: Any + Send + Sync + 'static>(&mut self) -> anyhow::Result<&mut T> {
-            let type_name = self.type_name();
-            self.data.downcast_mut::<T>().with_context(|| {
-                format!(
-                    "could not downcast_mut '{}'",
-                    type_name.unwrap_or("unknown")
-                )
-            })
-        }
-    }
-
-    /// A resource that is ready for fetching, which means it is
-    /// either owned (and therefore mutable by the owner) or sitting in an Arc.
-    pub enum FetchReadyResource {
-        Owned(Resource),
-        Ref(Arc<Resource>),
-    }
-
-    impl std::fmt::Debug for FetchReadyResource {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            match self {
-                Self::Owned(_) => f.debug_tuple("Owned").field(&"_").finish(),
-                Self::Ref(_) => f.debug_tuple("Ref").field(&"_").finish(),
-            }
-        }
-    }
-
-    impl FetchReadyResource {
-        pub fn into_owned(self) -> Option<Resource> {
-            match self {
-                FetchReadyResource::Owned(r) => Some(r),
-                FetchReadyResource::Ref(_) => None,
-            }
-        }
-
-        pub fn into_ref(self) -> Option<Arc<Resource>> {
-            match self {
-                FetchReadyResource::Owned(_) => None,
-                FetchReadyResource::Ref(r) => Some(r),
-            }
-        }
-
-        pub fn is_owned(&self) -> bool {
-            matches!(self, FetchReadyResource::Owned(_))
-        }
-
-        pub fn is_ref(&self) -> bool {
-            !self.is_owned()
-        }
-    }
-
-    #[derive(Clone, Debug, Eq)]
-    pub struct ResourceId {
-        pub(crate) type_id: TypeId,
-        // TODO: Hide this unless debug-assertions
-        pub(crate) name: &'static str,
-    }
-
-    impl std::fmt::Display for ResourceId {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str(self.name)
-        }
-    }
-
-    impl std::hash::Hash for ResourceId {
-        fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-            self.type_id.hash(state);
-        }
-    }
-
-    impl PartialEq for ResourceId {
-        fn eq(&self, other: &Self) -> bool {
-            self.type_id == other.type_id
-        }
-    }
-
-    impl ResourceId {
-        pub fn new<T: Any + Send + Sync + 'static>() -> Self {
-            ResourceId {
-                type_id: TypeId::of::<T>(),
-                name: std::any::type_name::<T>(),
-            }
-        }
-    }
-}
-
-/// Marker trait that denotes a static, nameable type that can be sent between
-/// threads.
-pub trait IsResource: Any + Send + Sync + 'static {}
-impl<T: Any + Send + Sync + 'static> IsResource for T {}
-
-/// Wrapper for one fetched resource.
-///
-/// When dropped, the wrapped resource will be sent back to the world.
-pub(crate) struct Fetched<T: IsResource> {
-    // should be unbounded, `send` should never fail
-    resource_return_tx: chan::mpsc::Sender<(ResourceId, Resource)>,
-    inner: Option<Box<T>>,
-}
-
-impl<'a, T: IsResource> Deref for Fetched<T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        self.inner.as_ref().unwrap()
-    }
-}
-
-impl<'a, T: IsResource> DerefMut for Fetched<T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.inner.as_mut().unwrap()
-    }
-}
-
-impl<'a, T: IsResource> Drop for Fetched<T> {
-    fn drop(&mut self) {
-        if let Some(inner) = self.inner.take() {
-            self.resource_return_tx
-                .try_send((ResourceId::new::<T>(), Resource::from(inner)))
-                .unwrap();
-        }
-    }
-}
-
-/// Used to generate a default value of a resource, if possible.
-pub trait Gen<T> {
-    fn generate() -> Option<T>;
-}
-
-/// Valueless type that represents the ability to generate a resource by
-/// default.
-pub struct SomeDefault;
-
-impl<T: Default> Gen<T> for SomeDefault {
-    fn generate() -> Option<T> {
-        Some(T::default())
-    }
-}
-
-/// Valueless type that represents the **inability** to generate a resource by
-/// default.
-pub struct NoDefault;
-
-impl<T> Gen<T> for NoDefault {
-    fn generate() -> Option<T> {
-        None
-    }
-}
-
-/// A mutably borrowed resource that may be created by default.
-///
-/// [`Read`] and [`Write`] are the main way systems interact with resources.
-/// When [`fetch`](crate::World::fetch)ed the wrapped type `T` will
-/// automatically be created by default. If fetched as `Write<T, NoDefault>` the
-/// fetch will err if the resource doesn't already exist.
-///
-/// After a successful fetch, the resource will be automatically sent back to
-/// the world on drop. To make sure that your async functions don't hold fetched
-/// resources over await points, [`Facade`] uses [`visit`](Facade::visit) which
-/// fetches inside a syncronous closure.
-///
-/// `Write` has two type parameters:
-/// * `T` - The type of the resource.
-/// * `G` - The method by which the resource can be generated if it doesn't
-///   already exist. By default this is [`SomeDefault`], which denotes creating
-///   the resource using its default implementation. Another option is
-///   [`NoDefault`] which fails to generate the resource.
-///
-/// ```rust
-/// use apecs::*;
-///
-/// let mut world = World::default();
-/// {
-///     let default_number = world.fetch::<Read<u32>>();
-///     assert_eq!(Some(0), default_number.map(|n| *n).ok());
-/// }
-/// {
-///     let no_number = world.fetch::<Read<f32, NoDefault>>();
-///     assert!(no_number.is_err());
-/// }
-/// ```
-pub struct Write<T: IsResource, G: Gen<T> = SomeDefault>(Fetched<T>, PhantomData<G>);
-
-impl<T: IsResource, G: Gen<T>> Deref for Write<T, G> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        self.0.inner.as_ref().unwrap()
-    }
-}
-
-impl<T: IsResource, G: Gen<T>> DerefMut for Write<T, G> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.0.inner.as_mut().unwrap()
-    }
-}
-
-impl<'a, T: Send + Sync + 'static, G: Gen<T>> IntoIterator for &'a Write<T, G>
-where
-    &'a T: IntoIterator,
-{
-    type Item = <<&'a T as IntoIterator>::IntoIter as Iterator>::Item;
-
-    type IntoIter = <&'a T as IntoIterator>::IntoIter;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.deref().into_iter()
-    }
-}
-
-impl<'a, T: Send + Sync + 'static, G: Gen<T>> IntoParallelIterator for &'a Write<T, G>
-where
-    &'a T: IntoParallelIterator,
-{
-    type Item = <&'a T as IntoParallelIterator>::Item;
-
-    type Iter = <&'a T as IntoParallelIterator>::Iter;
-
-    fn into_par_iter(self) -> Self::Iter {
-        self.deref().into_par_iter()
-    }
-}
-
-impl<'a, T: Send + Sync + 'static, G: Gen<T>> IntoIterator for &'a mut Write<T, G>
-where
-    &'a mut T: IntoIterator,
-{
-    type Item = <<&'a mut T as IntoIterator>::IntoIter as Iterator>::Item;
-
-    type IntoIter = <&'a mut T as IntoIterator>::IntoIter;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.deref_mut().into_iter()
-    }
-}
-
-impl<'a, T: Send + Sync + 'static, G: Gen<T>> IntoParallelIterator for &'a mut Write<T, G>
-where
-    &'a mut T: IntoParallelIterator,
-{
-    type Item = <&'a mut T as IntoParallelIterator>::Item;
-
-    type Iter = <&'a mut T as IntoParallelIterator>::Iter;
-
-    fn into_par_iter(self) -> Self::Iter {
-        self.deref_mut().into_par_iter()
-    }
-}
-
-impl<T: IsResource, G: Gen<T>> Write<T, G> {
-    /// An explicit method of getting a reference to the inner type without
-    /// `Deref`.
-    pub fn inner(&self) -> &T {
-        self.deref()
-    }
-
-    /// An explicit method of getting a mutable reference to the inner type
-    /// without `DerefMut`.
-    pub fn inner_mut(&mut self) -> &mut T {
-        self.deref_mut()
-    }
-}
-
-/// Immutably borrowed resource that may be created by default.
-///
-/// [`Read`] and [`Write`] are the main way systems interact with resources.
-/// When [`fetch`](crate::World::fetch)ed The wrapped type `T` will
-/// automatically be created b default. If fetched as `Write<T, NoDefault>` the
-/// fetch will err if the resource doesn't already exist.
-///
-/// After a successful fetch, the resource will be automatically sent back to
-/// the world on drop.
-///
-/// `Read` has two type parameters:
-/// * `T` - The type of the resource.
-/// * `G` - The method by which the resource can be generated if it doesn't
-///   exist. By default this is [`SomeDefault`], which denotes creating the
-///   resource using its default instance. Another option is [`NoDefault`] which
-///   fails to generate the resource.
-///
-/// ```rust
-/// use apecs::*;
-///
-/// let mut world = World::default();
-/// {
-///     let default_number = world.fetch::<Read<u32>>();
-///     assert_eq!(Some(0), default_number.map(|n| *n).ok());
-/// }
-/// {
-///     let no_number = world.fetch::<Read<f32, NoDefault>>();
-///     assert!(no_number.is_err());
-/// }
-/// ```
-pub struct Read<T: IsResource, G: Gen<T> = SomeDefault> {
-    inner: Arc<Resource>,
-    _phantom_t: PhantomData<T>,
-    _phantom_g: PhantomData<G>,
-}
-
-impl<'a, T: IsResource, G: Gen<T>> Deref for Read<T, G> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        self.inner.downcast_ref().unwrap()
-    }
-}
-
-impl<'a, T: Send + Sync + 'static, G: Gen<T>> IntoIterator for &'a Read<T, G>
-where
-    &'a T: IntoIterator,
-{
-    type Item = <<&'a T as IntoIterator>::IntoIter as Iterator>::Item;
-
-    type IntoIter = <&'a T as IntoIterator>::IntoIter;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.deref().into_iter()
-    }
-}
-
-impl<'a, S: Send + Sync + 'static, G: Gen<S>> IntoParallelIterator for &'a Read<S, G>
-where
-    &'a S: IntoParallelIterator,
-{
-    type Iter = <&'a S as IntoParallelIterator>::Iter;
-
-    type Item = <&'a S as IntoParallelIterator>::Item;
-
-    fn into_par_iter(self) -> Self::Iter {
-        self.deref().into_par_iter()
-    }
-}
-
-impl<T: IsResource, G: Gen<T>> Read<T, G> {
-    /// An explicit method of getting a reference to the inner type without
-    /// `Deref`.
-    pub fn inner(&self) -> &T {
-        self.deref()
-    }
-}
-
-pub struct Request {
-    pub borrows: Vec<internal::Borrow>,
-    pub construct: fn(&mut LoanManager<'_>) -> anyhow::Result<Resource>,
-    pub deploy_tx: spsc::Sender<Resource>,
-}
-
-impl std::fmt::Debug for Request {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Request")
-            .field("borrows", &self.borrows)
-            .field(
-                "construct",
-                &"fn(&mut internal::LoanManager<'_> -> anyhow::Result<Resource>)",
-            )
-            .finish()
-    }
-}
-
-pub(crate) struct LazyResource {
-    id: ResourceId,
-    create: Box<dyn FnOnce(&mut LoanManager) -> anyhow::Result<Resource>>,
-}
-
-impl LazyResource {
-    pub fn new<T: IsResource>(
-        f: impl FnOnce(&mut LoanManager) -> anyhow::Result<T> + 'static,
-    ) -> LazyResource {
-        LazyResource {
-            id: ResourceId::new::<T>(),
-            create: Box::new(move |loans| Ok(Resource::from(Box::new(f(loans)?)))),
-        }
-    }
-}
-
-/// Types that can be fetched from the [`World`].
-pub trait CanFetch: Send + Sync + Sized {
-    fn borrows() -> Vec<internal::Borrow>;
-
-    /// Attempt to construct `Self` with the given `LoanManager`.
-    fn construct(loan_mngr: &mut LoanManager) -> anyhow::Result<Self>;
-
-    /// Return a plugin containing the systems and sub-resources required to
-    /// create and use the type.
-    ///
-    /// This will be used by functions like [`World::with_plugin`] to ensure
-    /// that a type's resources have been created, and that the systems
-    /// required for upkeep are included.
-    fn plugin() -> Plugin {
-        Plugin::default()
-    }
-}
-
-impl<'a, T: IsResource, G: Gen<T> + IsResource> CanFetch for Write<T, G> {
-    fn borrows() -> Vec<internal::Borrow> {
-        vec![internal::Borrow {
-            id: ResourceId::new::<T>(),
-            is_exclusive: true,
-        }]
-    }
-
-    fn construct(loan_mngr: &mut LoanManager) -> anyhow::Result<Self> {
-        let borrow = internal::Borrow {
-            id: ResourceId::new::<T>(),
-            is_exclusive: true,
-        };
-        let t: FetchReadyResource =
-            loan_mngr.get_loaned_or_gen::<T, G>("Write::construct", &borrow)?;
-        let t = t.into_owned().context("resource is not owned")?;
-        let inner: Option<Box<T>> = Some(t.downcast::<T>().map_err(|_| {
-            anyhow::anyhow!(
-                "Write::construct could not cast resource as '{}'",
-                std::any::type_name::<T>(),
-            )
-        })?);
-        let fetched = Fetched {
-            resource_return_tx: loan_mngr.resource_return_tx(),
-            inner,
-        };
-        Ok(Write(fetched, PhantomData))
-    }
-
-    fn plugin() -> Plugin {
-        Plugin::default().with_resource(|_: ()| {
-            G::generate().with_context(|| {
-                format!(
-                    "Write could not generate {} with '{}'",
-                    std::any::type_name::<T>(),
-                    std::any::type_name::<G>()
-                )
-            })
-        })
-    }
-}
-
-impl<'a, T: IsResource, G: Gen<T> + IsResource> CanFetch for Read<T, G> {
-    fn borrows() -> Vec<internal::Borrow> {
-        vec![internal::Borrow {
-            id: ResourceId::new::<T>(),
-            is_exclusive: false,
-        }]
-    }
-
-    fn construct(loan_mngr: &mut LoanManager) -> anyhow::Result<Self> {
-        let borrow = internal::Borrow {
-            id: ResourceId::new::<T>(),
-            is_exclusive: false,
-        };
-        let t: FetchReadyResource =
-            loan_mngr.get_loaned_or_gen::<T, G>("Read::construct", &borrow)?;
-        let inner = t.into_ref().context("resource is not borrowed")?;
-        Ok(Read {
-            inner,
-            _phantom_t: PhantomData,
-            _phantom_g: PhantomData,
-        })
-    }
-
-    fn plugin() -> Plugin {
-        Plugin::default().with_resource(|_: ()| {
-            G::generate().with_context(|| {
-                format!(
-                    "Read could not generate '{}' with '{}'",
-                    std::any::type_name::<T>(),
-                    std::any::type_name::<G>()
-                )
-            })
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::chan::mpsc;
-    use crate::{World, Write};
+    use std::sync::Arc;
+
+    use crate::*;
+    use rustc_hash::FxHashMap;
+
+    #[derive(Default)]
+    struct MyMap(FxHashMap<String, u32>);
+
+    #[derive(Default)]
+    struct Number(u32);
 
     #[test]
-    fn unbounded_channel_doesnt_yield_on_send_and_await() {
-        let (tx, rx) = mpsc::unbounded::<u32>();
+    fn can_closure_system() {
+        #[derive(Copy, Clone, Debug, PartialEq)]
+        struct F32s(f32, f32);
 
-        let executor = async_executor::Executor::new();
-        let _t = executor.spawn(async move {
-            for i in 0..5u32 {
-                tx.send(i).await.unwrap();
-            }
-        });
-
-        assert!(executor.try_tick());
-
-        let mut msgs = vec![];
-        while let Ok(msg) = rx.try_recv() {
-            msgs.push(msg);
+        #[derive(Edges)]
+        struct StatefulSystemData {
+            positions: Query<&'static F32s>,
         }
 
-        assert_eq!(msgs, [0, 1, 2, 3, 4]);
+        fn mk_stateful_system(
+            tx: async_channel::Sender<F32s>,
+        ) -> impl FnMut(StatefulSystemData) -> Result<(), GraphError> {
+            println!("making stateful system");
+            let mut highest_pos: F32s = F32s(0.0, f32::NEG_INFINITY);
+
+            move |data: StatefulSystemData| {
+                println!("running stateful system: highest_pos:{:?}", highest_pos);
+                for pos in data.positions.query().iter_mut() {
+                    if pos.1 > highest_pos.1 {
+                        highest_pos = *pos.value();
+                        println!("set new highest_pos: {:?}", highest_pos);
+                    }
+                }
+
+                println!("sending highest_pos: {:?}", highest_pos);
+                tx.try_send(highest_pos).map_err(GraphError::other)?;
+
+                Ok(())
+            }
+        }
+
+        let (tx, rx) = async_channel::bounded(1);
+
+        let mut world = World::default();
+        let stateful = mk_stateful_system(tx);
+        world.add_subgraph(graph!(stateful));
+        world
+            .visit(|mut archset: ViewMut<Components>| {
+                archset.insert_component(0, F32s(20.0, 30.0));
+                archset.insert_component(1, F32s(0.0, 0.0));
+                archset.insert_component(2, F32s(100.0, 100.0));
+            })
+            .unwrap();
+
+        world.tock();
+
+        let highest = rx.try_recv().unwrap();
+        assert_eq!(F32s(100.0, 100.0), highest);
+    }
+
+    fn new_executor() -> Arc<async_executor::Executor<'static>> {
+        let executor = Arc::new(async_executor::Executor::new());
+        let _execution_loop = {
+            let executor = executor.clone();
+            std::thread::spawn(move || loop {
+                match Arc::strong_count(&executor) {
+                    1 => break,
+                    _ => {
+                        let _ = executor.try_tick();
+                    }
+                }
+            })
+        };
+        executor
     }
 
     #[test]
-    fn executor_sanity() {
-        let (tx, rx) = mpsc::bounded::<String>(1);
+    fn async_run_and_return_resources() {
+        let _ = env_logger::builder()
+            .is_test(true)
+            .filter_level(log::LevelFilter::Trace)
+            .try_init();
 
-        let executor = async_executor::Executor::new();
-        let tx_t = tx.clone();
-        let _t = executor.spawn(async move {
-            let mut n = 0;
-            loop {
-                tx_t.send(format!("A {}", n)).await.unwrap();
-                n += 1;
+        fn maintain_map(
+            mut data: (Query<(&String, &u32)>, ViewMut<MyMap>),
+        ) -> Result<(), GraphError> {
+            for (name, number) in data.0.query().iter_mut() {
+                if !data.1 .0.contains_key(name.value()) {
+                    let _ = data.1 .0.insert(name.to_string(), *number.value());
+                }
             }
-        });
 
-        let tx_s = tx;
-        let _s = executor.spawn(async move {
-            let mut n = 0;
-            loop {
-                tx_s.send(format!("B {}", n)).await.unwrap();
-                n += 1;
+            Ok(())
+        }
+
+        let (tx, rx) = async_channel::bounded(1);
+        let mut world = World::default();
+        let mut facade = world.facade();
+
+        let executor = new_executor();
+        executor
+            .spawn(async move {
+                log::info!("create running");
+                tx.try_send(()).unwrap();
+                facade
+                    .visit(
+                        |(mut entities, mut archset): (ViewMut<Entities>, ViewMut<Components>)| {
+                            for n in 0..100u32 {
+                                let e = entities.create();
+                                archset.insert_bundle(e.id(), (format!("entity_{}", n), n));
+                            }
+                        },
+                    )
+                    .await
+                    .unwrap();
+                log::info!("async done");
+            })
+            .detach();
+
+        world.add_subgraph(graph!(maintain_map));
+
+        // should tick once and yield for the facade request
+        world.run_loop().unwrap();
+        rx.try_recv().unwrap();
+        log::info!("received");
+
+        while !executor.is_empty() {
+            // world sends resources to the "create" async which makes
+            // entities+components
+            {
+                let mut facade_schedule = world.take_facade_schedule().unwrap();
+                loop {
+                    let tick_again = facade_schedule.tick().unwrap();
+                    if !tick_again {
+                        log::info!("schedule exhausted");
+                        break;
+                    }
+                }
             }
-        });
 
-        let mut msgs = vec![];
-        for _ in 0..10 {
-            msgs.push("tick".to_string());
-            let _ = executor.try_tick();
-            while let Ok(msg) = rx.try_recv() {
-                msgs.push(msg);
+            world.tock();
+        }
+
+        world
+            .visit(|book: View<MyMap>| {
+                for n in 0..100 {
+                    assert_eq!(book.0.get(&format!("entity_{}", n)), Some(&n));
+                }
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn can_create_entities_and_build_convenience() {
+        struct DataA(f32);
+        struct DataB(f32);
+
+        let mut world = World::default();
+        assert!(world.contains_resource::<Entities>(), "missing entities");
+        let e = world
+            .get_entities_mut()
+            .create()
+            .with_bundle((DataA(0.0), DataB(0.0)));
+        let id = e.id();
+
+        let executor = new_executor();
+        executor
+            .spawn(async move {
+                println!("updating entity");
+                e.with_bundle((DataA(666.0), DataB(666.0))).updates().await;
+                println!("done!");
+            })
+            .detach();
+
+        while !executor.is_empty() {
+            world.tock();
+        }
+        // just in case the executor really beat us to the punch
+        world.tock();
+        world
+            .visit(|data: Query<(&DataA, &DataB)>| {
+                let mut q = data.query();
+                let (a, b) = q.find_one(id).unwrap();
+                assert_eq!(666.0, a.0);
+                assert_eq!(666.0, b.0);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn entities_can_lazy_add_and_get() {
+        #[derive(Debug, Clone, PartialEq)]
+        struct Name(&'static str);
+
+        #[derive(Debug, Clone, PartialEq)]
+        struct Age(u32);
+
+        // this tests that we can use an Entity to set components and
+        // await those component updates.
+        let executor = new_executor();
+        let mut world = World::default();
+        let mut facade = world.facade();
+        executor
+            .spawn(async move {
+                let mut e = {
+                    let e = facade
+                        .visit(|mut entities: ViewMut<Entities>| entities.create())
+                        .await
+                        .unwrap();
+                    e
+                };
+
+                e.insert_bundle((Name("ada"), Age(666)));
+                e.updates().await;
+
+                let (name, age) = e
+                    .visit::<(&Name, &Age), _>(|(name, age)| {
+                        (name.value().clone(), age.value().clone())
+                    })
+                    .await
+                    .unwrap();
+                assert_eq!(Name("ada"), name);
+                assert_eq!(Age(666), age);
+
+                println!("done!");
+            })
+            .detach();
+
+        while !executor.is_empty() {
+            world.run_loop().unwrap();
+            let mut facade_schedule = world.take_facade_schedule().unwrap();
+            facade_schedule.run().unwrap();
+        }
+
+        world
+            .visit(|ages: Query<&Age>| {
+                let mut q = ages.query();
+                let age = q.find_one(0).unwrap();
+                assert_eq!(&Age(666), age.value());
+            })
+            .unwrap();
+    }
+
+    #[cfg(feature = "none")]
+    #[test]
+    fn plugin_inserts_resources_from_canfetch_in_systems() {
+        #[derive(Default)]
+        struct MyStr(&'static str);
+
+        let _ = env_logger::builder()
+            .is_test(true)
+            .filter_level(log::LevelFilter::Trace)
+            .try_init();
+
+        let mut world = World::default();
+        world.with_system("test", |_: ViewMut<MyStr>| ok()).unwrap();
+        let s = world.resource_mut::<MyStr>().unwrap();
+        s.0 = "blah";
+    }
+
+    #[test]
+    fn can_query_empty_ref_archetypes_in_same_batch() {
+        let _ = env_logger::builder()
+            .is_test(true)
+            .filter_level(log::LevelFilter::Trace)
+            .try_init();
+
+        let mut world = World::default();
+        let one = |q: Query<(&f32, &bool)>| {
+            for (_f, _b) in q.query().iter_mut() {}
+            ok()
+        };
+        let two = |q: Query<(&f32, &bool)>| {
+            for (_f, _b) in q.query().iter_mut() {}
+            ok()
+        };
+        world.add_subgraph(graph!(one, two));
+        world.tock();
+        let schedule = world.get_schedule_names();
+        assert_eq!(vec![vec!["one", "two"]], schedule);
+    }
+
+    #[test]
+    fn deleted_entities() {
+        let _ = env_logger::builder()
+            .is_test(true)
+            .filter_level(log::LevelFilter::Trace)
+            .try_init();
+
+        let mut world = World::default();
+        {
+            let entities: &mut Entities = world.get_entities_mut();
+            (0..10u32).for_each(|i| {
+                entities
+                    .create()
+                    .insert_bundle(("hello".to_string(), false, i))
+            });
+            assert_eq!(10, entities.alive_len());
+        }
+        world.tock();
+        world
+            .visit(|q: Query<&u32>| {
+                assert_eq!(9, **q.query().find_one(9).unwrap());
+            })
+            .unwrap();
+        world
+            .visit(|entities: View<Entities>| {
+                let entity = entities.hydrate(9).unwrap();
+                entities.destroy(entity);
+            })
+            .unwrap();
+        world.tock();
+        world
+            .visit(|entities: View<Entities>| {
+                assert_eq!(9, entities.alive_len());
+                let deleted_strings = entities.deleted_iter_of::<String>().collect::<Vec<_>>();
+                assert_eq!(9, deleted_strings[0].id());
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn system_barrier() {
+        let _ = env_logger::builder()
+            .is_test(true)
+            .filter_level(log::LevelFilter::Trace)
+            .try_init();
+
+        fn one(mut u32_number: ViewMut<u32>) -> Result<(), GraphError> {
+            *u32_number += 1;
+            end()
+        }
+
+        fn two(mut u32_number: ViewMut<u32>) -> Result<(), GraphError> {
+            *u32_number += 1;
+            end()
+        }
+
+        fn exit_on_three(mut f32_number: ViewMut<f32>) -> Result<(), GraphError> {
+            *f32_number += 1.0;
+            if *f32_number == 3.0 {
+                end()
+            } else {
+                ok()
             }
         }
 
-        let (a, _b) = msgs.split_at(4);
+        fn lastly((u32_number, f32_number): (View<u32>, View<f32>)) -> Result<(), GraphError> {
+            if *u32_number == 2 && *f32_number == 3.0 {
+                end()
+            } else {
+                ok()
+            }
+        }
+
+        let system_graph = graph!(
+            // one should run before two
+            one < two,
+            // exit_on_three has no dependencies
+            exit_on_three
+        )
+        .with_barrier()
+        // all systems after a barrier run after the systems before a barrier
+        .with_subgraph(graph!(lastly));
+
+        let mut world = World::default();
+        world.add_subgraph(system_graph);
+
         assert_eq!(
-            a,
-            &[
-                "tick".to_string(),
-                "A 0".to_string(),
-                "tick".to_string(),
-                "B 0".to_string()
-            ]
+            vec![vec!["exit_on_three", "one",], vec!["two"], vec!["lastly"],],
+            world.get_schedule_names()
         );
+
+        world.tock();
+
+        assert_eq!(
+            vec![vec!["exit_on_three"], vec!["lastly"],],
+            world.get_schedule_names()
+        );
+
+        world.tock();
+        world.tock();
+        assert!(world.get_schedule_names().is_empty());
     }
 
     #[test]
     fn can_compile_write_without_trydefault() {
         let mut world = World::default();
-        world.with_resource(0.0f32).unwrap();
+        world.add_resource(0.0f32);
         {
-            let _f32_num = world.resource_mut::<f32>().unwrap();
+            let _f32_num = world.get_resource_mut::<f32>().unwrap();
         }
         {
-            let _f32_num = world.fetch::<Write<f32>>().unwrap();
+            let _f32_num = world.get_resource_mut::<f32>().unwrap();
         }
     }
 }

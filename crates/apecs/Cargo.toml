@@ -23,21 +23,20 @@ path = "src/lib.rs"
 bench = false
 
 [dependencies]
-anyhow = "1.0"
 any_vec = "0.10"
 apecs-derive = { version = "0.2.3", path = "../apecs-derive" }
-async-broadcast = "0.4"
 async-channel = "1.6"
-async-oneshot = "0.5"
-dagga = { version = "0.1", default-features = false }
+moongraph = { version = "0.4", path = "../../../moongraph/crates/moongraph" }
 itertools = "0.10"
 log = "0.4"
 parking_lot = "0.12"
 rayon = "1.5"
 rustc-hash = "1.1"
 smallvec = "1.9"
+snafu = "0.8"
 
 [dev-dependencies]
+async-broadcast = "0.4"
 async-executor = "1.4"
 async-timer = "0.7"
 env_logger = "0.9"
