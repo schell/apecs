@@ -8,11 +8,12 @@
 //! just want some examples please check out the [readme](https://github.com/schell/apecs#readme)
 #![allow(clippy::type_complexity)]
 
-//mod plugin;
+mod entity;
 mod facade;
 mod storage;
 mod world;
 
+pub use entity::*;
 pub use facade::{Facade, FacadeSchedule};
 pub use moongraph::{
     end, err, graph, ok, Edges, Graph, GraphError, Move, NodeResults, View, ViewMut,
@@ -22,7 +23,7 @@ pub use storage::{
     Components, Entry, IsBundle, IsQuery, LazyComponents, Maybe, MaybeMut, MaybeRef, Mut, Query,
     QueryGuard, QueryIter, Ref, Without,
 };
-pub use world::{current_iteration, Entities, Entity, Parallelism, World};
+pub use world::{current_iteration, Parallelism, World};
 
 #[cfg(doctest)]
 pub mod doctest {
