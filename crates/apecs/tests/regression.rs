@@ -135,27 +135,41 @@ fn system_batch_drops_resources_after_racing_asyncs() {
 #[test]
 fn readme() {
     use apecs::*;
+
     let mut world = World::default();
-    let entities = world.get_entities_mut();
-    // Nearly any type can be used as a component with zero boilerplate
-    let a = entities.create().with_bundle((123i32, true, "abc"));
-    let b = entities.create().with_bundle((42i32, false));
+
+    // Create entities to hold heterogenous components
+    let a = world.get_entities_mut().create();
+    let b = world.get_entities_mut().create();
+
+    // Nearly any type can be used as a component with zero boilerplate.
+    // Here we add three components as a "bundle" to entity "a".
+    world
+        .get_components_mut()
+        .insert_bundle(*a, (123i32, true, "abc"));
+    assert!(world
+        .get_components()
+        .get_component::<i32>(a.id())
+        .is_some());
+
+    // Add two components as a "bundle" to entity "b".
+    world.get_components_mut().insert_bundle(*b, (42i32, false));
 
     // Query the world for all matching bundles
     let mut query = world.get_components_mut().query::<(&mut i32, &bool)>();
     for (number, flag) in query.iter_mut() {
+        println!("id: {}", number.id());
         if **flag {
             **number *= 2;
         }
     }
 
     // Perform random access within the same query by using the entity.
-    // TODO: this is failing - it might be because of the changes made to query
     let b_i32 = **query.find_one(b.id()).unwrap().0;
     assert_eq!(b_i32, 42);
 
     // Track changes to individual components
     let a_entry: &Entry<i32> = query.find_one(a.id()).unwrap().0;
-    assert_eq!(**a_entry, 246);
     assert_eq!(apecs::current_iteration(), a_entry.last_changed());
+    assert_eq!(**a_entry, 246);
 }

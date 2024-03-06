@@ -115,6 +115,12 @@ impl Deref for Entity {
     }
 }
 
+impl AsRef<usize> for Entity {
+    fn as_ref(&self) -> &usize {
+        &self.id
+    }
+}
+
 impl Entity {
     pub fn id(&self) -> usize {
         self.id
