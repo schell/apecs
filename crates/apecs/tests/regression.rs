@@ -1,45 +1,19 @@
 //! Tests for bugs we've encountered.
-use std::{sync::Arc, thread::JoinHandle};
-
 use apecs::{graph, ok, Facade, Graph, GraphError, View, ViewMut, World};
 
-fn new_executor() -> (Arc<async_executor::Executor<'static>>, JoinHandle<()>) {
-    let executor = Arc::new(async_executor::Executor::new());
-    let execution_loop = {
-        let executor = executor.clone();
-        std::thread::spawn(move || loop {
-            match Arc::strong_count(&executor) {
-                1 => break,
-                _ => {
-                    let _ = executor.try_tick();
-                }
-            }
-        })
-    };
-    (executor, execution_loop)
-}
-
-struct Channel<T> {
-    tx: async_broadcast::Sender<T>,
-    rx: async_broadcast::Receiver<T>,
+struct Channel {
+    tx: async_broadcast::Sender<()>,
+    rx: async_broadcast::Receiver<()>,
     ok_to_drop: bool,
 }
 
-impl<T> Default for Channel<T> {
+impl Default for Channel {
     fn default() -> Self {
         let (tx, rx) = async_broadcast::broadcast(3);
         Channel {
             tx,
             rx,
             ok_to_drop: false,
-        }
-    }
-}
-
-impl<T> Drop for Channel<T> {
-    fn drop(&mut self) {
-        if !self.ok_to_drop {
-            panic!("channel should not be dropped");
         }
     }
 }
@@ -57,7 +31,7 @@ fn system_batch_drops_resources_after_racing_asyncs() {
 
     // * each tick this increments a counter by 1
     // * when the counter reaches 3 it fires an event
-    fn ticker((chan, mut tick): (ViewMut<Channel<()>>, ViewMut<usize>)) -> Result<(), GraphError> {
+    fn ticker((chan, mut tick): (ViewMut<Channel>, ViewMut<usize>)) -> Result<(), GraphError> {
         *tick += 1;
         log::info!("ticked {}", *tick);
         if *tick == 3 {
@@ -90,7 +64,7 @@ fn system_batch_drops_resources_after_racing_asyncs() {
     async fn race(mut facade: Facade) {
         log::info!("starting the race, awaiting View<Channel<()>>");
         let mut rx = facade
-            .visit(|chan: View<Channel<()>>| chan.rx.clone())
+            .visit(|chan: View<Channel>| chan.rx.clone())
             .await
             .unwrap();
         log::info!("race got View<Channel<()>> and is done with it");
@@ -110,24 +84,26 @@ fn system_batch_drops_resources_after_racing_asyncs() {
         log::info!("race is over");
 
         facade
-            .visit(|(unit, mut channel): (View<()>, ViewMut<Channel<()>>)| {
+            .visit(|(unit, mut channel): (View<()>, ViewMut<Channel>)| {
                 let () = *unit;
                 channel.ok_to_drop = true;
             })
             .await
             .unwrap();
+
+        log::info!("async exiting");
     }
 
-    let (executor, _execution_loop) = new_executor();
     let mut world = World::default();
     let facade = world.facade();
-    executor.spawn(race(facade)).detach();
+    let task = smol::spawn(race(facade));
     world.add_subgraph(graph!(ticker));
 
-    while !executor.is_empty() {
-        world.run_loop().unwrap();
-        let mut facade_schedule = world.take_facade_schedule().unwrap();
-        facade_schedule.run().unwrap();
+    while !task.is_finished() {
+        println!("tick");
+        world.tick().unwrap();
+        println!("tock");
+        world.get_facade_schedule().unwrap().run().unwrap();
     }
     log::info!("executor is empty, ending the test");
 }
@@ -136,40 +112,31 @@ fn system_batch_drops_resources_after_racing_asyncs() {
 fn readme() {
     use apecs::*;
 
+    #[derive(Clone, Copy, Debug, Default, PartialEq)]
+    struct Number(u32);
+
     let mut world = World::default();
+    let mut facade = world.facade();
 
-    // Create entities to hold heterogenous components
-    let a = world.get_entities_mut().create();
-    let b = world.get_entities_mut().create();
-
-    // Nearly any type can be used as a component with zero boilerplate.
-    // Here we add three components as a "bundle" to entity "a".
-    world
-        .get_components_mut()
-        .insert_bundle(*a, (123i32, true, "abc"));
-    assert!(world
-        .get_components()
-        .get_component::<i32>(a.id())
-        .is_some());
-
-    // Add two components as a "bundle" to entity "b".
-    world.get_components_mut().insert_bundle(*b, (42i32, false));
-
-    // Query the world for all matching bundles
-    let mut query = world.get_components_mut().query::<(&mut i32, &bool)>();
-    for (number, flag) in query.iter_mut() {
-        println!("id: {}", number.id());
-        if **flag {
-            **number *= 2;
+    let task = smol::spawn(async move {
+        loop {
+            let i = facade
+                .visit(|mut u32_number: ViewMut<Number>| {
+                    u32_number.0 += 1;
+                    u32_number.0
+                })
+                .await
+                .unwrap();
+            if i > 5 {
+                break;
+            }
         }
+    });
+
+    while !task.is_finished() {
+        world.tick().unwrap();
+        world.get_facade_schedule().unwrap().run().unwrap();
     }
 
-    // Perform random access within the same query by using the entity.
-    let b_i32 = **query.find_one(b.id()).unwrap().0;
-    assert_eq!(b_i32, 42);
-
-    // Track changes to individual components
-    let a_entry: &Entry<i32> = query.find_one(a.id()).unwrap().0;
-    assert_eq!(apecs::current_iteration(), a_entry.last_changed());
-    assert_eq!(**a_entry, 246);
+    assert_eq!(Number(6), *world.get_resource::<Number>().unwrap());
 }

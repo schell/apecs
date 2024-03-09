@@ -25,20 +25,19 @@ use super::{bundle::*, Archetype, Entry};
 /// end of each frame), and within an async context [`crate::Entity::updates`]
 /// will return a future that completes when these changes have resolved.
 ///
-/// Here's an example of a syncronous system that creates and updates an entity
-/// immediately:
+/// Here's an example of a system that creates and updates an entity immediately:
 /// ```
 /// # use apecs::*;
 /// fn mk_ent(
-///     (mut entities, mut components): (Write<Entities>, Write<Components>),
-/// ) -> anyhow::Result<ShouldContinue> {
+///     (mut entities, mut components): (ViewMut<Entities>, ViewMut<Components>),
+/// ) -> Result<(), GraphError> {
 ///     let e = entities.create();
-///     components.insert_bundle(e.id(), (123, "123", 123.0));
+///     components.insert_bundle(*e, (123, "123", 123.0));
 ///     end()
 /// }
 /// let mut world = World::default();
-/// world.with_system("mk_ent", mk_ent).unwrap();
-/// world.run();
+/// world.add_subgraph(graph!(mk_ent));
+/// world.tick().unwrap();
 /// ```
 ///
 /// ## A note about bundles
@@ -220,6 +219,7 @@ impl Components {
                 self.append_new_entry_bundle(entity_id, previous_bundle);
             }
         } else {
+            // the entry does not exist at all, so store it as a new one
             let entry_bundle: AnyBundle = bundle
                 .into_entry_bundle(entity_id)
                 .try_into_any_bundle()

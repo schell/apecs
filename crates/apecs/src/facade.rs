@@ -22,8 +22,10 @@ impl From<Request> for Node<Function, TypeKey> {
         Node::new(Function::new(
             prepare,
             move |rez| {
-                deploy_tx.try_send(rez).map_err(GraphError::other)?;
-                Ok(Box::new(()))
+                // Ignore any sending errors as the requesting async could have been
+                // dropped while awaiting, which is perfectly legal.
+                let _ = deploy_tx.try_send(rez);
+                Err(GraphError::TrimNode)
             },
             |_, _| Ok(()),
         ))
@@ -119,7 +121,8 @@ impl<'a> FacadeSchedule<'a> {
 
         if let Some(batch) = self.batches.next_batch() {
             let mut local: Option<fn(Resource) -> Result<Resource, GraphError>> = None;
-            batch.run(&mut local)?;
+            let results = batch.run(&mut local)?;
+            results.save(true, false)?;
             Ok(true)
         } else {
             log::trace!("async request batches exhausted");
@@ -127,8 +130,20 @@ impl<'a> FacadeSchedule<'a> {
         }
     }
 
+    /// Run the schedule by calling [`Facade::tick`] in a loop until all requests are fulfilled and
+    /// system resources are unified.
     pub fn run(&mut self) -> Result<(), GraphError> {
         while self.tick()? {}
         Ok(())
+    }
+
+    /// Return the number of batches left in the schedule.
+    pub fn len(&self) -> usize {
+        self.batches.len()
+    }
+
+    /// Attempt to unify resources, returning `true` if resources are unified, `false` if not.
+    pub fn unify(&mut self) -> bool {
+        self.batches.unify()
     }
 }

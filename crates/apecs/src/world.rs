@@ -2,8 +2,6 @@
 //! systems.
 use std::{
     any::{Any, TypeId},
-    collections::VecDeque,
-    ops::Deref,
     sync::atomic::AtomicU64,
     sync::Arc,
 };
@@ -11,10 +9,9 @@ use std::{
 use moongraph::{Edges, Graph, GraphError, ViewMut};
 
 use crate::{
-    //plugin::Plugin,
+    entity::Entities,
     facade::{Facade, FacadeSchedule, Request},
-    storage::{Components, Entry, IsBundle, IsQuery},
-    Entities,
+    storage::Components,
 };
 
 static SYSTEM_ITERATION: AtomicU64 = AtomicU64::new(0);
@@ -104,28 +101,19 @@ impl EntityUpkeepSystem {
 ///
 /// ```rust
 /// use apecs::*;
-/// let executor = std::sync::Arc::new(async_executor::Executor::new());
-/// let _execution_loop = {
-///     let executor = executor.clone();
-///     std::thread::spawn(move || loop {
-///         match std::sync::Arc::strong_count(&executor) {
-///             1 => break,
-///             _ => {
-///                 let _ = executor.try_tick();
-///             }
-///         }
-///     })
-/// };
+///
 /// struct Channel<T> {
 ///     tx: async_broadcast::Sender<T>,
 ///     rx: async_broadcast::Receiver<T>,
 /// }
+///
 /// impl<T> Default for Channel<T> {
 ///     fn default() -> Self {
 ///         let (tx, rx) = async_broadcast::broadcast(3);
 ///         Channel { tx, rx }
 ///     }
 /// }
+///
 /// /// Anything that derives `Edges` can be used as system parameters
 /// /// and visited by a `Facade`.
 /// ///
@@ -135,6 +123,7 @@ impl EntityUpkeepSystem {
 ///     channel: View<Channel<String>>,
 ///     count: ViewMut<usize>,
 /// }
+///
 /// /// `compute_hello` is a system that visits `MyAppData`, accumlates a count and
 /// /// sends a message into a channel the third time it is run.
 /// fn compute_hello(mut data: MyAppData) -> Result<(), GraphError> {
@@ -149,29 +138,29 @@ impl EntityUpkeepSystem {
 ///         ok()
 ///     }
 /// }
+///
 /// let mut world = World::default();
 /// world.add_subgraph(graph!(compute_hello));
 /// // Create a facade to move into an async future that awaits a message from the
 /// // `compute_hello` system.
 /// let mut facade = world.facade();
-/// executor
-///     .spawn(async move {
-///         // Visit the world's `MyAppData` to get the receiver.
-///         let mut rx = facade
-///             .visit(|data: MyAppData| data.channel.rx.clone())
-///             .await
-///             .unwrap();
-///         if let Ok(msg) = rx.recv().await {
-///             println!("got message: {}", msg);
-///         }
-///     })
-///     .detach();
-/// while !executor.is_empty() {
+/// let task = smol::spawn(async move {
+///     // Visit the world's `MyAppData` to get the receiver.
+///     let mut rx = facade
+///         .visit(|data: MyAppData| data.channel.rx.clone())
+///         .await
+///         .unwrap();
+///     if let Ok(msg) = rx.recv().await {
+///         println!("got message: {}", msg);
+///     }
+/// });
+///
+/// while !task.is_finished() {
 ///     // `tick` progresses the world by one frame
 ///     world.tick().unwrap();
 ///     // send out any requests the facade may have made from a future running in our
 ///     // executor
-///     let mut facade_schedule = world.take_facade_schedule().unwrap();
+///     let mut facade_schedule = world.get_facade_schedule().unwrap();
 ///     facade_schedule.run().unwrap();
 /// }
 /// ```
@@ -356,52 +345,6 @@ impl World {
         self.graph.visit(f)
     }
 
-    // /// Add a plugin to the world, instantiating any missing resources or
-    // /// systems.
-    // ///
-    // /// ## Errs
-    // /// Errs if the plugin requires resources that cannot be created by default.
-    // pub fn with_plugin(&mut self, plugin: impl Into<Plugin>) -> anyhow::Result<&mut Self> {
-    //     let plugin: Plugin = plugin.into();
-
-    //     let mut missing_resources: FxHashMap<ResourceId, Vec<anyhow::Error>> = FxHashMap::default();
-    //     for LazyResource { id, create } in plugin.resources.into_iter() {
-    //         if !self.resource_manager.has_resource(&id) {
-    //             log::debug!("attempting to create resource {}...", id.name);
-    //             match (create)(&mut self.resource_manager.as_mut_loan_manager()) {
-    //                 Ok(resource) => {
-    //                     missing_resources.remove(&id);
-    //                     let _ = self.resource_manager.insert(id, resource);
-    //                 }
-    //                 Err(err) => {
-    //                     let entry = missing_resources.entry(id).or_default();
-    //                     entry.push(err);
-    //                 }
-    //             }
-    //             self.resource_manager
-    //                 .unify_resources("after building lazy dep")?;
-    //         }
-    //     }
-
-    //     anyhow::ensure!(
-    //         missing_resources.is_empty(),
-    //         "missing resources:\n{:#?}",
-    //         missing_resources
-    //     );
-
-    //     for system in plugin.sync_systems.into_iter() {
-    //         if !self.system_schedule.contains_system(system.0.name()) {
-    //             self.system_schedule.add_system(system.0);
-    //         }
-    //     }
-
-    //     Ok(self)
-    // }
-
-    // pub fn with_data<T: CanFetch>(&mut self) -> anyhow::Result<&mut Self> {
-    //     self.with_plugin(T::plugin())
-    // }
-
     pub fn with_parallelism(&mut self, parallelism: Parallelism) -> &mut Self {
         match parallelism {
             Parallelism::Automatic => {
@@ -449,7 +392,7 @@ impl World {
     }
 
     /// Just tick the synchronous systems.
-    pub fn tick_sync(&mut self) -> Result<(), GraphError> {
+    pub(crate) fn tick_sync(&mut self) -> Result<(), GraphError> {
         log::trace!("tick sync");
         // This is basically `moongraph::run_with_local` but with our own
         // system::increment_system_counter interleaved so we can track component
@@ -461,7 +404,7 @@ impl World {
         let mut batches = self.graph.batches();
         while let Some(batch) = batches.next_batch() {
             let batch_result = batch.run(&mut local)?;
-            let did_trim_batch = batch_result.save(true)?;
+            let did_trim_batch = batch_result.save(true, true)?;
             got_trimmed = got_trimmed || did_trim_batch;
             let _ = increment_current_iteration();
         }
@@ -473,7 +416,7 @@ impl World {
     }
 
     /// Applies lazy world updates and runs component entity / archetype upkeep.
-    pub fn tick_lazy(&mut self) -> Result<(), GraphError> {
+    pub(crate) fn tick_lazy(&mut self) -> Result<(), GraphError> {
         log::trace!("tick lazy");
 
         while let Ok(LazyOp { op, tx }) = self.lazy_ops.1.try_recv() {
@@ -487,16 +430,21 @@ impl World {
     /// Return whether or not there are any requests for world resources from one
     /// or more [`Facade`]s.
     pub fn has_facade_requests(&self) -> bool {
-        !self.facade_requests.is_empty()
+        self.facade_graph.node_len() > 0 || !self.facade_requests.is_empty()
     }
 
-    pub fn take_facade_schedule(&mut self) -> Result<FacadeSchedule, GraphError> {
-        self.facade_graph = Graph::default();
-
+    /// Build the schedule of resource requests from the [`World`]'s [`Facade`]s.
+    ///
+    /// This schedule can be run with [`FacadeSchedule::run`] or ticked with
+    /// [`FacadeSchedule::tick`], which delivers those resources to each [`Facade`]
+    /// in parallel batches, if possible.
+    pub fn get_facade_schedule(&mut self) -> Result<FacadeSchedule, GraphError> {
         // fetch all the requests for system resources and fold them into a schedule
+        let current_iteration = crate::current_iteration();
         let mut i = 0;
         while let Ok(request) = self.facade_requests.try_recv() {
-            let node = moongraph::Node::from(request).with_name(format!("request-{}", i));
+            let node = moongraph::Node::from(request)
+                .with_name(format!("request-{}-{}", current_iteration, i));
             self.facade_graph.add_node(node);
             i += 1;
         }
@@ -515,9 +463,9 @@ impl World {
     /// ## Note
     /// This does not send out resources to the [`Facade`]. For async support it
     /// is recommended you use [`World::run`] to progress the world's
-    /// systems, followed by [`World::take_facade_schedule`] and [`RequestSchedule::tick`].
+    /// systems, followed by [`World::get_facade_schedule`] and [`RequestSchedule::tick`].
     ///
-    /// ```rust
+    /// ```rust, no_run
     /// use apecs::{World, FacadeSchedule};
     ///
     /// let mut world = World::default();
@@ -528,13 +476,13 @@ impl World {
     ///
     /// // answer requests for world resources from external futures
     /// // until all requests are met
-    /// let mut facade_schedule = world.take_facade_schedule().unwrap();
+    /// let mut facade_schedule = world.get_facade_schedule().unwrap();
     /// facade_schedule.run().unwrap();
     /// ```
     pub fn run_loop(&mut self) -> Result<&mut Self, GraphError> {
         loop {
             self.tick()?;
-            if self.has_facade_requests() || self.graph.node_len() == 0 {
+            if self.has_facade_requests() {
                 break;
             }
         }

@@ -22,11 +22,13 @@ use super::bundle::*;
 /// reference to the component value through [`Entry::value`] or
 /// [`Entry::value_mut`].
 ///
-/// ```
+/// ```rust
 /// # use apecs::*;
 /// let mut world = World::default();
-/// let e = world.entity_with_bundle((123, "123", 123.0));
-/// let mut query = world.query::<(&mut i32, &f64)>();
+/// let e = world.get_entities_mut().create();
+/// let cs = world.get_components_mut();
+/// cs.insert_bundle(*e, (123, "123", 123.0));
+/// let mut query = cs.query::<(&mut i32, &f64)>();
 /// let (entry_i32, entry_f64): (&mut Entry<i32>, &Entry<f64>) = query.find_one(e.id()).unwrap();
 /// **entry_i32 = 321;
 /// assert_eq!(321 - 123, **entry_i32 - **entry_f64 as i32);

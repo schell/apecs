@@ -76,6 +76,6 @@ impl Benchmark {
     }
 
     pub fn run(&mut self) {
-        self.0.tick_sync().unwrap()
+        self.0.tick().unwrap()
     }
 }

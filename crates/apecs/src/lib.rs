@@ -33,8 +33,6 @@ pub mod doctest {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use crate::*;
     use rustc_hash::FxHashMap;
 
@@ -95,22 +93,6 @@ mod tests {
         assert_eq!(F32s(100.0, 100.0), highest);
     }
 
-    fn new_executor() -> Arc<async_executor::Executor<'static>> {
-        let executor = Arc::new(async_executor::Executor::new());
-        let _execution_loop = {
-            let executor = executor.clone();
-            std::thread::spawn(move || loop {
-                match Arc::strong_count(&executor) {
-                    1 => break,
-                    _ => {
-                        let _ = executor.try_tick();
-                    }
-                }
-            })
-        };
-        executor
-    }
-
     #[test]
     fn async_run_and_return_resources() {
         let _ = env_logger::builder()
@@ -134,25 +116,22 @@ mod tests {
         let mut world = World::default();
         let mut facade = world.facade();
 
-        let executor = new_executor();
-        executor
-            .spawn(async move {
-                log::info!("create running");
-                tx.try_send(()).unwrap();
-                facade
-                    .visit(
-                        |(mut entities, mut archset): (ViewMut<Entities>, ViewMut<Components>)| {
-                            for n in 0..100u32 {
-                                let e = entities.create();
-                                archset.insert_bundle(e.id(), (format!("entity_{}", n), n));
-                            }
-                        },
-                    )
-                    .await
-                    .unwrap();
-                log::info!("async done");
-            })
-            .detach();
+        let task = smol::spawn(async move {
+            log::info!("create running");
+            tx.try_send(()).unwrap();
+            facade
+                .visit(
+                    |(mut entities, mut archset): (ViewMut<Entities>, ViewMut<Components>)| {
+                        for n in 0..100u32 {
+                            let e = entities.create();
+                            archset.insert_bundle(e.id(), (format!("entity_{}", n), n));
+                        }
+                    },
+                )
+                .await
+                .unwrap();
+            log::info!("async done");
+        });
 
         world.add_subgraph(graph!(maintain_map));
 
@@ -161,11 +140,11 @@ mod tests {
         rx.try_recv().unwrap();
         log::info!("received");
 
-        while !executor.is_empty() {
+        while !task.is_finished() {
             // world sends resources to the "create" async which makes
             // entities+components
             {
-                let mut facade_schedule = world.take_facade_schedule().unwrap();
+                let mut facade_schedule = world.get_facade_schedule().unwrap();
                 loop {
                     let tick_again = facade_schedule.tick().unwrap();
                     if !tick_again {
@@ -200,16 +179,13 @@ mod tests {
             .with_bundle((DataA(0.0), DataB(0.0)));
         let id = e.id();
 
-        let executor = new_executor();
-        executor
-            .spawn(async move {
-                println!("updating entity");
-                e.with_bundle((DataA(666.0), DataB(666.0))).updates().await;
-                println!("done!");
-            })
-            .detach();
+        let task = smol::spawn(async move {
+            println!("updating entity");
+            e.with_bundle((DataA(666.0), DataB(666.0))).updates().await;
+            println!("done!");
+        });
 
-        while !executor.is_empty() {
+        while !task.is_finished() {
             world.tock();
         }
         // just in case the executor really beat us to the punch
@@ -234,39 +210,35 @@ mod tests {
 
         // this tests that we can use an Entity to set components and
         // await those component updates.
-        let executor = new_executor();
         let mut world = World::default();
         let mut facade = world.facade();
-        executor
-            .spawn(async move {
-                let mut e = {
-                    let e = facade
-                        .visit(|mut entities: ViewMut<Entities>| entities.create())
-                        .await
-                        .unwrap();
-                    e
-                };
-
-                e.insert_bundle((Name("ada"), Age(666)));
-                e.updates().await;
-
-                let (name, age) = e
-                    .visit::<(&Name, &Age), _>(|(name, age)| {
-                        (name.value().clone(), age.value().clone())
-                    })
+        let task = smol::spawn(async move {
+            let mut e = {
+                let e = facade
+                    .visit(|mut entities: ViewMut<Entities>| entities.create())
                     .await
                     .unwrap();
-                assert_eq!(Name("ada"), name);
-                assert_eq!(Age(666), age);
+                e
+            };
 
-                println!("done!");
-            })
-            .detach();
+            e.insert_bundle((Name("ada"), Age(666)));
+            e.updates().await;
 
-        while !executor.is_empty() {
-            world.run_loop().unwrap();
-            let mut facade_schedule = world.take_facade_schedule().unwrap();
-            facade_schedule.run().unwrap();
+            let (name, age) = e
+                .visit::<(&Name, &Age), _>(|(name, age)| {
+                    (name.value().clone(), age.value().clone())
+                })
+                .await
+                .unwrap();
+            assert_eq!(Name("ada"), name);
+            assert_eq!(Age(666), age);
+
+            println!("done!");
+        });
+
+        while !task.is_finished() {
+            world.tick().unwrap();
+            world.get_facade_schedule().unwrap().run().unwrap();
         }
 
         world
@@ -276,23 +248,6 @@ mod tests {
                 assert_eq!(&Age(666), age.value());
             })
             .unwrap();
-    }
-
-    #[cfg(feature = "none")]
-    #[test]
-    fn plugin_inserts_resources_from_canfetch_in_systems() {
-        #[derive(Default)]
-        struct MyStr(&'static str);
-
-        let _ = env_logger::builder()
-            .is_test(true)
-            .filter_level(log::LevelFilter::Trace)
-            .try_init();
-
-        let mut world = World::default();
-        world.with_system("test", |_: ViewMut<MyStr>| ok()).unwrap();
-        let s = world.resource_mut::<MyStr>().unwrap();
-        s.0 = "blah";
     }
 
     #[test]
@@ -430,5 +385,56 @@ mod tests {
         {
             let _f32_num = world.get_resource_mut::<f32>().unwrap();
         }
+    }
+
+    #[test]
+    fn can_tick_facades() {
+        let mut world = World::default();
+        world.add_resource(0u32);
+
+        fn increment(mut counter: ViewMut<u32>) {
+            *counter += 1;
+        }
+
+        for _ in 0..3 {
+            let mut facade = world.facade();
+            smol::spawn(async move {
+                facade.visit(increment).await.unwrap();
+            })
+            .detach();
+        }
+
+        // give some time to accumulate all the requests
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        world.run_loop().unwrap();
+        {
+            println!("first tick");
+            let mut s = world.get_facade_schedule().unwrap();
+            assert_eq!(3, s.len());
+            s.tick().unwrap();
+            while !s.unify() {}
+        }
+
+        world.run_loop().unwrap();
+        {
+            println!("second tick");
+            let mut s = world.get_facade_schedule().unwrap();
+            assert_eq!(2, s.len());
+            s.tick().unwrap();
+            while !s.unify() {}
+        }
+
+        world.run_loop().unwrap();
+        {
+            println!("third tick");
+            let mut s = world.get_facade_schedule().unwrap();
+            assert_eq!(1, s.len());
+            s.tick().unwrap();
+            while !s.unify() {}
+        }
+
+        assert_eq!(0, world.get_facade_schedule().unwrap().len());
+        assert_eq!(3, world.visit(|counter: View<u32>| *counter).unwrap());
     }
 }

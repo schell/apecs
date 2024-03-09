@@ -776,7 +776,9 @@ where
 /// ```
 /// # use apecs::*;
 /// # let mut world = World::default();
-/// let mut query = world.query::<(&f32, &String)>();
+/// let mut query = world
+///     .get_components_mut()
+///     .query::<(&f32, &String)>();
 /// for (f32, string) in query.iter_mut() {
 ///     //...
 /// }
@@ -788,40 +790,40 @@ where
 ///
 /// ```
 /// # use apecs::*;
-/// #[derive(CanFetch)]
+/// #[derive(Edges)]
 /// struct MySystemData {
-///     counter: Write<u32>,
+///     counter: ViewMut<u32>,
 ///     // we use &'static to avoid introducing a lifetime
 ///     q_f32_and_string: Query<(&'static f32, &'static String)>,
 /// }
 /// ```
 ///
-/// Which means queries may be [`fetch`](crate::World::fetch)ed from the world,
-/// [`visit`](crate::Facade::visit)ed from a facade or used as the input to a
-/// system:
+/// Which means queries may be [`visit`](crate::World::visit)ed from outside the world,
+/// or used as the input to a system:
 /// ```
-/// # use apecs::*;
-/// #
-/// #[derive(CanFetch)]
+/// use apecs::*;
+///
+/// #[derive(Edges)]
 /// struct MySystemData {
-///     tracker: Write<u64>,
-///     // we can use Mut and Ref which are aliases for &'static mut and &'static
+///     tracker: ViewMut<u64>,
+///     // We can use Mut and Ref which are aliases for &'static mut and &'static.
 ///     q_f32_and_string: Query<(Mut<f32>, Ref<String>)>,
 /// }
-/// let mut world = World::default();
-/// world
-///     .with_system("query_example", |mut data: MySystemData| {
-///         for (f32, string) in data.q_f32_and_string.query().iter_mut() {
-///             if f32.was_modified_since(*data.tracker) {
-///                 **f32 += 1.0;
-///                 println!("set entity {} = {}", f32.id(), **f32);
-///             }
+///
+/// fn my_system(mut data: MySystemData) -> Result<(), GraphError> {
+///     for (f32, string) in data.q_f32_and_string.query().iter_mut() {
+///         if f32.was_modified_since(*data.tracker) {
+///             **f32 += 1.0;
+///             println!("set entity {} = {}", f32.id(), **f32);
 ///         }
-///         *data.tracker = apecs::current_iteration();
-///         ok()
-///     })
-///     .unwrap();
-/// world.tick();
+///     }
+///     *data.tracker = apecs::current_iteration();
+///     ok()
+/// }
+///
+/// let mut world = World::default();
+/// world.add_subgraph(graph!(my_system));
+/// world.tick().unwrap();
 /// ```
 ///
 /// ## Iterating queries
@@ -834,36 +836,36 @@ where
 /// struct Velocity(pub f32);
 /// struct Acceleration(pub f32);
 ///
+/// fn create(mut entities: ViewMut<Entities>) -> Result<(), GraphError> {
+///     for i in 0..100 {
+///         entities.create().insert_bundle((
+///             Position(0.0),
+///             Velocity(0.0),
+///             Acceleration(i as f32),
+///         ));
+///     }
+///     
+///     /// This system ends after one tick
+///     end()
+/// }
+///
+/// fn accelerate(q_accelerate: Query<(&mut Velocity, &Acceleration)>) -> Result<(), GraphError> {
+///     for (v, a) in q_accelerate.query().iter_mut() {
+///         v.0 += a.0;
+///     }
+///     ok()
+/// }
+///
+/// fn position(q_move: Query<(&mut Position, &Velocity)>) -> Result<(), GraphError> {
+///     for (p, v) in q_move.query().iter_mut() {
+///         p.0 += v.0;
+///     }
+///     ok()
+/// }
+///
 /// let mut world = World::default();
-/// world
-///     .with_system("create", |mut entities: Write<Entities>| {
-///         for i in 0..100 {
-///             entities.create().insert_bundle((
-///                 Position(0.0),
-///                 Velocity(0.0),
-///                 Acceleration(i as f32),
-///             ));
-///         }
-///         end()
-///     })
-///     .unwrap()
-///     .with_system(
-///         "accelerate",
-///         |q_accelerate: Query<(&mut Velocity, &Acceleration)>| {
-///             for (v, a) in q_accelerate.query().iter_mut() {
-///                 v.0 += a.0;
-///             }
-///             ok()
-///         },
-///     )
-///     .unwrap()
-///     .with_system("move", |q_move: Query<(&mut Position, &Velocity)>| {
-///         for (p, v) in q_move.query().iter_mut() {
-///             p.0 += v.0;
-///         }
-///         ok()
-///     })
-///     .unwrap();
+/// world.add_subgraph(graph!(create, accelerate, position));
+/// world.tick().unwrap();
 /// ```
 pub struct Query<T>(
     Box<dyn Deref<Target = Components> + Send + Sync + 'static>,

@@ -70,61 +70,55 @@ Here is a quick table of features compared to other ECSs.
   assert_eq!(Number(3), *world.get_resource::<Number>().unwrap());
   ```
 
-- async futures can access world resources
+- async futures can access world resources through a `Facade`
   - futures visit world resources with a closure. 
-  - `View` and `ViewMut` are resource accessors. 
-  - create default resources during fetching if possible.
   - resources are acquired without lifetimes
+  - plays well with any async runtime
   ```rust
   use apecs::*;
 
   #[derive(Clone, Copy, Debug, Default, PartialEq)]
   struct Number(u32);
 
-  async fn demo(mut facade: Facade) -> anyhow::Result<()> {
+  let mut world = World::default();
+  let mut facade 
+
+  let task = smol::spawn(async move {
       loop {
-          let i = facade.visit(|mut u32_number: Write<Number>| {
+          let i = facade.visit(|mut u32_number: ViewMut<Number>| {
               u32_number.0 += 1;
-              Ok(u32_number.0)
-          }).await?;
+              u32_number.0
+          }).await;
           if i > 5 {
               break;
           }
       }
-      Ok(())
+  });
+
+  while !task.is_finished() {
+    world.tick().unwrap();
+    world.get_facade_schedule().unwrap().run().unwrap();
   }
 
-  let mut world = World::default();
-  world
-      .with_async("demo", demo)
-      .unwrap();
-  world.run();
   assert_eq!(Number(6), *world.resource::<Number>().unwrap());
   ```
-- support for async futures
-  ```rust
-  use apecs::*;
-  let mut world = World::default();
-  world
-      .spawn(async {
-          log::trace!("hello");
-      });
-  world.run();
-  ```
-- fetch data (system data) derive macros
+
+- system data derive macros
   ```rust
   use apecs::*;
 
-  #[derive(CanFetch)]
+  #[derive(Edges)]
   struct MyData {
-      entities: Read<Entities>,
-      u32_number: Write<u32>,
+      entities: View<Entities>,
+      u32_number: ViewMut<u32>,
   }
 
   let mut world = World::default();
-  let mut my_data: MyData = world.fetch().unwrap();
-  *my_data.u32_number = 1;
+  let mut my_data: MyData = world.visit(|mut my_data| {
+    *my_data.u32_number = 1;
+  }).unwrap();
   ```
+
 - system scheduling
   - compatible systems are placed in parallel batches (a batch is a group of systems
     that can run in parallel, ie they don't have conflicting borrows)
@@ -289,61 +283,7 @@ Here is a quick table of features compared to other ECSs.
       .with_parallelism(Parallelism::Automatic);
   world.tick();
   ```
-- plugins (groups of systems, resources and sub-plugins)
-  ```rust
-  use apecs::*;
 
-  #[derive(Default)]
-  struct MyTracker(u64);
-
-  #[derive(CanFetch)]
-  struct SyncData {
-      q_dirty_f32s: Query<(&'static f32, &'static mut String)>,
-      tracker: Write<MyTracker>,
-  }
-
-  fn create(
-      (mut entities, mut components): (Write<Entities>, Write<Components>),
-  ) -> anyhow::Result<ShouldContinue> {
-      // create a bunch of entities in bulk, which is quite fast
-      let ids = entities.create_many(1000);
-      components.extend::<(f32, String)>((
-          Box::new(ids.clone().into_iter().map(|id| Entry::new(id, id as f32))),
-          Box::new(
-              ids.into_iter()
-                  .map(|id| Entry::new(id, format!("{}:{}", id, id))),
-          ),
-      ));
-      end()
-  }
-
-  fn progress(q: Query<&mut f32>) -> anyhow::Result<ShouldContinue> {
-      for f32 in q.query().iter_mut() {
-          **f32 += 10.0;
-      }
-      ok()
-  }
-
-  fn sync(mut data: SyncData) -> anyhow::Result<ShouldContinue> {
-      for (f32, string) in data.q_dirty_f32s.query().iter_mut() {
-          if f32.was_modified_since(data.tracker.0) {
-              **string = format!("{}:{}", f32.id(), **f32);
-          }
-      }
-      data.tracker.0 = apecs::current_iteration();
-      ok()
-  }
-
-  // now we can package it all up into a plugin
-  let my_plugin = Plugin::default()
-      .with_system("create", create, &[], &[])
-      .with_system("progress", progress, &["create"], &[])
-      .with_system("sync", sync, &[], &[]);
-
-  let mut world = World::default();
-  world.with_plugin(my_plugin).unwrap();
-  world.tick();
-  ```
 - fully compatible with WASM and runs in the browser
 
 ## Roadmap

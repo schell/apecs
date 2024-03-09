@@ -9,36 +9,46 @@ use moongraph::GraphError;
 
 use crate::{world::LazyOp, Entry, IsBundle, IsQuery, World};
 
-/// Associates a group of components within the world.
+/// Components associated by a common identifier.
 ///
 /// Entities are mostly just `usize` identifiers that help locate components,
-/// but [`Entity`] comes with some conveniences.
+/// but [`Entity`] comes with some extra conveniences.
 ///
 /// After an entity is created you can attach and remove
 /// bundles of components asynchronously (or "lazily" if not in an async
 /// context).
-/// ```
-/// # use apecs::*;
+/// ```rust
+/// use std::sync::Arc;
+/// use apecs::*;
+///
 /// let mut world = World::default();
-/// // asynchronously create new entities from within an async system
-/// world
-///     .with_async("spawn-b-entity", |mut facade: Facade| async move {
-///         let mut b = facade
-///             .visit(|mut ents: Write<Entities>| {
-///                 Ok(ents.create().with_bundle((123, "entity B", true)))
-///             })
-///             .await?;
-///         // after this await `b` has its bundle
-///         b.updates().await;
-///         // visit a component or bundle
-///         let did_visit = b
-///             .visit::<&&str, ()>(|name| assert_eq!("entity B", *name.value()))
-///             .await
-///             .is_some();
-///         Ok(())
-///     })
-///     .unwrap();
-/// world.run();
+/// let mut facade = world.facade();
+///
+/// // here we use `smol` but `apecs` works with any async runtime
+/// // asynchronously create new entities from within a future
+/// let task = smol::spawn(async move {
+///     let mut b = facade
+///         .visit(|mut ents: ViewMut<Entities>| {
+///             ents.create().with_bundle((123, "entity B", true))
+///         })
+///         .await
+///         .unwrap();
+///     // after this await, `b` has its bundle
+///     b.updates().await;
+///     // visit a component or bundle
+///     let did_visit = b
+///         .visit::<&&str, ()>(|name| assert_eq!("entity B", *name.value()))
+///         .await
+///         .is_some();
+///     assert!(did_visit);
+/// });
+///
+/// while !task.is_finished() {
+///     // tick the world
+///     world.tick().unwrap();
+///     // send resources to the facade
+///     world.get_facade_schedule().unwrap().run().unwrap();
+/// }
 /// ```
 /// Alternatively, if you have access to the [`Components`] resource you can
 /// attach components directly and immediately.
@@ -213,7 +223,7 @@ impl Entity {
 /// ```
 /// # use apecs::*;
 /// let mut world = World::default();
-/// let entities = world.resource_mut::<Entities>().unwrap();
+/// let entities = world.get_entities_mut();
 /// let ent = entities.create();
 /// entities.destroy(ent);
 /// ```
@@ -383,35 +393,5 @@ impl Entities {
             op_sender: self.lazy_op_sender.clone(),
             op_receivers: Default::default(),
         })
-    }
-
-    /// Hydrate the entity with the given id and then lazily add the given
-    /// bundle to the entity.
-    ///
-    /// This is a noop if the entity does not exist.
-    pub fn insert_bundle<B: IsBundle + Send + Sync + 'static>(&self, entity_id: usize, bundle: B) {
-        if let Some(mut entity) = self.hydrate(entity_id) {
-            entity.insert_bundle(bundle);
-        }
-    }
-
-    /// Hydrate the entity with the given id and then lazily add the given
-    /// component.
-    ///
-    /// This is a noop if the entity does not exist.
-    pub fn insert_component<T: Send + Sync + 'static>(&self, entity_id: usize, component: T) {
-        if let Some(mut entity) = self.hydrate(entity_id) {
-            entity.insert_component(component);
-        }
-    }
-
-    /// Hydrate the entity with the given id and then lazily remove the
-    /// component of the given type.
-    ///
-    /// This is a noop if the entity does not exist.
-    pub fn remove_component<T: Send + Sync + 'static>(&self, entity_id: usize) {
-        if let Some(mut entity) = self.hydrate(entity_id) {
-            entity.remove_component::<T>();
-        }
     }
 }
