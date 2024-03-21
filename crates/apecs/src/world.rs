@@ -6,12 +6,11 @@ use std::{
     sync::Arc,
 };
 
-use moongraph::{Edges, Graph, GraphError, ViewMut};
-
 use crate::{
     entity::Entities,
     facade::{Facade, FacadeSchedule, Request},
     storage::Components,
+    Edges, Graph, GraphError, ViewMut,
 };
 
 static SYSTEM_ITERATION: AtomicU64 = AtomicU64::new(0);
@@ -53,6 +52,7 @@ pub enum Parallelism {
 // it won't hang up `World::run_loop`, which depends on checking to see if
 // there are any systems in the graph (if not, it can exit).
 #[derive(Edges)]
+#[apecs(crate = crate)]
 struct EntityUpkeepSystem {
     entities: ViewMut<Entities>,
     components: ViewMut<Components>,
