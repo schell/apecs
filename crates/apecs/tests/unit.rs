@@ -1,8 +1,7 @@
 use apecs::*;
-use rustc_hash::FxHashMap;
 
 #[derive(Default)]
-struct MyMap(FxHashMap<String, u32>);
+struct MyMap(std::collections::HashMap<String, u32>);
 
 #[derive(Default)]
 struct Number(u32);
