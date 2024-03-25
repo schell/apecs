@@ -50,7 +50,7 @@ Here is a quick table of features compared to other ECSs.
 ### Feature examples
 
 - systems with early exit and failure
-  ```rust
+```rust
   use apecs::*;
 
   #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -64,8 +64,9 @@ Here is a quick table of features compared to other ECSs.
           ok()
       }
   }
-  let world = World::default()
-      .with_subgraph(graph!(demo_system));
+
+  let mut world = World::default();
+  world.add_subgraph(graph!(demo_system));
   world.run_loop().unwrap();
   assert_eq!(Number(3), *world.get_resource::<Number>().unwrap());
   ```
@@ -74,21 +75,24 @@ Here is a quick table of features compared to other ECSs.
   - futures visit world resources with a closure. 
   - resources are acquired without lifetimes
   - plays well with any async runtime
-  ```rust
+```rust
   use apecs::*;
 
   #[derive(Clone, Copy, Debug, Default, PartialEq)]
   struct Number(u32);
 
   let mut world = World::default();
-  let mut facade 
+  let mut facade = world.facade();
 
   let task = smol::spawn(async move {
       loop {
-          let i = facade.visit(|mut u32_number: ViewMut<Number>| {
-              u32_number.0 += 1;
-              u32_number.0
-          }).await;
+          let i = facade
+              .visit(|mut u32_number: ViewMut<Number>| {
+                  u32_number.0 += 1;
+                  u32_number.0
+              })
+              .await
+              .unwrap();
           if i > 5 {
               break;
           }
@@ -96,15 +100,15 @@ Here is a quick table of features compared to other ECSs.
   });
 
   while !task.is_finished() {
-    world.tick().unwrap();
-    world.get_facade_schedule().unwrap().run().unwrap();
+      world.tick().unwrap();
+      world.get_facade_schedule().unwrap().run().unwrap();
   }
 
-  assert_eq!(Number(6), *world.resource::<Number>().unwrap());
-  ```
+  assert_eq!(Number(6), *world.get_resource::<Number>().unwrap());
+```
 
 - system data derive macros
-  ```rust
+```rust
   use apecs::*;
 
   #[derive(Edges)]
@@ -114,10 +118,12 @@ Here is a quick table of features compared to other ECSs.
   }
 
   let mut world = World::default();
-  let mut my_data: MyData = world.visit(|mut my_data| {
-    *my_data.u32_number = 1;
-  }).unwrap();
-  ```
+  world
+      .visit(|mut my_data: MyData| {
+          *my_data.u32_number = 1;
+      })
+      .unwrap();
+```
 
 - system scheduling
   - compatible systems are placed in parallel batches (a batch is a group of systems
@@ -125,72 +131,66 @@ Here is a quick table of features compared to other ECSs.
   - systems may depend on other systems running before or after
   - barriers
   ```rust
-  use apecs::*;
+    use apecs::*;
 
-  fn one(mut u32_number: Write<u32>) -> anyhow::Result<ShouldContinue> {
-      *u32_number += 1;
-      end()
-  }
+    fn one(mut u32_number: ViewMut<u32>) -> Result<(), GraphError> {
+        *u32_number += 1;
+        end()
+    }
 
-  fn two(mut u32_number: Write<u32>) -> anyhow::Result<ShouldContinue> {
-      *u32_number += 1;
-      end()
-  }
+    fn two(mut u32_number: ViewMut<u32>) -> Result<(), GraphError> {
+        *u32_number += 1;
+        end()
+    }
 
-  fn exit_on_three(mut f32_number: Write<f32>) -> anyhow::Result<ShouldContinue> {
-      *f32_number += 1.0;
-      if *f32_number == 3.0 {
-          end()
-      } else {
-          ok()
-      }
-  }
+    fn exit_on_three(mut f32_number: ViewMut<f32>) -> Result<(), GraphError> {
+        *f32_number += 1.0;
+        if *f32_number == 3.0 {
+            end()
+        } else {
+            ok()
+        }
+    }
 
-  fn lastly(
-      (u32_number, f32_number): (Read<u32>, Read<f32>),
-  ) -> anyhow::Result<ShouldContinue> {
-      if *u32_number == 2 && *f32_number == 3.0 {
-          end()
-      } else {
-          ok()
-      }
-  }
+    fn lastly((u32_number, f32_number): (View<u32>, View<f32>)) -> Result<(), GraphError> {
+        if *u32_number == 2 && *f32_number == 3.0 {
+            end()
+        } else {
+            ok()
+        }
+    }
 
-  let mut world = World::default();
-  world
-      // one should run before two
-      .with_system_with_dependencies("one", one, &[], &["two"])
-      .unwrap()
-      // two should run after one - this is redundant but good for illustration
-      .with_system_with_dependencies("two", two, &["one"], &[])
-      .unwrap()
-      // exit_on_three has no dependencies
-      .with_system("exit_on_three", exit_on_three)
-      .unwrap()
-      // all systems after a barrier run after the systems before a barrier
-      .with_system_barrier()
-      .with_system("lastly", lastly)
-      .unwrap();
+    let mut world = World::default();
+    world.add_subgraph(
+        graph!(
+            // one should run before two
+            one < two,
+            // exit_on_three has no dependencies
+            exit_on_three
+        )
+        // add a barrier
+        .with_barrier()
+        .with_subgraph(
+            // all systems after a barrier run after the systems before a barrier
+            graph!(lastly),
+        ),
+    );
 
-  assert_eq!(
-      vec![
-          vec!["one", "exit_on_three"],
-          vec!["two"],
-          vec!["lastly"],
-      ],
-      world.get_sync_schedule_names()
-  );
+    assert_eq!(
+        vec![vec!["exit_on_three", "one"], vec!["two"], vec!["lastly"]],
+        world.get_schedule_names()
+    );
 
-  world.tick().unwrap();
+    world.tick().unwrap();
 
-  assert_eq!(
-      vec![vec!["exit_on_three"], vec!["lastly"],],
-      world.get_sync_schedule_names()
-  );
+    assert_eq!(
+        vec![vec!["exit_on_three"], vec!["lastly"]],
+        world.get_schedule_names()
+    );
 
-  world.tick().unwrap();
-  world.tick().unwrap();
-  assert!(world.get_sync_schedule_names().is_empty());
+    world.tick().unwrap();
+    world.tick().unwrap();
+    assert!(world.get_schedule_names().is_empty());
   ```
 - component storage
   - optimized for space and iteration time as archetypes
@@ -199,90 +199,101 @@ Here is a quick table of features compared to other ECSs.
   - add and modified time tracking
   - parallel queries (inner parallelism)
   ```rust
-  use apecs::*;
+    use apecs::*;
 
-  // Make a type for tracking changes
-  #[derive(Default)]
-  struct MyTracker(u64);
+    // Make a type for tracking changes
+    #[derive(Default)]
+    struct MyTracker(u64);
 
-  // Entities and Components (which stores components) are default
-  // resources
-  let mut world = World::default();
-  world
-      .with_system("create", |mut entities: Write<Entities>| {
-          for mut entity in (0..100).map(|_| entities.create()) {
-              entity.insert_bundle((0.0f32, 0u32, format!("{}:0", entity.id())));
-          }
-          end()
-      }).unwrap()
-      .with_system_with_dependencies("progress", |q_f32s: Query<&mut f32>| {
-          for f32 in q_f32s.query().iter_mut() {
-              **f32 += 1.0;
-          }
-          ok()
-      }, &["create"], &[]).unwrap()
-      .with_system_with_dependencies(
-          "sync",
-          |(q_others, mut tracker): (Query<(&f32, &mut String, &mut u32)>, Write<MyTracker>)| {
-              for (f32, string, u32) in q_others.query().iter_mut() {
-                  if f32.was_modified_since(tracker.0) {
-                      **u32 = **f32 as u32;
-                      **string = format!("{}:{}", f32.id(), **u32);
-                  }
-              }
-              tracker.0 = apecs::current_iteration();
-              ok()
-          },
-          &["progress"],
-          &[]
-      ).unwrap();
+    fn create(mut entities: ViewMut<Entities>) -> Result<(), GraphError> {
+        for mut entity in (0..100).map(|_| entities.create()) {
+            entity.insert_bundle((0.0f32, 0u32, format!("{}:0", entity.id())));
+        }
+        end()
+    }
 
-  assert_eq!(
-      vec![
-          vec!["create"],
-          vec!["progress"],
-          vec!["sync"],
-      ],
-      world.get_sync_schedule_names()
-  );
+    fn progress(q_f32s: Query<&mut f32>) -> Result<(), GraphError> {
+        for f32 in q_f32s.query().iter_mut() {
+            **f32 += 1.0;
+        }
+        ok()
+    }
 
-  world.tick(); // entities are created, components applied lazily
-  world.tick(); // f32s are modified, u32s and strings are synced
-  world.tick(); // f32s are modified, u32s and strings are synced
+    fn sync(
+        (q_others, mut tracker): (Query<(&f32, &mut String, &mut u32)>, ViewMut<MyTracker>),
+    ) -> Result<(), GraphError> {
+        for (f32, string, u32) in q_others.query().iter_mut() {
+            if f32.was_modified_since(tracker.0) {
+                **u32 = **f32 as u32;
+                **string = format!("{}:{}", f32.id(), **u32);
+            }
+        }
+        tracker.0 = apecs::current_iteration();
+        ok()
+    }
 
-  let q_bundle: Query<(&f32, &u32, &String)> = world.fetch().unwrap();
-  assert_eq!(
-      (2.0f32, 2u32, "13:2".to_string()),
-      q_bundle.query().find_one(13).map(|(f, u, s)| (**f, **u, s.to_string())).unwrap()
-  );
+    // Entities and Components (which stores components) are default
+    // resources
+    let mut world = World::default();
+    world.add_subgraph(graph!(
+        create < progress < sync
+    ));
+
+    assert_eq!(
+        vec![vec!["create"], vec!["progress"], vec!["sync"]],
+        world.get_schedule_names()
+    );
+
+    world.tick().unwrap(); // entities are created, components applied lazily
+    world.tick().unwrap(); // f32s are modified, u32s and strings are synced
+    world.tick().unwrap(); // f32s are modified, u32s and strings are synced
+
+    world
+        .visit(|q_bundle: Query<(&f32, &u32, &String)>| {
+            assert_eq!(
+                (2.0f32, 2u32, "13:2".to_string()),
+                q_bundle
+                    .query()
+                    .find_one(13)
+                    .map(|(f, u, s)| (**f, **u, s.to_string()))
+                    .unwrap()
+            );
+        })
+        .unwrap();
   ```
 - outer parallelism (running systems in parallel)
   - parallel system scheduling
   - parallel execution of async futures
   - parallelism is configurable (can be automatic or a requested number of threads, including 1)
-  ```rust
-  use apecs::*;
+```rust
+    use apecs::*;
 
-  #[derive(Default)]
-  struct F32(f32);
+    #[derive(Default)]
+    struct F32(f32);
 
-  let mut world = World::default();
-  world
-      .with_system("one", |mut f32_number: Write<F32>| {
-          f32_number.0 += 1.0;
-          ok()
-      }).unwrap()
-      .with_system("two", |f32_number: Read<F32>| {
-          println!("system two reads {}", f32_number.0);
-          ok()
-      }).unwrap()
-      .with_system("three", |f32_number: Read<F32>| {
-          println!("system three reads {}", f32_number.0);
-          ok()
-      }).unwrap()
-      .with_parallelism(Parallelism::Automatic);
-  world.tick();
-  ```
+    let mut world = World::default();
+
+    fn one(mut f32_number: ViewMut<F32>) -> Result<(), GraphError> {
+        f32_number.0 += 1.0;
+        ok()
+    }
+
+    fn two(f32_number: View<F32>) -> Result<(), GraphError> {
+        println!("system two reads {}", f32_number.0);
+        ok()
+    }
+
+    fn three(f32_number: View<F32>) -> Result<(), GraphError> {
+        println!("system three reads {}", f32_number.0);
+        ok()
+    }
+
+    world
+        .add_subgraph(graph!(one, two, three))
+        .with_parallelism(Parallelism::Automatic);
+
+    world.tick().unwrap();
+```
 
 - fully compatible with WASM and runs in the browser
 

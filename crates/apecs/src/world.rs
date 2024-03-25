@@ -482,7 +482,7 @@ impl World {
     pub fn run_loop(&mut self) -> Result<&mut Self, GraphError> {
         loop {
             self.tick()?;
-            if self.has_facade_requests() {
+            if self.has_facade_requests() || self.graph.node_len() == 0 {
                 break;
             }
         }

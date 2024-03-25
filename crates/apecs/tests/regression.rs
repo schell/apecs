@@ -112,31 +112,29 @@ fn system_batch_drops_resources_after_racing_asyncs() {
 fn readme() {
     use apecs::*;
 
-    #[derive(Clone, Copy, Debug, Default, PartialEq)]
-    struct Number(u32);
+    #[derive(Default)]
+    struct F32(f32);
 
     let mut world = World::default();
-    let mut facade = world.facade();
 
-    let task = smol::spawn(async move {
-        loop {
-            let i = facade
-                .visit(|mut u32_number: ViewMut<Number>| {
-                    u32_number.0 += 1;
-                    u32_number.0
-                })
-                .await
-                .unwrap();
-            if i > 5 {
-                break;
-            }
-        }
-    });
-
-    while !task.is_finished() {
-        world.tick().unwrap();
-        world.get_facade_schedule().unwrap().run().unwrap();
+    fn one(mut f32_number: ViewMut<F32>) -> Result<(), GraphError> {
+        f32_number.0 += 1.0;
+        ok()
     }
 
-    assert_eq!(Number(6), *world.get_resource::<Number>().unwrap());
+    fn two(f32_number: View<F32>) -> Result<(), GraphError> {
+        println!("system two reads {}", f32_number.0);
+        ok()
+    }
+
+    fn three(f32_number: View<F32>) -> Result<(), GraphError> {
+        println!("system three reads {}", f32_number.0);
+        ok()
+    }
+
+    world
+        .add_subgraph(graph!(one, two, three))
+        .with_parallelism(Parallelism::Automatic);
+
+    world.tick().unwrap();
 }
