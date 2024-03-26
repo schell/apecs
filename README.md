@@ -65,8 +65,8 @@ Here is a quick table of features compared to other ECSs.
   assert_eq!(Number(3), *world.get_resource::<Number>().unwrap());
   ```
 
-- async futures can access world resources through a `Facade`
-  - futures visit world resources with a closure. 
+- async support 
+  - futures visit world resources through `Facade` using a closure. 
   - resources are acquired without lifetimes
   - plays well with any async runtime
 ```rust
