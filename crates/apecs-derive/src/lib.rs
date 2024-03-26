@@ -1,40 +1,22 @@
 use proc_macro2::Span;
 use quote::quote;
-use syn::{parse_macro_input, DeriveInput, Ident, Path, TypeTuple};
+use syn::{parse_macro_input, DeriveInput, Ident, TypeTuple};
 
-#[proc_macro_derive(CanFetch)]
-pub fn derive_canfetch(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+#[proc_macro_derive(Edges, attributes(apecs))]
+pub fn derive_edges(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input: DeriveInput = parse_macro_input!(input);
-    let path: Path = syn::parse_str("apecs").unwrap();
-    apecs_derive_canfetch::derive_canfetch(path, input).into()
-}
 
-#[proc_macro]
-pub fn impl_canfetch_tuple(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
-    let tuple: TypeTuple = parse_macro_input!(input);
-    let tys = tuple.elems.iter().collect::<Vec<_>>();
-    let output = quote! {
-        impl <#(#tys:apecs::CanFetch),*> apecs::CanFetch for #tuple {
-            fn borrows() -> Vec<apecs::internal::Borrow> {
-                let mut bs = Vec::new();
-                #(bs.extend(<#tys as apecs::CanFetch>::borrows());)*
-                bs
-            }
-
-            fn construct(loan_mngr: &mut apecs::internal::LoanManager) -> apecs::anyhow::Result<Self> {
-                Ok((
-                    #(#tys::construct(loan_mngr)?),*
-                ))
-            }
-
-            fn plugin() -> apecs::Plugin {
-                apecs::Plugin::default()
-                    #(.with_plugin(<#tys as apecs::CanFetch>::plugin()))*
-            }
-        }
+    let maybe_path = match moongraph_macros_syntax::find_path("apecs", &input) {
+        Err(e) => return e.into_compile_error().into(),
+        Ok(mp) => mp,
     };
 
-    output.into()
+    let path = maybe_path.unwrap_or_else(|| {
+        // UNWRAP: safe because we know this will parse
+        let path: syn::Path = syn::parse_str("apecs").unwrap();
+        path
+    });
+    moongraph_macros_syntax::derive_edges(input, path).into()
 }
 
 #[proc_macro]
@@ -163,9 +145,16 @@ pub fn impl_isquery_tuple(input: proc_macro::TokenStream) -> proc_macro::TokenSt
             type QueryRow<'a> = (#(#tys::QueryRow<'a>),*);
 
             #[inline]
-            fn borrows() -> Vec<Borrow> {
+            fn reads() -> Vec<TypeKey> {
                 let mut bs = vec![];
-                #(bs.extend(#tys::borrows());)*
+                #(bs.extend(#tys::reads());)*
+                bs
+            }
+
+            #[inline]
+            fn writes() -> Vec<TypeKey> {
+                let mut bs = vec![];
+                #(bs.extend(#tys::writes());)*
                 bs
             }
 
@@ -242,7 +231,7 @@ pub fn impl_isbundle_tuple(input: proc_macro::TokenStream) -> proc_macro::TokenS
                 ]
             }
 
-            fn try_from_any_bundle(mut bundle: AnyBundle) -> anyhow::Result<Self> {
+            fn try_from_any_bundle(mut bundle: AnyBundle) -> Result<Self, BundleError> {
                 Ok((
                     #(bundle.remove::<#tys>(&TypeId::of::<#tys>())?),*
                 ))

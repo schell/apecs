@@ -3,19 +3,14 @@ use std::ops::Deref;
 use std::{any::TypeId, marker::PhantomData};
 
 use any_vec::{traits::*, AnyVec};
-use anyhow::Context;
+use moongraph::{Edges, GraphError, TypeKey, TypeMap, View};
 use parking_lot::{RwLockReadGuard, RwLockWriteGuard};
 use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 
 use crate as apecs;
-use crate::{
-    resource_manager::LoanManager,
-    internal::Borrow,
-    storage::{
-        archetype::{Archetype, Components},
-        Entry,
-    },
-    CanFetch, Read, ResourceId,
+use crate::storage::{
+    archetype::{Archetype, Components},
+    Entry,
 };
 
 use super::IsBundle;
@@ -40,7 +35,9 @@ pub trait IsQuery {
     /// The iterator item.
     type QueryRow<'a>: Send + Sync;
 
-    fn borrows() -> Vec<Borrow>;
+    fn reads() -> Vec<TypeKey>;
+
+    fn writes() -> Vec<TypeKey>;
 
     /// Find and acquire a "lock" on the columns for reading or writing.
     fn lock_columns<'a>(arch: &'a Archetype) -> Self::LockedColumns<'a>;
@@ -77,11 +74,12 @@ impl<'s, T: Send + Sync + 'static> IsQuery for &'s T {
     type ParQueryResult<'a> = rayon::slice::Iter<'a, Entry<T>>;
     type QueryRow<'a> = &'a Entry<T>;
 
-    fn borrows() -> Vec<Borrow> {
-        vec![Borrow {
-            id: ResourceId::new::<ComponentColumn<T>>(),
-            is_exclusive: false,
-        }]
+    fn reads() -> Vec<TypeKey> {
+        vec![TypeKey::new::<ComponentColumn<T>>()]
+    }
+
+    fn writes() -> Vec<TypeKey> {
+        vec![]
     }
 
     #[inline]
@@ -104,14 +102,7 @@ impl<'s, T: Send + Sync + 'static> IsQuery for &'s T {
     fn iter_mut<'a, 'b>(locked: &'b mut Self::LockedColumns<'a>) -> Self::QueryResult<'b> {
         locked.as_ref().map_or_else(
             || (&[]).into_iter(),
-            |data| {
-                data.downcast_ref::<Entry<T>>()
-                    .with_context(|| {
-                        format!("can't downcast to {}", std::any::type_name::<Entry<T>>())
-                    })
-                    .unwrap()
-                    .into_iter()
-            },
+            |data| data.downcast_ref::<Entry<T>>().unwrap().into_iter(),
         )
     }
 
@@ -155,11 +146,12 @@ impl<'s, T: Send + Sync + 'static> IsQuery for &'s mut T {
     type ParQueryResult<'a> = rayon::slice::IterMut<'a, Entry<T>>;
     type QueryRow<'a> = &'a mut Entry<T>;
 
-    fn borrows() -> Vec<Borrow> {
-        vec![Borrow {
-            id: ResourceId::new::<ComponentColumn<T>>(),
-            is_exclusive: true,
-        }]
+    fn reads() -> Vec<TypeKey> {
+        vec![]
+    }
+
+    fn writes() -> Vec<TypeKey> {
+        vec![TypeKey::new::<ComponentColumn<T>>()]
     }
 
     #[inline]
@@ -266,8 +258,12 @@ impl<'s, T: Send + Sync + 'static> IsQuery for Maybe<&'s T> {
     >;
     type QueryRow<'a> = Option<&'a Entry<T>>;
 
-    fn borrows() -> Vec<Borrow> {
-        <&mut T as IsQuery>::borrows()
+    fn reads() -> Vec<TypeKey> {
+        <&T as IsQuery>::reads()
+    }
+
+    fn writes() -> Vec<TypeKey> {
+        <&T as IsQuery>::writes()
     }
 
     fn lock_columns<'a>(arch: &'a Archetype) -> Self::LockedColumns<'a> {
@@ -366,8 +362,12 @@ impl<'s, T: Send + Sync + 'static> IsQuery for Maybe<&'s mut T> {
     >;
     type QueryRow<'a> = Option<&'a mut Entry<T>>;
 
-    fn borrows() -> Vec<Borrow> {
-        <&mut T as IsQuery>::borrows()
+    fn reads() -> Vec<TypeKey> {
+        <&mut T as IsQuery>::reads()
+    }
+
+    fn writes() -> Vec<TypeKey> {
+        <&mut T as IsQuery>::writes()
     }
 
     fn lock_columns<'a>(arch: &'a Archetype) -> Self::LockedColumns<'a> {
@@ -457,8 +457,12 @@ impl<T: Send + Sync + 'static> IsQuery for Without<T> {
     type ParQueryResult<'a> = rayon::iter::RepeatN<()>;
     type QueryRow<'a> = ();
 
-    fn borrows() -> Vec<Borrow> {
-        <&T as IsQuery>::borrows()
+    fn reads() -> Vec<TypeKey> {
+        <&T as IsQuery>::reads()
+    }
+
+    fn writes() -> Vec<TypeKey> {
+        <&T as IsQuery>::writes()
     }
 
     fn lock_columns<'a>(arch: &'a Archetype) -> Self::LockedColumns<'a> {
@@ -511,8 +515,12 @@ where
     type ParQueryResult<'a> = A::ParQueryResult<'a>;
     type QueryRow<'a> = A::QueryRow<'a>;
 
-    fn borrows() -> Vec<Borrow> {
-        A::borrows()
+    fn reads() -> Vec<TypeKey> {
+        A::reads()
+    }
+
+    fn writes() -> Vec<TypeKey> {
+        A::writes()
     }
 
     #[inline]
@@ -559,9 +567,15 @@ where
     type ParQueryResult<'a> = rayon::iter::Zip<A::ParQueryResult<'a>, B::ParQueryResult<'a>>;
     type QueryRow<'a> = (A::QueryRow<'a>, B::QueryRow<'a>);
 
-    fn borrows() -> Vec<Borrow> {
-        let mut bs = A::borrows();
-        bs.extend(B::borrows());
+    fn reads() -> Vec<TypeKey> {
+        let mut bs = A::reads();
+        bs.extend(B::reads());
+        bs
+    }
+
+    fn writes() -> Vec<TypeKey> {
+        let mut bs = A::writes();
+        bs.extend(B::writes());
         bs
     }
 
@@ -634,7 +648,7 @@ impl Components {
     {
         let types = B::EntryBundle::ordered_types().unwrap();
         let archetype_index;
-        let mut arch;
+        let arch;
         if let Some((i, a)) = self.get_archetype_mut(&types) {
             archetype_index = i;
             arch = a;
@@ -655,7 +669,6 @@ impl Components {
             );
         }
         arch.index_lookup = index_lookup.clone();
-        drop(arch);
 
         if max_id >= self.entity_lookup.len() {
             self.entity_lookup.resize_with(max_id + 1, Default::default);
@@ -755,7 +768,6 @@ where
 ///
 /// ## Creating queries
 /// Some functions query immidiately and return [`QueryGuard`]:
-/// * [`World::query`](crate::World::query)
 /// * [`Components::query`]
 /// * [`Entity::visit`](crate::Entity::visit)
 ///
@@ -763,52 +775,54 @@ where
 /// ```
 /// # use apecs::*;
 /// # let mut world = World::default();
-/// let mut query = world.query::<(&f32, &String)>();
+/// let mut query = world
+///     .get_components_mut()
+///     .query::<(&f32, &String)>();
 /// for (f32, string) in query.iter_mut() {
 ///     //...
 /// }
 /// ```
 ///
 /// ### System data queries
-/// `Query` implements [`CanFetch`], which allows you to use queries
+/// `Query` implements [`Edges`], which allows you to use queries
 /// as fields inside system data structs:
 ///
 /// ```
 /// # use apecs::*;
-/// #[derive(CanFetch)]
+/// #[derive(Edges)]
 /// struct MySystemData {
-///     counter: Write<u32>,
+///     counter: ViewMut<u32>,
 ///     // we use &'static to avoid introducing a lifetime
 ///     q_f32_and_string: Query<(&'static f32, &'static String)>,
 /// }
 /// ```
 ///
-/// Which means queries may be [`fetch`](crate::World::fetch)ed from the world,
-/// [`visit`](crate::Facade::visit)ed from a facade or used as the input to a
-/// system:
+/// Which means queries may be [`visit`](crate::World::visit)ed from outside the world,
+/// or used as the input to a system:
 /// ```
-/// # use apecs::*;
-/// #
-/// #[derive(CanFetch)]
+/// use apecs::*;
+///
+/// #[derive(Edges)]
 /// struct MySystemData {
-///     tracker: Write<u64>,
-///     // we can use Mut and Ref which are aliases for &'static mut and &'static
+///     tracker: ViewMut<u64>,
+///     // We can use Mut and Ref which are aliases for &'static mut and &'static.
 ///     q_f32_and_string: Query<(Mut<f32>, Ref<String>)>,
 /// }
-/// let mut world = World::default();
-/// world
-///     .with_system("query_example", |mut data: MySystemData| {
-///         for (f32, string) in data.q_f32_and_string.query().iter_mut() {
-///             if f32.was_modified_since(*data.tracker) {
-///                 **f32 += 1.0;
-///                 println!("set entity {} = {}", f32.id(), **f32);
-///             }
+///
+/// fn my_system(mut data: MySystemData) -> Result<(), GraphError> {
+///     for (f32, string) in data.q_f32_and_string.query().iter_mut() {
+///         if f32.was_modified_since(*data.tracker) {
+///             **f32 += 1.0;
+///             println!("set entity {} = {}", f32.id(), **f32);
 ///         }
-///         *data.tracker = apecs::current_iteration();
-///         ok()
-///     })
-///     .unwrap();
-/// world.tick();
+///     }
+///     *data.tracker = apecs::current_iteration();
+///     ok()
+/// }
+///
+/// let mut world = World::default();
+/// world.add_subgraph(graph!(my_system));
+/// world.tick().unwrap();
 /// ```
 ///
 /// ## Iterating queries
@@ -821,36 +835,36 @@ where
 /// struct Velocity(pub f32);
 /// struct Acceleration(pub f32);
 ///
+/// fn create(mut entities: ViewMut<Entities>) -> Result<(), GraphError> {
+///     for i in 0..100 {
+///         entities.create().insert_bundle((
+///             Position(0.0),
+///             Velocity(0.0),
+///             Acceleration(i as f32),
+///         ));
+///     }
+///     
+///     /// This system ends after one tick
+///     end()
+/// }
+///
+/// fn accelerate(q_accelerate: Query<(&mut Velocity, &Acceleration)>) -> Result<(), GraphError> {
+///     for (v, a) in q_accelerate.query().iter_mut() {
+///         v.0 += a.0;
+///     }
+///     ok()
+/// }
+///
+/// fn position(q_move: Query<(&mut Position, &Velocity)>) -> Result<(), GraphError> {
+///     for (p, v) in q_move.query().iter_mut() {
+///         p.0 += v.0;
+///     }
+///     ok()
+/// }
+///
 /// let mut world = World::default();
-/// world
-///     .with_system("create", |mut entities: Write<Entities>| {
-///         for i in 0..100 {
-///             entities.create().insert_bundle((
-///                 Position(0.0),
-///                 Velocity(0.0),
-///                 Acceleration(i as f32),
-///             ));
-///         }
-///         end()
-///     })
-///     .unwrap()
-///     .with_system(
-///         "accelerate",
-///         |q_accelerate: Query<(&mut Velocity, &Acceleration)>| {
-///             for (v, a) in q_accelerate.query().iter_mut() {
-///                 v.0 += a.0;
-///             }
-///             ok()
-///         },
-///     )
-///     .unwrap()
-///     .with_system("move", |q_move: Query<(&mut Position, &Velocity)>| {
-///         for (p, v) in q_move.query().iter_mut() {
-///             p.0 += v.0;
-///         }
-///         ok()
-///     })
-///     .unwrap();
+/// world.add_subgraph(graph!(create, accelerate, position));
+/// world.tick().unwrap();
 /// ```
 pub struct Query<T>(
     Box<dyn Deref<Target = Components> + Send + Sync + 'static>,
@@ -859,18 +873,28 @@ pub struct Query<T>(
 where
     T: IsQuery + ?Sized;
 
-impl<T> CanFetch for Query<T>
+impl<T> Edges for Query<T>
 where
     T: IsQuery + Send + Sync + ?Sized,
 {
-    fn borrows() -> Vec<Borrow> {
-        let mut bs = <T as IsQuery>::borrows();
-        bs.extend(Read::<Components>::borrows());
+    fn reads() -> Vec<TypeKey> {
+        let mut bs = <T as IsQuery>::reads();
+        bs.extend(View::<Components>::reads());
         bs
     }
 
-    fn construct(loan_mngr: &mut LoanManager) -> anyhow::Result<Self> {
-        let all = Read::<Components>::construct(loan_mngr)?;
+    fn writes() -> Vec<TypeKey> {
+        let mut bs = <T as IsQuery>::writes();
+        bs.extend(View::<Components>::writes());
+        bs
+    }
+
+    fn moves() -> Vec<TypeKey> {
+        vec![]
+    }
+
+    fn construct(loan_mngr: &mut TypeMap) -> Result<Self, GraphError> {
+        let all: View<Components> = View::construct(loan_mngr)?;
         Ok(Query(Box::new(all), PhantomData))
     }
 }

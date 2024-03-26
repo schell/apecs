@@ -22,11 +22,13 @@ use super::bundle::*;
 /// reference to the component value through [`Entry::value`] or
 /// [`Entry::value_mut`].
 ///
-/// ```
+/// ```rust
 /// # use apecs::*;
 /// let mut world = World::default();
-/// let e = world.entity_with_bundle((123, "123", 123.0));
-/// let mut query = world.query::<(&mut i32, &f64)>();
+/// let e = world.get_entities_mut().create();
+/// let cs = world.get_components_mut();
+/// cs.insert_bundle(*e, (123, "123", 123.0));
+/// let mut query = cs.query::<(&mut i32, &f64)>();
 /// let (entry_i32, entry_f64): (&mut Entry<i32>, &Entry<f64>) = query.find_one(e.id()).unwrap();
 /// **entry_i32 = 321;
 /// assert_eq!(321 - 123, **entry_i32 - **entry_f64 as i32);
@@ -71,7 +73,7 @@ impl<T> Entry<T> {
     pub fn new(id: usize, value: T) -> Self {
         Entry {
             value,
-            changed: crate::system::current_iteration(),
+            changed: crate::world::current_iteration(),
             added: true,
             key: id,
         }
@@ -100,7 +102,7 @@ impl<T> Entry<T> {
 
     #[inline]
     fn mark_changed(&mut self) {
-        self.changed = crate::system::current_iteration();
+        self.changed = crate::world::current_iteration();
         self.added = false;
     }
 
@@ -161,15 +163,11 @@ pub struct Archetype {
 }
 
 impl Archetype {
-    /// Attempt to create a new `Archetype` from an `AnyBundle` of
-    /// `Entry<_>`.
-    pub fn try_from_any_entry_bundle(
-        may_entity_id: Option<usize>,
-        bundle: AnyBundle,
-    ) -> anyhow::Result<Self> {
+    /// Create a new `Archetype` from an `AnyBundle` of `Entry<_>`.
+    pub fn from_any_entry_bundle(may_entity_id: Option<usize>, bundle: AnyBundle) -> Self {
         let entry_types = bundle.0;
         let index_lookup = may_entity_id.map_or_else(|| vec![], |e| vec![e]);
-        Ok(Archetype {
+        Archetype {
             data: bundle
                 .1
                 .into_iter()
@@ -177,10 +175,10 @@ impl Archetype {
                 .collect(),
             index_lookup,
             entry_types,
-        })
+        }
     }
 
-    pub fn new<B: IsBundle>() -> anyhow::Result<Self> {
+    pub fn new<B: IsBundle>() -> Result<Self, BundleError> {
         let entry_bundle = <B::EntryBundle as IsBundle>::empty_any_bundle()?;
         Ok(Archetype {
             data: entry_bundle
@@ -224,7 +222,7 @@ impl Archetype {
     ///
     /// ## Errs
     /// Errs if the bundle contains duplicate types.
-    pub fn matches_bundle<B: IsBundle>(&self) -> anyhow::Result<bool> {
+    pub fn matches_bundle<B: IsBundle>(&self) -> Result<bool, BundleError> {
         let types = <B::EntryBundle as IsBundle>::ordered_types()?;
         Ok(self.entry_types == types)
     }

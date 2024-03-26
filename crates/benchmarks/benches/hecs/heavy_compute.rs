@@ -35,7 +35,7 @@ impl Benchmark {
             .iter_batched(64)
             .par_bridge()
             .for_each(|batch| {
-                for (_, (mut pos, mat)) in batch {
+                for (_, (pos, mat)) in batch {
                     for _ in 0..100 {
                         *mat = mat.invert().unwrap();
                     }
