@@ -50,8 +50,8 @@ use crate::{world::LazyOp, Entry, IsBundle, IsQuery, World};
 ///     world.get_facade_schedule().unwrap().run().unwrap();
 /// }
 /// ```
-/// Alternatively, if you have access to the [`Components`] resource you can
-/// attach components directly and immediately.
+/// Alternatively, if you have access to the [`Components`](crate::Components) resource
+/// you can attach components directly and immediately.
 pub struct Entity {
     id: usize,
     gen: usize,

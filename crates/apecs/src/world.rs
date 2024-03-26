@@ -49,7 +49,7 @@ pub enum Parallelism {
 }
 
 // Only used internally and purposefully kept **out** of the graph, so that
-// it won't hang up `World::run_loop`, which depends on checking to see if
+// it won't hang up `World::run`, which depends on checking to see if
 // there are any systems in the graph (if not, it can exit).
 #[derive(Edges)]
 #[apecs(crate = crate)]
@@ -93,7 +93,7 @@ impl EntityUpkeepSystem {
 /// The `World` holds all resources, entities, components and systems.
 ///
 /// Most applications will create and configure a `World` in their main
-/// function and call [`World::run_loop`] or [`World::tick`] or [`World::tock`]
+/// function and call [`World::run`] or [`World::tick`] or [`World::tock`]
 /// to run all systems.
 ///
 /// How to run async futures is up to you, but those futures can interact with
@@ -206,9 +206,9 @@ impl EntityUpkeepSystem {
 /// ```
 ///
 /// ## Where to look next 📚
-/// * [`Entities`] for info on creating and deleting [`Entity`]s
+/// * [`Entities`] for info on creating and deleting [`Entity`](crate::Entity)s
 /// * [`Components`] for info on creating, updating and deleting components
-/// * [`Entry`] for info on tracking changes to individual components
+/// * [`Entry`](crate::Entry) for info on tracking changes to individual components
 /// * [`Query`](crate::Query) for info on querying bundles of components
 /// * [`Facade`] for info on interacting with the `World` from a future
 ///   operations together into an easy-to-integrate package
@@ -463,7 +463,7 @@ impl World {
     /// ## Note
     /// This does not send out resources to the [`Facade`]. For async support it
     /// is recommended you use [`World::run`] to progress the world's
-    /// systems, followed by [`World::get_facade_schedule`] and [`RequestSchedule::tick`].
+    /// systems, followed by [`World::get_facade_schedule`] and [`FacadeSchedule::tick`].
     ///
     /// ```rust, no_run
     /// use apecs::{World, FacadeSchedule};
@@ -472,14 +472,14 @@ impl World {
     /// //...populate the world
     ///
     /// // run systems until the facade makes a request for resources
-    /// world.run_loop().unwrap();
+    /// world.run().unwrap();
     ///
     /// // answer requests for world resources from external futures
     /// // until all requests are met
     /// let mut facade_schedule = world.get_facade_schedule().unwrap();
     /// facade_schedule.run().unwrap();
     /// ```
-    pub fn run_loop(&mut self) -> Result<&mut Self, GraphError> {
+    pub fn run(&mut self) -> Result<&mut Self, GraphError> {
         loop {
             self.tick()?;
             if self.has_facade_requests() || self.graph.node_len() == 0 {

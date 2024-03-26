@@ -98,7 +98,7 @@ impl Facade {
 }
 
 /// A fulfillment schedule of requests for world resources,
-/// coming from all the [`World`]'s [`Facade`]s.
+/// coming from all the [`World`](crate::World)'s [`Facade`]s.
 pub struct FacadeSchedule<'a> {
     pub(crate) batches: moongraph::Batches<'a>,
 }
@@ -130,8 +130,8 @@ impl<'a> FacadeSchedule<'a> {
         }
     }
 
-    /// Run the schedule by calling [`Facade::tick`] in a loop until all requests are fulfilled and
-    /// system resources are unified.
+    /// Run the schedule by calling [`FacadeSchedule::tick`] in a loop until all
+    /// requests are fulfilled and system resources are unified.
     pub fn run(&mut self) -> Result<(), GraphError> {
         while self.tick()? {}
         Ok(())

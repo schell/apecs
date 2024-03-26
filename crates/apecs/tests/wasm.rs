@@ -45,7 +45,7 @@ fn can_run() {
     });
 
     while world.facade_count() > 1 {
-        world.run_loop().unwrap();
+        world.run().unwrap();
     }
 
     println!("done!");

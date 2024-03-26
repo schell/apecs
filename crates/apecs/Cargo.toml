@@ -1,6 +1,6 @@
 [package]
 name = "apecs"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 keywords = ["gamedev", "ecs", "async"]
@@ -24,9 +24,9 @@ bench = false
 
 [dependencies]
 any_vec = "0.10"
-apecs-derive = { version = "0.2.3", path = "../apecs-derive" }
+apecs-derive = { version = "0.3.0", path = "../apecs-derive" }
 async-channel = "1.6"
-moongraph = { version = "0.4", path = "../../../moongraph/crates/moongraph", default-features = false, features = ["parallel"] }
+moongraph = { version = "0.4", default-features = false, features = ["parallel"] }
 itertools = "0.10"
 log = "0.4"
 parking_lot = "0.12"

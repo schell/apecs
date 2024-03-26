@@ -768,7 +768,6 @@ where
 ///
 /// ## Creating queries
 /// Some functions query immidiately and return [`QueryGuard`]:
-/// * [`World::query`](crate::World::query)
 /// * [`Components::query`]
 /// * [`Entity::visit`](crate::Entity::visit)
 ///
@@ -785,7 +784,7 @@ where
 /// ```
 ///
 /// ### System data queries
-/// `Query` implements [`CanFetch`], which allows you to use queries
+/// `Query` implements [`Edges`], which allows you to use queries
 /// as fields inside system data structs:
 ///
 /// ```

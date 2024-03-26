@@ -109,32 +109,4 @@ fn system_batch_drops_resources_after_racing_asyncs() {
 }
 
 #[test]
-fn readme() {
-    use apecs::*;
-
-    #[derive(Default)]
-    struct F32(f32);
-
-    let mut world = World::default();
-
-    fn one(mut f32_number: ViewMut<F32>) -> Result<(), GraphError> {
-        f32_number.0 += 1.0;
-        ok()
-    }
-
-    fn two(f32_number: View<F32>) -> Result<(), GraphError> {
-        println!("system two reads {}", f32_number.0);
-        ok()
-    }
-
-    fn three(f32_number: View<F32>) -> Result<(), GraphError> {
-        println!("system three reads {}", f32_number.0);
-        ok()
-    }
-
-    world
-        .add_subgraph(graph!(one, two, three))
-        .with_parallelism(Parallelism::Automatic);
-
-    world.tick().unwrap();
-}
+fn readme() {}

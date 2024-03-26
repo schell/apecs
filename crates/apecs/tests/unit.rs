@@ -98,7 +98,7 @@ fn async_run_and_return_resources() {
     world.add_subgraph(graph!(maintain_map));
 
     // should tick once and yield for the facade request
-    world.run_loop().unwrap();
+    world.run().unwrap();
     rx.try_recv().unwrap();
     log::info!("received");
 
@@ -367,7 +367,7 @@ fn can_tick_facades() {
     // give some time to accumulate all the requests
     std::thread::sleep(std::time::Duration::from_millis(10));
 
-    world.run_loop().unwrap();
+    world.run().unwrap();
     {
         println!("first tick");
         let mut s = world.get_facade_schedule().unwrap();
@@ -376,7 +376,7 @@ fn can_tick_facades() {
         while !s.unify() {}
     }
 
-    world.run_loop().unwrap();
+    world.run().unwrap();
     {
         println!("second tick");
         let mut s = world.get_facade_schedule().unwrap();
@@ -385,7 +385,7 @@ fn can_tick_facades() {
         while !s.unify() {}
     }
 
-    world.run_loop().unwrap();
+    world.run().unwrap();
     {
         println!("third tick");
         let mut s = world.get_facade_schedule().unwrap();

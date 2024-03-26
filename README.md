@@ -67,7 +67,7 @@ Here is a quick table of features compared to other ECSs.
 
   let mut world = World::default();
   world.add_subgraph(graph!(demo_system));
-  world.run_loop().unwrap();
+  world.run().unwrap();
   assert_eq!(Number(3), *world.get_resource::<Number>().unwrap());
   ```
 
