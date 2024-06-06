@@ -16,7 +16,7 @@ pub use entity::*;
 pub use facade::{Facade, FacadeSchedule};
 pub use moongraph::{
     end, err, graph, ok, Edges, Graph, GraphError, Move, NodeResults, TypeKey, TypeMap, View,
-    ViewMut,
+    ViewMut, NoDefault,
 };
 pub use storage::{
     Components, Entry, IsBundle, IsQuery, LazyComponents, Maybe, MaybeMut, MaybeRef, Mut, Query,
