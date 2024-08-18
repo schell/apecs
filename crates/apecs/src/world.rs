@@ -299,6 +299,11 @@ impl World {
     /// into the world as a result resource, instead it is given back to the
     /// callsite.
     ///
+    /// ## `!Send` and `!Sync`
+    /// Using [`World::visit`] you can run `!Send` and `!Sync` "systems".
+    /// The visiting closure can reference any `!Send` or `!Sync` resources that are in scope.
+    /// Unfortunately these `!Send` or `!Sync` resources must be stored outside of the `World`.
+    ///
     /// ## Note
     /// By design, visiting the world with a type that uses `Move` in one of its
     /// fields will result in the wrapped type of that field being `move`d
