@@ -73,8 +73,8 @@ impl std::fmt::Debug for Entity {
 impl Clone for Entity {
     fn clone(&self) -> Self {
         Self {
-            id: self.id.clone(),
-            gen: self.gen.clone(),
+            id: self.id,
+            gen: self.gen,
             op_sender: self.op_sender.clone(),
             op_receivers: Default::default(),
         }
@@ -117,7 +117,7 @@ impl Entity {
         let op = LazyOp {
             op: Box::new(move |world: &mut World| {
                 let all = world.get_components_mut();
-                let _ = all.insert_bundle(id, bundle);
+                all.insert_bundle(id, bundle);
                 Ok(Arc::new(()) as Arc<dyn Any + Send + Sync>)
             }),
             tx,
@@ -148,7 +148,7 @@ impl Entity {
         self.op_receivers.push(rx);
     }
 
-    /// Lazily remove a component bundle to archetype storage.
+    /// Lazily remove a component bundle from archetype storage.
     ///
     /// This entity will have lost the associated component after the next tick.
     pub fn remove_component<T: Send + Sync + 'static>(&mut self) {

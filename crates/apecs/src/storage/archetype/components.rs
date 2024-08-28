@@ -187,11 +187,8 @@ impl Components {
     /// ```
     pub fn insert_bundle<B: IsBundle>(&mut self, entity_id: usize, bundle: B) {
         // determine if the entity already exists
-        if let Some((archetype_index, component_index)) = self
-            .entity_lookup
-            .get(entity_id)
-            .map(Option::as_ref)
-            .flatten()
+        if let Some((archetype_index, component_index)) =
+            self.entity_lookup.get(entity_id).and_then(Option::as_ref)
         {
             let mut entry_any_bundle: AnyBundle = bundle
                 .into_entry_bundle(entity_id)
@@ -233,11 +230,8 @@ impl Components {
         &self,
         entity_id: usize,
     ) -> Option<impl Deref<Target = T> + '_> {
-        let (archetype_index, component_index) = self
-            .entity_lookup
-            .get(entity_id)
-            .map(Option::as_ref)
-            .flatten()?;
+        let (archetype_index, component_index) =
+            self.entity_lookup.get(entity_id).and_then(Option::as_ref)?;
         let ty = TypeId::of::<Entry<T>>();
         let ty_index = self.archetypes[*archetype_index].index_of(&ty)?;
         let col = self.archetypes[*archetype_index].data[ty_index].read();
@@ -255,11 +249,8 @@ impl Components {
         &mut self,
         entity_id: usize,
     ) -> Option<impl DerefMut<Target = T> + '_> {
-        let (archetype_index, component_index) = self
-            .entity_lookup
-            .get(entity_id)
-            .map(Option::as_ref)
-            .flatten()?;
+        let (archetype_index, component_index) =
+            self.entity_lookup.get(entity_id).and_then(Option::as_ref)?;
         let ty = TypeId::of::<Entry<T>>();
         let ty_index = self.archetypes[*archetype_index].index_of(&ty)?;
         let col = self.archetypes[*archetype_index].data[ty_index].write();
@@ -291,11 +282,8 @@ impl Components {
         mut component: T,
     ) -> Option<T> {
         // determine if the entity already exists
-        if let Some((archetype_index, component_index)) = self
-            .entity_lookup
-            .get(entity_id)
-            .map(Option::as_ref)
-            .flatten()
+        if let Some((archetype_index, component_index)) =
+            self.entity_lookup.get(entity_id).and_then(Option::as_ref)
         {
             let ty = TypeId::of::<Entry<T>>();
             if let Some(ty_index) = self.archetypes[*archetype_index].index_of(&ty) {
@@ -368,11 +356,8 @@ impl Components {
     /// assert_eq!(None, dne);
     /// ```
     pub fn remove_component<T: Send + Sync + 'static>(&mut self, entity_id: usize) -> Option<T> {
-        let (archetype_index, component_index) = self
-            .entity_lookup
-            .get(entity_id)
-            .map(Option::as_ref)
-            .flatten()?;
+        let (archetype_index, component_index) =
+            self.entity_lookup.get(entity_id).and_then(Option::as_ref)?;
         let ty = TypeId::of::<Entry<T>>();
         if self.archetypes[*archetype_index].contains_entry_types(&[ty]) {
             let mut entry_bundle =
@@ -432,8 +417,7 @@ impl Components {
                             let (prev_archetype_index, _) = self
                                 .entity_lookup
                                 .get_mut(*entity_id)
-                                .map(Option::as_mut)
-                                .flatten()
+                                .and_then(Option::as_mut)
                                 .unwrap();
                             *prev_archetype_index = archetype_index;
                         }
