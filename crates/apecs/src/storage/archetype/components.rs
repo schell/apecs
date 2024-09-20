@@ -429,21 +429,23 @@ impl Components {
     }
 }
 
+type LazyComponentUpdate = Box<dyn FnOnce(&mut Components) + Send + Sync + 'static>;
+
 /// Add components lazily, at the time of your choosing.
 ///
 /// Used in instances where you can't apply changes to Components because of a
 /// borrow conflict (eg while iterating over a component query).
 #[derive(Default)]
-pub struct LazyComponents(Vec<Box<dyn FnOnce(&mut Components)>>);
+pub struct LazyComponents(Vec<LazyComponentUpdate>);
 
-impl Extend<Box<dyn FnOnce(&mut Components)>> for LazyComponents {
-    fn extend<T: IntoIterator<Item = Box<dyn FnOnce(&mut Components)>>>(&mut self, iter: T) {
+impl Extend<LazyComponentUpdate> for LazyComponents {
+    fn extend<T: IntoIterator<Item = LazyComponentUpdate>>(&mut self, iter: T) {
         self.0.extend(iter);
     }
 }
 
 impl IntoIterator for LazyComponents {
-    type Item = Box<dyn FnOnce(&mut Components)>;
+    type Item = LazyComponentUpdate;
 
     type IntoIter = std::vec::IntoIter<Self::Item>;
 
@@ -454,7 +456,11 @@ impl IntoIterator for LazyComponents {
 
 impl LazyComponents {
     /// Inserts the bundled components for the given entity.
-    pub fn insert_bundle<B: IsBundle + 'static>(&mut self, entity_id: usize, bundle: B) {
+    pub fn insert_bundle<B: IsBundle + Send + Sync + 'static>(
+        &mut self,
+        entity_id: usize,
+        bundle: B,
+    ) {
         self.0.push(Box::new(move |components| {
             components.insert_bundle(entity_id, bundle)
         }));
@@ -475,8 +481,7 @@ impl LazyComponents {
         }));
     }
 
-    /// Remove a single component from the given entity, returning it if the
-    /// entity had a component of that type.
+    /// Remove a single component from the given entity.
     pub fn remove_component<T: Send + Sync + 'static>(&mut self, entity_id: usize) {
         self.0.push(Box::new(move |components| {
             components.remove_component::<T>(entity_id);

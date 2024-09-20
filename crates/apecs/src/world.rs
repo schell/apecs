@@ -62,16 +62,14 @@ impl EntityUpkeepSystem {
     fn tick(mut self) -> Result<(), GraphError> {
         let dead_ids: Vec<usize> = {
             let mut dead_ids = vec![];
-            while let Some(id) = self.entities.delete_rx.try_recv().ok() {
+            while let Ok(id) = self.entities.delete_rx.try_recv() {
                 dead_ids.push(id);
             }
             dead_ids
         };
         if !dead_ids.is_empty() {
-            let ids_and_types: Vec<(usize, smallvec::SmallVec<[TypeId; 4]>)> = {
-                let ids_and_types = self.components.upkeep(&dead_ids);
-                ids_and_types
-            };
+            let ids_and_types: Vec<(usize, smallvec::SmallVec<[TypeId; 4]>)> =
+                { self.components.upkeep(&dead_ids) };
             self.entities
                 .recycle
                 .extend(ids_and_types.iter().map(|(id, _)| *id));
@@ -228,7 +226,10 @@ impl Default for World {
         let lazy_ops = async_channel::unbounded();
         let entities = Entities::new(lazy_ops.0.clone());
         let (tx, rx) = async_channel::unbounded();
-        let facade = Facade { request_tx: tx };
+        let facade = Facade {
+            request_tx: tx,
+            lazy_tx: lazy_ops.0.clone(),
+        };
         let mut world = Self {
             graph: Graph::default(),
             facade: facade.clone(),
@@ -266,6 +267,16 @@ impl World {
         self.graph.add_subgraph(graph);
         let _ = self.graph.reschedule_if_necessary();
         self
+    }
+
+    pub fn remove_node(&mut self, name: impl AsRef<str>) {
+        let _ = self.graph.remove_node(name);
+    }
+
+    pub fn remove_nodes<T: AsRef<str>>(&mut self, names: impl IntoIterator<Item = T>) {
+        for name in names.into_iter() {
+            self.remove_node(name);
+        }
     }
 
     pub fn interleave_subgraph(&mut self, graph: Graph) -> &mut Self {

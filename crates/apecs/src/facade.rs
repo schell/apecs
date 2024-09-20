@@ -1,5 +1,9 @@
 //! Access the [`World`]s resources from async futures.
+use std::{any::Any, sync::Arc};
+
 use moongraph::{Edges, Function, GraphError, Node, Resource, TypeKey, TypeMap};
+
+use crate::{world::LazyOp, World};
 
 pub(crate) struct Request {
     pub(crate) reads: Vec<TypeKey>,
@@ -45,6 +49,7 @@ pub struct Facade {
     // Unbounded. Sending a request from the facade will not yield the future.
     // In other words, it will not cause the async to stop at an await point.
     pub(crate) request_tx: async_channel::Sender<Request>,
+    pub(crate) lazy_tx: async_channel::Sender<LazyOp>,
 }
 
 impl Facade {
@@ -71,7 +76,7 @@ impl Facade {
                 writes,
                 moves,
                 prepare: |resources: &mut TypeMap| {
-                    log::trace!(
+                    log::debug!(
                         "request got resources - constructing {}",
                         std::any::type_name::<D>()
                     );
@@ -87,13 +92,40 @@ impl Facade {
         let box_d: Box<D> = rez.downcast().unwrap();
         let d = *box_d;
         let t = f(d);
-        log::trace!("request for {} done", std::any::type_name::<D>());
+        log::debug!("request for {} done", std::any::type_name::<D>());
         Ok(t)
     }
 
     /// Return the total number of facades.
     pub fn count(&self) -> usize {
         self.request_tx.sender_count()
+    }
+
+    pub async fn visit_world_mut<T>(
+        &mut self,
+        f: impl FnOnce(&mut World) -> T + Send + Sync + 'static,
+    ) -> Result<T, GraphError>
+    where
+        T: Any + Send + Sync,
+    {
+        let (tx, rx) = async_channel::bounded(1);
+        // UNWRAP: safe because this channel is unbounded
+        self.lazy_tx
+            .try_send(LazyOp {
+                op: Box::new(|world| {
+                    let t = f(world);
+                    let any_t = Arc::new(t);
+                    Ok(any_t)
+                }),
+                tx,
+            })
+            .unwrap();
+        let any_t: Arc<_> = rx.recv().await.map_err(GraphError::other)?;
+        // UNWRAP: safe because we know we will only receive the type we expect, as we packed it
+        // in the closure above.
+        let arc_t: Arc<T> = any_t.downcast().unwrap();
+        // UNWRAP: safe because we know nothing has cloned this arc
+        Ok(Arc::try_unwrap(arc_t).unwrap_or_else(|_| unreachable!("something cloned the arc")))
     }
 }
 
@@ -140,6 +172,10 @@ impl<'a> FacadeSchedule<'a> {
     /// Return the number of batches left in the schedule.
     pub fn len(&self) -> usize {
         self.batches.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     /// Attempt to unify resources, returning `true` if resources are unified, `false` if not.
